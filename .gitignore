@@ -1,0 +1,4 @@
+# Local output and client-specific lists
+servers.txt
+MolehillReports/
+*.log

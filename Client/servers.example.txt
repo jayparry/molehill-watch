@@ -1,0 +1,6 @@
+# Molehill Watch - covered instances for Export-WeeklyReports.ps1
+# Copy to servers.txt, one SQL Server instance per line. Lines starting with # are ignored.
+# List EVERY Availability Group replica so job and login parity can be compared.
+SQL01
+SQL02
+SQL03\SALES
