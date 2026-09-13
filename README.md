@@ -83,7 +83,7 @@ MolehillWatch\
 
 | Contract clause | Implemented by |
 |---|---|
-| Weekly report: backups and backup failures | Last full/diff/log per database vs thresholds; backup failures in the error log; backups on the same drive as data; AG backup-preference aware |
+| Weekly report: backups and backup failures | Last full/diff/log per database vs thresholds; backup failures in the error log; backups on the same drive as data; AG backup-preference aware. Identifies the backup tool (native, Azure Backup / Recovery Services vault, backup to URL, third-party, VM/VSS snapshot), flags log backups split across more than one tool and databases whose only fulls are VM snapshots. Vault-side health (recovery points, retention, vault alerts) isn't visible from SQL Server; missed vault backups surface through the overdue thresholds. |
 | Weekly report: error log issues | Hourly error-log capture, classified by editable patterns (corruption, dumps, storage latency, memory, AG, login failures…) with recommendations |
 | Weekly report: failed Agent jobs | Hourly capture of failed job history (survives msdb purges), Agent service status |
 | Weekly report: top 10 poorly performing queries | Hourly plan-cache snapshots, ranked by CPU used during the week |

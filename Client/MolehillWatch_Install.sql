@@ -412,6 +412,22 @@ BEGIN
                 ELSE CONVERT(nvarchar(20), @m / 1440) + N' days ago' END;
 END
 GO
+-- Which tool took a backup, from msdb backup history
+IF OBJECT_ID(N'dbo.fn_BackupTool') IS NULL EXEC (N'CREATE FUNCTION dbo.fn_BackupTool (@UserName nvarchar(128), @IsSnapshot bit, @DeviceType tinyint, @SoftwareName nvarchar(128)) RETURNS nvarchar(30) AS BEGIN RETURN NULL; END');
+GO
+ALTER FUNCTION dbo.fn_BackupTool (@UserName nvarchar(128), @IsSnapshot bit, @DeviceType tinyint, @SoftwareName nvarchar(128))
+RETURNS nvarchar(30)
+AS
+BEGIN
+    RETURN CASE WHEN @IsSnapshot = 1                                  THEN N'VM/VSS snapshot'
+                WHEN @UserName LIKE N'%AzureWLBackupPluginSvc%'        THEN N'Azure Backup'
+                WHEN @DeviceType = 9                                  THEN N'Backup to URL'
+                WHEN @DeviceType = 7                                  THEN N'Third-party (VDI)'
+                WHEN @SoftwareName NOT LIKE N'Microsoft SQL Server%'  THEN N'Third-party'
+                WHEN @DeviceType = 5                                  THEN N'Native (tape)'
+                ELSE N'Native' END;
+END
+GO
 
 /*=============================================================================
   5. CONFIGURATION PROCEDURE
@@ -855,7 +871,8 @@ BEGIN
 
     /*-------------------------------------------------------------- BACKUPS */
     CREATE TABLE #bk (DatabaseName sysname, RecoveryModel nvarchar(60), StateDesc nvarchar(60), IsAgDatabase bit, IsPreferred bit,
-                      LastFull datetime, LastDiff datetime, LastLog datetime, LastFullDevice nvarchar(260), Evaluate bit);
+                      LastFull datetime, LastDiff datetime, LastLog datetime, LastFullDevice nvarchar(260), Evaluate bit,
+                      FullTool nvarchar(30) NULL, LogTools nvarchar(200) NULL);
     INSERT #bk (DatabaseName, RecoveryModel, StateDesc, IsAgDatabase, IsPreferred, LastFull, LastDiff, LastLog, Evaluate)
     SELECT d.name, d.recovery_model_desc, d.state_desc,
            CASE WHEN d.replica_id IS NULL THEN 0 ELSE 1 END,
@@ -871,13 +888,27 @@ BEGIN
                GROUP BY database_name) b ON b.database_name COLLATE DATABASE_DEFAULT = d.name COLLATE DATABASE_DEFAULT
     WHERE d.database_id <> 2 AND d.source_database_id IS NULL;
 
-    UPDATE bk SET LastFullDevice = x.physical_device_name
+    UPDATE bk SET LastFullDevice = x.physical_device_name, FullTool = x.Tool
     FROM #bk bk
-    CROSS APPLY (SELECT TOP (1) mf.physical_device_name
+    CROSS APPLY (SELECT TOP (1) mf.physical_device_name, Tool = dbo.fn_BackupTool(b.user_name, b.is_snapshot, mf.device_type, ms.software_name)
                  FROM msdb.dbo.backupset b
                  JOIN msdb.dbo.backupmediafamily mf ON mf.media_set_id = b.media_set_id
+                 LEFT JOIN msdb.dbo.backupmediaset ms ON ms.media_set_id = b.media_set_id
                  WHERE b.database_name COLLATE DATABASE_DEFAULT = bk.DatabaseName COLLATE DATABASE_DEFAULT AND b.type = 'D'
                  ORDER BY b.backup_finish_date DESC) x;
+
+    -- every tool that took log backups during the period
+    SELECT DISTINCT DatabaseName = b.database_name COLLATE DATABASE_DEFAULT,
+           Tool = dbo.fn_BackupTool(b.user_name, b.is_snapshot, mf.device_type, ms.software_name)
+    INTO #logtools
+    FROM msdb.dbo.backupset b
+    OUTER APPLY (SELECT TOP (1) x.device_type FROM msdb.dbo.backupmediafamily x WHERE x.media_set_id = b.media_set_id) mf
+    LEFT JOIN msdb.dbo.backupmediaset ms ON ms.media_set_id = b.media_set_id
+    WHERE b.type = 'L' AND b.backup_finish_date >= @Start;
+
+    UPDATE bk SET LogTools = STUFF((SELECT N' + ' + lt.Tool FROM #logtools lt WHERE lt.DatabaseName = bk.DatabaseName COLLATE DATABASE_DEFAULT
+                                    ORDER BY lt.Tool FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 3, N'')
+    FROM #bk bk;
 
     UPDATE #bk SET Evaluate = 1 WHERE StateDesc = N'ONLINE' AND NOT (IsAgDatabase = 1 AND IsPreferred = 0);
 
@@ -922,6 +953,25 @@ BEGIN
         INSERT #F VALUES ('Backups', 'Warning', N'Backups stored on the same drive as database files',
                           N'Latest full backup written to a drive that also holds the database files: ' + @List + N'.',
                           N'A single disk failure could lose both the database and its backups. Copy backups to separate storage or off-server.');
+
+    SET @List = STUFF((SELECT N', ' + DatabaseName + N' (' + LogTools + N')' FROM #bk
+                       WHERE Evaluate = 1 AND LogTools LIKE N'% + %'
+                       ORDER BY DatabaseName FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N'');
+    IF @List IS NOT NULL
+        INSERT #F VALUES ('Backups', 'Critical', N'Log backups taken by more than one tool',
+                          N'Transaction log backups during the period came from different backup tools: ' + @List + N'.',
+                          N'The log chain is split between the tools, so neither holds a complete chain and point-in-time restores can fail. Use one tool for log backups (e.g. remove maintenance plan or Agent log backups for databases protected by Azure Backup). Ignore this if you deliberately switched tools during the week.');
+
+    SET @List = STUFF((SELECT N', ' + bk.DatabaseName FROM #bk bk
+                       WHERE bk.Evaluate = 1 AND bk.FullTool = N'VM/VSS snapshot'
+                         AND NOT EXISTS (SELECT 1 FROM msdb.dbo.backupset b
+                                         WHERE b.database_name COLLATE DATABASE_DEFAULT = bk.DatabaseName COLLATE DATABASE_DEFAULT
+                                           AND b.type IN ('D', 'I') AND b.is_snapshot = 0 AND b.backup_finish_date >= DATEADD(hour, -@FullMaxH, @Now))
+                       ORDER BY bk.DatabaseName FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N'');
+    IF @List IS NOT NULL
+        INSERT #F VALUES ('Backups', 'Warning', N'Full backups are VM/VSS snapshots only',
+                          N'The only recent full backups are volume snapshots (e.g. Azure VM backup, Veeam or other VSS-based tools): ' + @List + N'.',
+                          N'Snapshots restore the whole VM or volume to the moment of the snapshot. They do not give single-database or point-in-time restores and are not part of a log backup chain. If those are needed, add SQL-aware backups (Azure Backup for SQL Server, native or third-party).');
 
     SELECT @Cnt = COUNT(*) FROM #bk WHERE StateDesc = N'ONLINE' AND IsAgDatabase = 1 AND IsPreferred = 0;
     IF @Cnt > 0
@@ -1423,10 +1473,11 @@ td.key{font-weight:600;width:28%;background:#FAF9F9}
     SET @T = CAST((SELECT td = DatabaseName, '', td = RecoveryModel, '',
                           td = dbo.fn_Date(LastFull), '', td = dbo.fn_Date(LastDiff), '',
                           td = CASE WHEN RecoveryModel = N'SIMPLE' THEN N'n/a (SIMPLE)' ELSE dbo.fn_Date(LastLog) END, '',
+                          td = ISNULL(N'Full: ' + FullTool, N'') + ISNULL(CASE WHEN FullTool IS NOT NULL THEN N'; ' ELSE N'' END + N'Log: ' + LogTools, N''), '',
                           td = CASE WHEN StateDesc <> N'ONLINE' THEN StateDesc WHEN IsAgDatabase = 1 AND IsPreferred = 0 THEN N'Backed up on another AG replica' ELSE N'' END
                    FROM #bk ORDER BY CASE WHEN DatabaseName IN (N'master', N'model', N'msdb') THEN 0 ELSE 1 END, DatabaseName
                    FOR XML PATH('tr'), TYPE) AS nvarchar(max));
-    SET @H = @H + N'<h2>1. Backups</h2><table><tr><th>Database</th><th>Recovery</th><th>Last full</th><th>Last diff</th><th>Last log</th><th>Note</th></tr>' + ISNULL(@T, @Empty) + N'</table>';
+    SET @H = @H + N'<h2>1. Backups</h2><table><tr><th>Database</th><th>Recovery</th><th>Last full</th><th>Last diff</th><th>Last log</th><th>Backup tool</th><th>Note</th></tr>' + ISNULL(@T, @Empty) + N'</table>';
 
     -- Error log
     SET @T = CAST((SELECT [td/@class] = LOWER(Severity), td = Severity, '', td = Category, '',
