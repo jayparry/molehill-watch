@@ -2,3 +2,6 @@
 servers.txt
 MolehillReports/
 *.log
+# Downloaded patch reference data
+patch-reference.json
+PatchStatus_*.html

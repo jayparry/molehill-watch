@@ -86,10 +86,27 @@ MolehillWatch\
 │  ├─ MolehillAdmin_Install.sql
 │  ├─ Invoke-MolehillDaily.ps1              billing run + dashboard/invoice HTML
 │  └─ Example-NewClient.sql                 worked example / template
-└─ Docs\
-   ├─ Admin-Guide.md                        your day-to-day runbook
-   └─ Client-Onboarding-Guide.md            send to the client
+├─ Docs\
+│  ├─ Admin-Guide.md                        your day-to-day runbook
+│  └─ Client-Onboarding-Guide.md            send to the client
+└─ Tools\
+   └─ Get-PatchStatus.ps1                   standalone patch check for any server (no install)
 ```
+
+## Standalone patch check (`Tools\Get-PatchStatus.ps1`)
+
+A single script, separate from Molehill Watch, for a quick "how out of date is this?" check. It's useful for prospects, one-off health checks and locked-down environments. It installs nothing and only runs read-only queries.
+
+```powershell
+.\Get-PatchStatus.ps1                                             # the server it's run on
+.\Get-PatchStatus.ps1 -ComputerName SQL01, SQL02, 'SQL03\SALES'   # or -ServerList .\servers.txt
+```
+
+* **Finds SQL instances without WinRM:** first SQL Browser (UDP 1434), then the Windows service list (RPC), then the default instance. `SERVER\INSTANCE` or `SERVER,port` can be listed directly.
+* **Reads Windows' security update level** through SQL Server (`xp_regread`, needs sysadmin), otherwise Remote Registry, otherwise the local registry when run on the server itself.
+* **Compares** against the same Microsoft data as Molehill Watch, using the same rules, and writes an HTML report (`-CsvPath` for CSV too).
+* **Exit code** is 0 (OK), 1 (warnings) or 2 (critical).
+* **No internet on the server?** Run `.\Get-PatchStatus.ps1 -SaveReference patch-reference.json` somewhere with internet, and copy that file next to the script. It's picked up automatically.
 
 ## How the contract maps to the toolkit
 
