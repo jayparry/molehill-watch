@@ -35,6 +35,15 @@ cd Client
 .\Install-MolehillWatch.ps1 -SqlInstance SQL01,SQL02 -ClientName "Contoso Ltd" -MolehillLogin "CONTOSO\svc-molehill"
 ```
 
+**No domain (SQL authentication only)?** Connect with a SQL sysadmin login, and let the installer create a SQL login for you:
+
+```powershell
+.\Install-MolehillWatch.ps1 -SqlInstance 10.0.0.4,10.0.0.5 -ClientName "Contoso Ltd" -SqlCredential (Get-Credential) `
+    -MolehillLogin molehill_support -MolehillLoginPassword (Read-Host "Password for molehill_support" -AsSecureString)
+```
+
+The SQL login is created with password policy on and expiry off. Every instance after the first gets the **same SID**, so access survives an Availability Group failover. An existing login keeps its password. You get a warning if the SID doesn't match, or if the server only allows Windows authentication. Use `Export-WeeklyReports.ps1 -SqlCredential (Get-Credential)` to export with that login.
+
 That's the whole install. It creates the database, collectors, report builder and 4 Agent jobs. It grants read-only access to your login, runs a first collection and builds a baseline report. It is safe to re-run, and re-running upgrades an existing install in place.
 
 *Manual alternative:* open `MolehillWatch_Install.sql` in SSMS, press F5, then run the short CONFIGURE block at the bottom.

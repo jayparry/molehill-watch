@@ -1715,27 +1715,51 @@ GO
 IF OBJECT_ID(N'dbo.usp_GrantMolehillAccess', N'P') IS NULL EXEC (N'CREATE PROCEDURE dbo.usp_GrantMolehillAccess AS RETURN 0;');
 GO
 ALTER PROCEDURE dbo.usp_GrantMolehillAccess
-    @LoginName sysname   -- e.g. N'CONTOSO\svc-molehill' (Windows/AD account recommended)
+    @LoginName sysname,                -- N'CONTOSO\svc-molehill' (Windows) or N'molehill_support' (SQL login)
+    @Password  nvarchar(128) = NULL,   -- SQL logins only: creates the login if it does not exist
+    @Sid       varbinary(85) = NULL    -- SQL logins only: create with this SID (keep AG replicas identical)
 AS
 BEGIN
     SET NOCOUNT ON;
     DECLARE @q nvarchar(300) = QUOTENAME(@LoginName), @sql nvarchar(max), @user sysname;
     DECLARE @lit nvarchar(300) = N'N''' + REPLACE(@LoginName, N'''', N'''''') + N'''';
+    DECLARE @IsWindows bit = CASE WHEN CHARINDEX(N'\', @LoginName) > 0 THEN 1 ELSE 0 END;
 
     IF SUSER_ID(@LoginName) IS NULL
     BEGIN
-        IF CHARINDEX(N'\', @LoginName) > 0
+        IF @IsWindows = 1
         BEGIN
             SET @sql = N'CREATE LOGIN ' + @q + N' FROM WINDOWS WITH DEFAULT_DATABASE = [master];';
             EXEC (@sql);
             PRINT N'Created Windows login ' + @LoginName;
         END
+        ELSE IF @Password IS NOT NULL
+        BEGIN
+            SET @sql = N'CREATE LOGIN ' + @q + N' WITH PASSWORD = N''' + REPLACE(@Password, N'''', N'''''') + N''''
+                     + CASE WHEN @Sid IS NOT NULL THEN N', SID = ' + CONVERT(nvarchar(200), @Sid, 1) ELSE N'' END
+                     + N', DEFAULT_DATABASE = [master], CHECK_POLICY = ON, CHECK_EXPIRATION = OFF;';
+            EXEC (@sql);
+            PRINT N'Created SQL login ' + @LoginName + N' (password policy on, expiry off' + CASE WHEN @Sid IS NOT NULL THEN N', SID matched to first instance' ELSE N'' END + N').';
+        END
         ELSE
         BEGIN
-            RAISERROR(N'Login "%s" does not exist. Create it first (a Windows/AD account is recommended), then re-run.', 16, 1, @LoginName);
+            RAISERROR(N'SQL login "%s" does not exist. Create it first, or pass a password so the installer can create it.', 16, 1, @LoginName);
             RETURN;
         END
     END
+    ELSE IF @IsWindows = 0
+    BEGIN
+        IF @Password IS NOT NULL
+            PRINT N'SQL login ' + @LoginName + N' already exists - password left unchanged.';
+        IF @Sid IS NOT NULL AND SUSER_SID(@LoginName) <> @Sid
+            PRINT N'WARNING: SQL login ' + @LoginName + N' already exists with a different SID (' + CONVERT(nvarchar(200), SUSER_SID(@LoginName), 1)
+                + N') from the first instance (' + CONVERT(nvarchar(200), @Sid, 1) + N'). On Availability Group replicas, recreate it with SID = '
+                + CONVERT(nvarchar(200), @Sid, 1) + N' so access survives a failover.';
+    END
+
+    IF @IsWindows = 0 AND CONVERT(int, SERVERPROPERTY('IsIntegratedSecurityOnly')) = 1
+        PRINT N'WARNING: this instance only allows Windows authentication, so SQL login ' + @LoginName
+            + N' cannot sign in yet. Enable "SQL Server and Windows Authentication mode" (Server properties > Security) and restart the SQL Server service.';
 
     -- Server level: read-only visibility of health, configuration and performance data
     SET @sql = N'USE master; GRANT VIEW SERVER STATE TO ' + @q + N'; GRANT VIEW ANY DEFINITION TO ' + @q + N';';
@@ -1857,6 +1881,8 @@ EXEC MolehillWatch.dbo.usp_Configure
      @ReportEmailRecipients = N'';                   -- e.g. N'it@client.co.uk'
 
 EXEC MolehillWatch.dbo.usp_GrantMolehillAccess @LoginName = N'DOMAIN\svc-molehill';
+-- or, without a domain, a SQL login (created if missing; on AG replicas pass the first replica's SID):
+-- EXEC MolehillWatch.dbo.usp_GrantMolehillAccess @LoginName = N'molehill_support', @Password = N'<strong password>', @Sid = NULL;
 
 EXEC MolehillWatch.dbo.usp_Collect @Type = 'All';          -- first collection
 EXEC MolehillWatch.dbo.usp_BuildWeeklyReport;              -- baseline report

@@ -14,7 +14,7 @@ Please send or arrange the following. Onboarding and your first weekly report st
 - [ ] **An agreed channel for raising tickets.** The default is e-mail to jay@jayparry.co.uk.
 - [ ] **Remote access** to each covered SQL Server, e.g. VPN, Azure Bastion or another agreed method
 - [ ] **SSMS access** to each covered instance. A jump box with SQL Server Management Studio is preferred; SSMS on each server with RDP access is also fine.
-- [ ] **An account for Molehill Data Services.** A Windows/AD account is preferred, e.g. `YOURDOMAIN\svc-molehill`.
+- [ ] **An account for Molehill Data Services.** A Windows/AD account is preferred, e.g. `YOURDOMAIN\svc-molehill`. If your servers aren't joined to a domain or Entra ID, a SQL login is fine. The installer can create it for you (see section 3), but SQL Server must allow "SQL Server and Windows Authentication mode".
 - [ ] **A list of covered instances**, including every Availability Group replica, with the SQL Server version and edition of each
 - [ ] **Someone with sysadmin rights** for about 15 minutes to run the installer (or grant temporary rights for us to do it)
 - [ ] *(Optional)* a confidentiality agreement or Data Processing Agreement, if you would like one
@@ -57,6 +57,13 @@ The installer grants **read-only** visibility:
 * Read access to the MolehillWatch database
 
 To carry out fixes you've approved, we may need higher rights temporarily, for example to restart a job or change a setting. We'll always ask first.
+
+**If we use a SQL login** (servers not joined to a domain):
+
+* The installer creates it with your Windows password policy enforced. Password expiry is turned off so the weekly reports don't stop without warning.
+* It has the same SID on every server, so it keeps working after an Availability Group failover.
+* The password is typed in at install time and is never saved in any script or file. We keep it in our password manager.
+* If you'd rather create the login yourself, create it before we run the installer and we'll only grant the permissions above.
 
 ---
 

@@ -25,12 +25,19 @@
 .EXAMPLE
     # SQL authentication instead of Windows authentication
     .\Install-MolehillWatch.ps1 -SqlInstance 10.0.0.5 -ClientName "Contoso Ltd" -SqlCredential (Get-Credential)
+
+.EXAMPLE
+    # No domain: create a SQL login for Molehill Data Services on every instance.
+    # The password is prompted for securely; the login gets the same SID everywhere so AG replicas match.
+    .\Install-MolehillWatch.ps1 -SqlInstance 10.0.0.4,10.0.0.5 -ClientName "Contoso Ltd" -SqlCredential (Get-Credential) `
+        -MolehillLogin molehill_support -MolehillLoginPassword (Read-Host "Password for molehill_support" -AsSecureString)
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)] [string[]] $SqlInstance,
     [Parameter(Mandatory)] [string]   $ClientName,
     [string] $MolehillLogin,
+    [securestring] $MolehillLoginPassword,   # SQL logins only: create the login if missing
     [string] $ReportEmailProfile,
     [string] $ReportEmailRecipients,
     [string] $UnsupportedRiskAccepted,
@@ -43,6 +50,12 @@ $ErrorActionPreference = 'Stop'
 $scriptRoot  = $PSScriptRoot
 $installFile = Join-Path $scriptRoot 'MolehillWatch_Install.sql'
 if (-not (Test-Path $installFile)) { throw "Cannot find $installFile - keep this script next to MolehillWatch_Install.sql." }
+if ($MolehillLoginPassword -and -not $MolehillLogin) { throw '-MolehillLoginPassword needs -MolehillLogin.' }
+if ($MolehillLoginPassword -and $MolehillLogin -like '*\*') {
+    Write-Warning "-MolehillLoginPassword is ignored for Windows login $MolehillLogin."
+    $MolehillLoginPassword = $null
+}
+$molehillSid = $null   # SID of the SQL login on the first instance, reused on the rest
 
 function New-SqlConnection([string]$Instance, [string]$Database = 'master') {
     $b = New-Object System.Data.SqlClient.SqlConnectionStringBuilder
@@ -58,7 +71,11 @@ function New-SqlConnection([string]$Instance, [string]$Database = 'master') {
         $b['Integrated Security'] = $true
     }
     $conn = New-Object System.Data.SqlClient.SqlConnection $b.ConnectionString
-    $conn.add_InfoMessage({ param($s, $e) foreach ($m in $e.Errors) { if ($m.Message -and $m.Message -notmatch 'Null value is eliminated|Changed database context') { Write-Host "    $($m.Message)" -ForegroundColor DarkGray } } })
+    $conn.add_InfoMessage({ param($s, $e) foreach ($m in $e.Errors) {
+        if ($m.Message -and $m.Message -notmatch 'Null value is eliminated|Changed database context') {
+            $colour = if ($m.Message -like 'WARNING*') { 'Yellow' } else { 'DarkGray' }
+            Write-Host "    $($m.Message)" -ForegroundColor $colour
+        } } })
     $conn.Open()
     return $conn
 }
@@ -144,7 +161,27 @@ EXEC MolehillWatch.dbo.usp_Configure @ClientName = @ClientName, @ReportEmailProf
 
         Write-Host '  4/6 Molehill Data Services access'
         if ($MolehillLogin) {
-            try { Invoke-Sql $conn 'EXEC MolehillWatch.dbo.usp_GrantMolehillAccess @LoginName = @Login;' @{ Login = $MolehillLogin } }
+            try {
+                # Parameter values are set with plain if-blocks: an if-expression would unroll the SID byte[] into object[]
+                $grant = $conn.CreateCommand()
+                $grant.CommandText = 'EXEC MolehillWatch.dbo.usp_GrantMolehillAccess @LoginName = @Login, @Password = @Password, @Sid = @Sid;'
+                [void]$grant.Parameters.AddWithValue('@Login', $MolehillLogin)
+                $pwParam = $grant.Parameters.Add('@Password', [System.Data.SqlDbType]::NVarChar, 128)
+                $pwParam.Value = [DBNull]::Value
+                if ($MolehillLoginPassword) { $pwParam.Value = (New-Object System.Net.NetworkCredential('', $MolehillLoginPassword)).Password }
+                $sidParam = $grant.Parameters.Add('@Sid', [System.Data.SqlDbType]::VarBinary, 85)
+                $sidParam.Value = [DBNull]::Value
+                if ($null -ne $molehillSid) { $sidParam.Value = $molehillSid }
+                [void]$grant.ExecuteNonQuery()
+                $pwParam.Value = [DBNull]::Value
+                if ($null -eq $molehillSid -and $MolehillLogin -notlike '*\*') {
+                    $sidCmd = $conn.CreateCommand()
+                    $sidCmd.CommandText = 'SELECT SUSER_SID(@Login);'
+                    [void]$sidCmd.Parameters.AddWithValue('@Login', $MolehillLogin)
+                    $sid = $sidCmd.ExecuteScalar()
+                    if ($sid -is [byte[]]) { $molehillSid = [byte[]]$sid }
+                }
+            }
             catch { Write-Warning "    Access not granted: $(Get-SqlError $_)"; $warnings++ }
         } else {
             Write-Host '    Skipped (no -MolehillLogin given)' -ForegroundColor DarkGray
