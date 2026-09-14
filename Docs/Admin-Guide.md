@@ -104,9 +104,11 @@ The client's **Molehill Watch - Weekly Report** job builds the report at 06:30 e
    EXEC dbo.usp_WeeklyReport_Log @Client = N'Contoso Ltd', @InstanceName = N'SQL01', @OverallStatus = 'Amber', @CriticalCount = 0, @WarningCount = 2, @Notes = N'Recommended CHECKDB schedule';
    ```
 
-On the client server, `EXEC MolehillWatch.dbo.usp_ShowReport;` shows the latest findings as a grid.
+On the client server, `EXEC mw.usp_ShowReport;` shows the latest findings as a grid. Run it in the database Molehill Watch was installed into: `MolehillWatch`, or the client's DBA database.
 
-To rebuild a report on demand (needs sysadmin): `EXEC MolehillWatch.dbo.usp_BuildWeeklyReport;`.
+To rebuild a report on demand (needs sysadmin): `EXEC mw.usp_BuildWeeklyReport;`.
+
+If a client's Molehill Watch lives in their own DBA database, add `-Database <name>` to `Export-WeeklyReports.ps1` and `Update-PatchReference.ps1`.
 
 ---
 

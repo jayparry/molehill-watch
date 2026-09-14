@@ -31,7 +31,8 @@ param(
     [string] $OutputFolder,
     [switch] $BuildNew,
     [switch] $UpdatePatchReference,   # download Microsoft's latest build data and load it before exporting
-    [pscredential] $SqlCredential
+    [pscredential] $SqlCredential,
+    [string] $Database = 'MolehillWatch'   # the database Molehill Watch was installed into
 )
 
 $ErrorActionPreference = 'Stop'
@@ -46,7 +47,7 @@ New-Item -ItemType Directory -Force -Path $OutputFolder | Out-Null
 
 function Get-Data([string]$Instance, [string]$Sql) {
     $b = New-Object System.Data.SqlClient.SqlConnectionStringBuilder
-    $b['Data Source'] = $Instance; $b['Initial Catalog'] = 'MolehillWatch'; $b['TrustServerCertificate'] = $true
+    $b['Data Source'] = $Instance; $b['Initial Catalog'] = $Database; $b['TrustServerCertificate'] = $true
     $b['Application Name'] = 'Molehill Watch Export'; $b['Connect Timeout'] = 15
     if ($SqlCredential) { $b['User ID'] = $SqlCredential.UserName; $b['Password'] = $SqlCredential.GetNetworkCredential().Password }
     else { $b['Integrated Security'] = $true }
@@ -82,7 +83,7 @@ function Page([string]$Title, [string]$Body) {
 }
 
 if ($UpdatePatchReference) {
-    $refArgs = @{ SqlInstance = $SqlInstance }
+    $refArgs = @{ SqlInstance = $SqlInstance; Database = $Database }
     if ($SqlCredential) { $refArgs.SqlCredential = $SqlCredential }
     try { & (Join-Path $PSScriptRoot 'Update-PatchReference.ps1') @refArgs }
     catch { Write-Warning "Patch reference not refreshed: $($_.Exception.Message)" }
@@ -96,8 +97,8 @@ $patching = @{}
 foreach ($instance in $SqlInstance) {
     Write-Host "[$instance] " -NoNewline
     try {
-        $pre = if ($BuildNew) { 'EXEC dbo.usp_BuildWeeklyReport @ReturnResults = 0;' } else { '' }
-        $ds = Get-Data $instance "$pre SELECT TOP (1) ReportId, GeneratedAt, ClientName, InstanceName, OverallStatus, CriticalCount, WarningCount, InfoCount, Html FROM dbo.WeeklyReport ORDER BY ReportId DESC;"
+        $pre = if ($BuildNew) { 'EXEC mw.usp_BuildWeeklyReport @ReturnResults = 0;' } else { '' }
+        $ds = Get-Data $instance "$pre SELECT TOP (1) ReportId, GeneratedAt, ClientName, InstanceName, OverallStatus, CriticalCount, WarningCount, InfoCount, Html FROM mw.WeeklyReport ORDER BY ReportId DESC;"
         if ($ds.Tables[0].Rows.Count -eq 0) { throw 'No weekly report found yet. Run with -BuildNew or wait for the Monday job.' }
         $r = $ds.Tables[0].Rows[0]
         $file = "$(SafeName $r.ClientName)_$(SafeName $r.InstanceName)_$($r.GeneratedAt.ToString('yyyy-MM-dd')).html"
@@ -107,9 +108,9 @@ foreach ($instance in $SqlInstance) {
         Write-Host "$($r.OverallStatus) ($($r.CriticalCount) critical, $($r.WarningCount) warnings)" -ForegroundColor @{ Red = 'Red'; Amber = 'Yellow'; Green = 'Green' }[[string]$r.OverallStatus]
         if ($age -gt 8) { Write-Warning "  Latest report is $([int]$age) days old - check the Weekly Report job." }
 
-        $inv = Get-Data $instance 'EXEC dbo.usp_Inventory;'
+        $inv = Get-Data $instance 'EXEC mw.usp_Inventory;'
         $inventory[$instance] = $inv
-        try { $patching[$instance] = (Get-Data $instance 'EXEC dbo.usp_PatchStatus;').Tables[0] }
+        try { $patching[$instance] = (Get-Data $instance 'EXEC mw.usp_PatchStatus;').Tables[0] }
         catch { Write-Warning "  Patch status unavailable (re-run Install-MolehillWatch.ps1 to upgrade): $($_.Exception.Message)" }
     }
     catch {

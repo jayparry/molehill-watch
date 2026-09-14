@@ -713,8 +713,8 @@ BEGIN
         HasExtendedSecurityUpdates = @HasExtendedSecurityUpdates
     WHERE AgreementId = @AgreementId AND InstanceName = @InstanceName AND CoveredTo IS NULL;
     IF @@ROWCOUNT = 0 BEGIN RAISERROR(N'Covered instance "%s" not found.', 16, 1, @InstanceName); RETURN; END
-    PRINT N'Risk acceptance recorded. Also set it on the server so it shows in weekly reports:';
-    PRINT N'  EXEC MolehillWatch.dbo.usp_Configure @UnsupportedRiskAccepted = N''' + REPLACE(@AcceptedBy, N'''', N'''''') + N', '
+    PRINT N'Risk acceptance recorded. Also run this on the client server, in its Molehill Watch database, so it shows in weekly reports:';
+    PRINT N'  EXEC mw.usp_Configure @UnsupportedRiskAccepted = N''' + REPLACE(@AcceptedBy, N'''', N'''''') + N', '
           + CONVERT(nvarchar(11), ISNULL(@AcceptedDate, CAST(dbo.fn_UkNow() AS date)), 106) + N''';';
 END
 GO

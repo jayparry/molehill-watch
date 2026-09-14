@@ -5,22 +5,28 @@
  Molehill Data Services  -  jay@jayparry.co.uk  -  molehilldataservices.com
 -------------------------------------------------------------------------------
  Installs, on ONE SQL Server instance:
-   * the MolehillWatch database (settings, collected history, weekly reports)
+   * the "mw" schema (settings, collected history, weekly reports) in the
+     database you run it in: MolehillWatch by default, or the client's
+     existing DBA/admin database
    * collection procedures (backups, error log, Agent jobs, top queries,
      disk/database growth, Availability Groups, blocking)
    * the weekly status report builder (HTML, optional Database Mail)
    * four SQL Agent jobs (category "Molehill Watch")
 
- EASIEST:  run Install-MolehillWatch.ps1 (does all of this for you).
- MANUAL:   open in SSMS, connect as sysadmin, press F5, then run the
+ EASIEST:  run Install-MolehillWatch.ps1 (does all of this for you; use
+           -Database to install into an existing DBA database).
+ MANUAL:   open in SSMS, connect as sysadmin, SELECT THE TARGET DATABASE in the
+           database drop-down (see section 1), press F5, then run the
            "CONFIGURE" block at the very bottom of this file.
 
  Safe to re-run: objects are upgraded in place and collected data is kept.
  Requires SQL Server 2012 or later. Nothing leaves the server unless report
  e-mail is configured (and query text is excluded from e-mail by default).
 
- Availability Groups: install on EVERY replica. Do NOT add the MolehillWatch
- database to an Availability Group - each replica keeps its own history.
+ Availability Groups: install on EVERY replica. The target database must NOT
+ be in an Availability Group - each replica keeps its own history.
+ Everything is created in the "mw" schema, so it never clashes with existing
+ objects in a shared DBA database, and uninstalling removes only that.
 ===============================================================================
 */
 SET NOCOUNT ON;
@@ -32,50 +38,49 @@ IF ISNULL(IS_SRVROLEMEMBER('sysadmin'), 0) = 0
 GO
 
 /*=============================================================================
-  1. DATABASE
+  1. TARGET DATABASE
+  The script installs into the CURRENT database. For a manual install with no
+  existing DBA database, create the default one first and select it:
+
+      CREATE DATABASE MolehillWatch;
+      ALTER DATABASE MolehillWatch SET RECOVERY SIMPLE;
+      ALTER DATABASE MolehillWatch SET AUTO_CLOSE OFF;
 =============================================================================*/
-USE master;
+IF DB_NAME() IN (N'master', N'model', N'msdb', N'tempdb')
+    RAISERROR('Select the database to install into first (MolehillWatch, or the client''s existing DBA database). Installation stopped.', 20, 1) WITH LOG;
+IF EXISTS (SELECT 1 FROM sys.databases WHERE database_id = DB_ID() AND (replica_id IS NOT NULL OR is_read_only = 1))
+    RAISERROR('The target database is read-only or in an Availability Group. Use a local, writable database on each replica. Installation stopped.', 20, 1) WITH LOG;
+IF CONVERT(sysname, DATABASEPROPERTYEX(DB_NAME(), 'Collation')) <> CONVERT(sysname, SERVERPROPERTY('Collation'))
+    RAISERROR('The target database collation differs from the server collation, which would cause collation conflicts. Use a database with the server collation (e.g. the default MolehillWatch). Installation stopped.', 20, 1) WITH LOG;
 GO
-IF DB_ID(N'MolehillWatch') IS NULL
-BEGIN
-    CREATE DATABASE MolehillWatch;
-    PRINT 'Created database MolehillWatch.';
-END
-GO
-IF (SELECT recovery_model_desc FROM sys.databases WHERE name = N'MolehillWatch') <> N'SIMPLE'
-    ALTER DATABASE MolehillWatch SET RECOVERY SIMPLE;
-IF (SELECT is_auto_close_on FROM sys.databases WHERE name = N'MolehillWatch') = 1
-    ALTER DATABASE MolehillWatch SET AUTO_CLOSE OFF;
-DECLARE @owner nvarchar(300) = N'ALTER AUTHORIZATION ON DATABASE::MolehillWatch TO ' + QUOTENAME(SUSER_SNAME(0x01)) + N';';
-EXEC (@owner);
-GO
-USE MolehillWatch;
+IF SCHEMA_ID(N'mw') IS NULL
+    EXEC (N'CREATE SCHEMA mw AUTHORIZATION dbo;');
 GO
 
 /*=============================================================================
   2. TABLES
 =============================================================================*/
-IF OBJECT_ID(N'dbo.InstallHistory') IS NULL
-CREATE TABLE dbo.InstallHistory (
+IF OBJECT_ID(N'mw.InstallHistory') IS NULL
+CREATE TABLE mw.InstallHistory (
     InstallId    int IDENTITY(1,1) NOT NULL CONSTRAINT PK_InstallHistory PRIMARY KEY,
     Version      varchar(20)   NOT NULL,
     InstalledAt  datetime2(0)  NOT NULL CONSTRAINT DF_InstallHistory_At DEFAULT SYSDATETIME(),
     InstalledBy  nvarchar(128) NOT NULL CONSTRAINT DF_InstallHistory_By DEFAULT SUSER_SNAME());
 
-IF OBJECT_ID(N'dbo.Setting') IS NULL
-CREATE TABLE dbo.Setting (
+IF OBJECT_ID(N'mw.Setting') IS NULL
+CREATE TABLE mw.Setting (
     Name        varchar(100)   NOT NULL CONSTRAINT PK_Setting PRIMARY KEY,
     Value       nvarchar(4000) NULL,
     Description nvarchar(1000) NULL);
 
-IF OBJECT_ID(N'dbo.CollectorState') IS NULL
-CREATE TABLE dbo.CollectorState (
+IF OBJECT_ID(N'mw.CollectorState') IS NULL
+CREATE TABLE mw.CollectorState (
     StateName   varchar(100) NOT NULL CONSTRAINT PK_CollectorState PRIMARY KEY,
     DateValue   datetime     NULL,
     IntValue    bigint       NULL);
 
-IF OBJECT_ID(N'dbo.CollectionLog') IS NULL
-CREATE TABLE dbo.CollectionLog (
+IF OBJECT_ID(N'mw.CollectionLog') IS NULL
+CREATE TABLE mw.CollectionLog (
     LogId          bigint IDENTITY(1,1) NOT NULL CONSTRAINT PK_CollectionLog PRIMARY KEY,
     CollectionType varchar(20)    NOT NULL,
     StepName       varchar(100)   NOT NULL,
@@ -84,8 +89,8 @@ CREATE TABLE dbo.CollectionLog (
     Succeeded      bit            NULL,
     ErrorMessage   nvarchar(4000) NULL);
 
-IF OBJECT_ID(N'dbo.ProductLifecycle') IS NULL
-CREATE TABLE dbo.ProductLifecycle (
+IF OBJECT_ID(N'mw.ProductLifecycle') IS NULL
+CREATE TABLE mw.ProductLifecycle (
     ProductName   nvarchar(100) NOT NULL CONSTRAINT PK_ProductLifecycle PRIMARY KEY,
     Product       varchar(30)   NOT NULL,   -- 'SQL Server' | 'Windows Server'
     MajorVersion  int           NULL,       -- SQL Server major build number
@@ -93,8 +98,8 @@ CREATE TABLE dbo.ProductLifecycle (
     ExtendedEnd   date          NULL,
     Notes         nvarchar(400) NULL);
 
-IF OBJECT_ID(N'dbo.ErrorLogPattern') IS NULL
-CREATE TABLE dbo.ErrorLogPattern (
+IF OBJECT_ID(N'mw.ErrorLogPattern') IS NULL
+CREATE TABLE mw.ErrorLogPattern (
     PatternId      int IDENTITY(1,1) NOT NULL CONSTRAINT PK_ErrorLogPattern PRIMARY KEY,
     Pattern        nvarchar(400)  NOT NULL,
     IsExclusion    bit            NOT NULL,
@@ -104,9 +109,9 @@ CREATE TABLE dbo.ErrorLogPattern (
     Recommendation nvarchar(1000) NULL,
     IsEnabled      bit            NOT NULL CONSTRAINT DF_ErrorLogPattern_Enabled DEFAULT 1);
 
-IF OBJECT_ID(N'dbo.ErrorLogEntry') IS NULL
+IF OBJECT_ID(N'mw.ErrorLogEntry') IS NULL
 BEGIN
-    CREATE TABLE dbo.ErrorLogEntry (
+    CREATE TABLE mw.ErrorLogEntry (
         EntryId     bigint IDENTITY(1,1) NOT NULL CONSTRAINT PK_ErrorLogEntry PRIMARY KEY,
         LogDate     datetime       NOT NULL,
         ProcessInfo nvarchar(100)  NULL,
@@ -116,12 +121,12 @@ BEGIN
         Category    varchar(50)    NULL,
         Severity    varchar(10)    NULL,
         CapturedAt  datetime       NOT NULL CONSTRAINT DF_ErrorLogEntry_CapturedAt DEFAULT GETDATE());
-    CREATE UNIQUE INDEX UX_ErrorLogEntry_Dedupe ON dbo.ErrorLogEntry (LogDate, TextHash) WITH (IGNORE_DUP_KEY = ON);
+    CREATE UNIQUE INDEX UX_ErrorLogEntry_Dedupe ON mw.ErrorLogEntry (LogDate, TextHash) WITH (IGNORE_DUP_KEY = ON);
 END
 
-IF OBJECT_ID(N'dbo.JobFailure') IS NULL
+IF OBJECT_ID(N'mw.JobFailure') IS NULL
 BEGIN
-    CREATE TABLE dbo.JobFailure (
+    CREATE TABLE mw.JobFailure (
         JobHistoryId    int            NOT NULL CONSTRAINT PK_JobFailure PRIMARY KEY,  -- msdb instance_id
         JobName         sysname        NOT NULL,
         StepId          int            NOT NULL,
@@ -130,12 +135,12 @@ BEGIN
         DurationSeconds int            NULL,
         RunStatus       int            NOT NULL,  -- 0 failed, 3 cancelled
         Message         nvarchar(4000) NULL);
-    CREATE INDEX IX_JobFailure_RunDateTime ON dbo.JobFailure (RunDateTime);
+    CREATE INDEX IX_JobFailure_RunDateTime ON mw.JobFailure (RunDateTime);
 END
 
-IF OBJECT_ID(N'dbo.QuerySnapshot') IS NULL
+IF OBJECT_ID(N'mw.QuerySnapshot') IS NULL
 BEGIN
-    CREATE TABLE dbo.QuerySnapshot (
+    CREATE TABLE mw.QuerySnapshot (
         SnapshotTime       datetime   NOT NULL,
         QueryHash          binary(8)  NOT NULL,
         ExecutionCount     bigint     NOT NULL,
@@ -148,16 +153,16 @@ BEGIN
         CONSTRAINT PK_QuerySnapshot PRIMARY KEY (SnapshotTime, QueryHash));
 END
 
-IF OBJECT_ID(N'dbo.QueryText') IS NULL
-CREATE TABLE dbo.QueryText (
+IF OBJECT_ID(N'mw.QueryText') IS NULL
+CREATE TABLE mw.QueryText (
     QueryHash    binary(8)     NOT NULL CONSTRAINT PK_QueryText PRIMARY KEY,
     DatabaseName sysname       NULL,
     ObjectName   sysname       NULL,
     QueryText    nvarchar(max) NULL,
     FirstSeen    datetime      NOT NULL CONSTRAINT DF_QueryText_FirstSeen DEFAULT GETDATE());
 
-IF OBJECT_ID(N'dbo.DiskSnapshot') IS NULL
-CREATE TABLE dbo.DiskSnapshot (
+IF OBJECT_ID(N'mw.DiskSnapshot') IS NULL
+CREATE TABLE mw.DiskSnapshot (
     SnapshotTime      datetime      NOT NULL,
     VolumeMountPoint  nvarchar(260) NOT NULL,
     LogicalVolumeName nvarchar(512) NULL,
@@ -165,8 +170,8 @@ CREATE TABLE dbo.DiskSnapshot (
     FreeMB            bigint        NOT NULL,
     CONSTRAINT PK_DiskSnapshot PRIMARY KEY (SnapshotTime, VolumeMountPoint));
 
-IF OBJECT_ID(N'dbo.DatabaseFileSnapshot') IS NULL
-CREATE TABLE dbo.DatabaseFileSnapshot (
+IF OBJECT_ID(N'mw.DatabaseFileSnapshot') IS NULL
+CREATE TABLE mw.DatabaseFileSnapshot (
     SnapshotTime    datetime       NOT NULL,
     DatabaseName    sysname        NOT NULL,
     FileId          int            NOT NULL,
@@ -180,8 +185,8 @@ CREATE TABLE dbo.DatabaseFileSnapshot (
     MaxSizePages    int            NOT NULL,
     CONSTRAINT PK_DatabaseFileSnapshot PRIMARY KEY (SnapshotTime, DatabaseName, FileId));
 
-IF OBJECT_ID(N'dbo.AgDatabaseSample') IS NULL
-CREATE TABLE dbo.AgDatabaseSample (
+IF OBJECT_ID(N'mw.AgDatabaseSample') IS NULL
+CREATE TABLE mw.AgDatabaseSample (
     SampleTime          datetime      NOT NULL,
     AgName              sysname       NOT NULL,
     ReplicaServer       nvarchar(128) NOT NULL,
@@ -200,8 +205,8 @@ CREATE TABLE dbo.AgDatabaseSample (
     IsFailoverReady     bit           NULL,
     CONSTRAINT PK_AgDatabaseSample PRIMARY KEY (SampleTime, AgName, ReplicaServer, DatabaseName));
 
-IF OBJECT_ID(N'dbo.AgReplicaSample') IS NULL
-CREATE TABLE dbo.AgReplicaSample (
+IF OBJECT_ID(N'mw.AgReplicaSample') IS NULL
+CREATE TABLE mw.AgReplicaSample (
     SampleTime       datetime      NOT NULL,
     AgName           sysname       NOT NULL,
     ReplicaServer    nvarchar(128) NOT NULL,
@@ -212,9 +217,9 @@ CREATE TABLE dbo.AgReplicaSample (
     SyncHealth       nvarchar(60)  NULL,
     CONSTRAINT PK_AgReplicaSample PRIMARY KEY (SampleTime, AgName, ReplicaServer));
 
-IF OBJECT_ID(N'dbo.BlockingSample') IS NULL
+IF OBJECT_ID(N'mw.BlockingSample') IS NULL
 BEGIN
-    CREATE TABLE dbo.BlockingSample (
+    CREATE TABLE mw.BlockingSample (
         SampleId          bigint IDENTITY(1,1) NOT NULL CONSTRAINT PK_BlockingSample PRIMARY KEY,
         SampleTime        datetime       NOT NULL,
         SessionId         int            NOT NULL,
@@ -228,11 +233,11 @@ BEGIN
         ProgramName       nvarchar(128)  NULL,
         OpenTransactions  int            NULL,
         SqlText           nvarchar(4000) NULL);
-    CREATE INDEX IX_BlockingSample_SampleTime ON dbo.BlockingSample (SampleTime);
+    CREATE INDEX IX_BlockingSample_SampleTime ON mw.BlockingSample (SampleTime);
 END
 
-IF OBJECT_ID(N'dbo.WeeklyReport') IS NULL
-CREATE TABLE dbo.WeeklyReport (
+IF OBJECT_ID(N'mw.WeeklyReport') IS NULL
+CREATE TABLE mw.WeeklyReport (
     ReportId      int IDENTITY(1,1) NOT NULL CONSTRAINT PK_WeeklyReport PRIMARY KEY,
     GeneratedAt   datetime       NOT NULL,
     PeriodStart   datetime       NOT NULL,
@@ -247,10 +252,10 @@ CREATE TABLE dbo.WeeklyReport (
     EmailedAt     datetime       NULL,
     EmailError    nvarchar(2000) NULL);
 
-IF OBJECT_ID(N'dbo.ReportFinding') IS NULL
-CREATE TABLE dbo.ReportFinding (
+IF OBJECT_ID(N'mw.ReportFinding') IS NULL
+CREATE TABLE mw.ReportFinding (
     FindingId      int IDENTITY(1,1) NOT NULL CONSTRAINT PK_ReportFinding PRIMARY KEY,
-    ReportId       int            NOT NULL CONSTRAINT FK_ReportFinding_Report REFERENCES dbo.WeeklyReport (ReportId) ON DELETE CASCADE,
+    ReportId       int            NOT NULL CONSTRAINT FK_ReportFinding_Report REFERENCES mw.WeeklyReport (ReportId) ON DELETE CASCADE,
     Section        varchar(30)    NOT NULL,
     Severity       varchar(10)    NOT NULL,
     Item           nvarchar(400)  NOT NULL,
@@ -258,9 +263,9 @@ CREATE TABLE dbo.ReportFinding (
     Recommendation nvarchar(1000) NULL);
 
 -- Latest builds published by Microsoft, loaded by Update-PatchReference.ps1
-IF OBJECT_ID(N'dbo.PatchReference') IS NULL
+IF OBJECT_ID(N'mw.PatchReference') IS NULL
 BEGIN
-    CREATE TABLE dbo.PatchReference (
+    CREATE TABLE mw.PatchReference (
         ReferenceId int IDENTITY(1,1) NOT NULL CONSTRAINT PK_PatchReference PRIMARY KEY,
         Product     varchar(20)   NOT NULL,     -- 'SQL Server' | 'Windows Server'
         ProductName nvarchar(100) NOT NULL,     -- e.g. 'SQL Server 2022', 'Windows Server 2022'
@@ -275,12 +280,12 @@ BEGIN
         ReleaseDate date          NULL,
         Source      nvarchar(200) NULL,
         LoadedAt    datetime      NOT NULL CONSTRAINT DF_PatchReference_LoadedAt DEFAULT GETDATE());
-    CREATE INDEX IX_PatchReference_Lookup ON dbo.PatchReference (Product, Major, BuildNumber, Revision);
+    CREATE INDEX IX_PatchReference_Lookup ON mw.PatchReference (Product, Major, BuildNumber, Revision);
 END
 
 -- What is installed on this server (collected daily)
-IF OBJECT_ID(N'dbo.PatchLevel') IS NULL
-CREATE TABLE dbo.PatchLevel (
+IF OBJECT_ID(N'mw.PatchLevel') IS NULL
+CREATE TABLE mw.PatchLevel (
     CollectedAt        datetime      NOT NULL CONSTRAINT PK_PatchLevel PRIMARY KEY,
     OsProductName      nvarchar(200) NULL,
     OsInstallationType nvarchar(50)  NULL,
@@ -296,7 +301,7 @@ GO
   3. REFERENCE DATA
 =============================================================================*/
 -- Settings (existing values are never overwritten on re-install)
-INSERT dbo.Setting (Name, Value, Description)
+INSERT mw.Setting (Name, Value, Description)
 SELECT v.Name, v.Value, v.Description
 FROM (VALUES
     ('ClientName',                    N'',      N'Client organisation name shown on reports.'),
@@ -326,10 +331,10 @@ FROM (VALUES
     ('WindowsPatchGraceDays',         N'14',    N'Days after Patch Tuesday before a missing Windows security update becomes a Warning (Critical once a second month is missed).'),
     ('PatchReferenceMaxAgeDays',      N'40',    N'Warning when the patch reference data has not been refreshed for this many days.')
 ) v (Name, Value, Description)
-WHERE NOT EXISTS (SELECT 1 FROM dbo.Setting s WHERE s.Name = v.Name);
+WHERE NOT EXISTS (SELECT 1 FROM mw.Setting s WHERE s.Name = v.Name);
 
 -- Microsoft lifecycle dates. Verify at https://learn.microsoft.com/lifecycle and edit as needed.
-MERGE dbo.ProductLifecycle AS t
+MERGE mw.ProductLifecycle AS t
 USING (VALUES
     (N'SQL Server 2012',        'SQL Server',     11, '2017-07-11', '2022-07-12', NULL),
     (N'SQL Server 2014',        'SQL Server',     12, '2019-07-09', '2024-07-09', NULL),
@@ -352,7 +357,7 @@ WHEN NOT MATCHED THEN INSERT (ProductName, Product, MajorVersion, MainstreamEnd,
 
 -- Error log classification. First matching include pattern (lowest Priority) wins.
 -- Add your own rows; defaults are only inserted if missing.
-INSERT dbo.ErrorLogPattern (Pattern, IsExclusion, Priority, Category, Severity, Recommendation)
+INSERT mw.ErrorLogPattern (Pattern, IsExclusion, Priority, Category, Severity, Recommendation)
 SELECT v.Pattern, v.IsExclusion, v.Priority, v.Category, v.Severity, v.Recommendation
 FROM (VALUES
     (N'%found 0 errors and repaired 0 errors%', 1, 0, NULL, NULL, NULL),
@@ -395,42 +400,42 @@ FROM (VALUES
     (N'%unable to%',              0, 120, 'Other failures', 'Info', N'Usually informational unless recurring.'),
     (N'%timed out%',              0, 120, 'Other failures', 'Info', N'Usually informational unless recurring.')
 ) v (Pattern, IsExclusion, Priority, Category, Severity, Recommendation)
-WHERE NOT EXISTS (SELECT 1 FROM dbo.ErrorLogPattern p WHERE p.Pattern = v.Pattern AND p.IsExclusion = v.IsExclusion);
+WHERE NOT EXISTS (SELECT 1 FROM mw.ErrorLogPattern p WHERE p.Pattern = v.Pattern AND p.IsExclusion = v.IsExclusion);
 GO
 
 /*=============================================================================
   4. HELPER FUNCTIONS
 =============================================================================*/
-IF OBJECT_ID(N'dbo.fn_Setting') IS NULL EXEC (N'CREATE FUNCTION dbo.fn_Setting (@Name varchar(100)) RETURNS nvarchar(4000) AS BEGIN RETURN NULL; END');
+IF OBJECT_ID(N'mw.fn_Setting') IS NULL EXEC (N'CREATE FUNCTION mw.fn_Setting (@Name varchar(100)) RETURNS nvarchar(4000) AS BEGIN RETURN NULL; END');
 GO
-ALTER FUNCTION dbo.fn_Setting (@Name varchar(100))
+ALTER FUNCTION mw.fn_Setting (@Name varchar(100))
 RETURNS nvarchar(4000)
 AS
 BEGIN
-    RETURN (SELECT Value FROM dbo.Setting WHERE Name = @Name);
+    RETURN (SELECT Value FROM mw.Setting WHERE Name = @Name);
 END
 GO
-IF OBJECT_ID(N'dbo.fn_SettingInt') IS NULL EXEC (N'CREATE FUNCTION dbo.fn_SettingInt (@Name varchar(100), @Default bigint) RETURNS bigint AS BEGIN RETURN NULL; END');
+IF OBJECT_ID(N'mw.fn_SettingInt') IS NULL EXEC (N'CREATE FUNCTION mw.fn_SettingInt (@Name varchar(100), @Default bigint) RETURNS bigint AS BEGIN RETURN NULL; END');
 GO
-ALTER FUNCTION dbo.fn_SettingInt (@Name varchar(100), @Default bigint)
+ALTER FUNCTION mw.fn_SettingInt (@Name varchar(100), @Default bigint)
 RETURNS bigint
 AS
 BEGIN
-    RETURN ISNULL((SELECT TRY_CONVERT(bigint, Value) FROM dbo.Setting WHERE Name = @Name), @Default);
+    RETURN ISNULL((SELECT TRY_CONVERT(bigint, Value) FROM mw.Setting WHERE Name = @Name), @Default);
 END
 GO
-IF OBJECT_ID(N'dbo.fn_Html') IS NULL EXEC (N'CREATE FUNCTION dbo.fn_Html (@s nvarchar(max)) RETURNS nvarchar(max) AS BEGIN RETURN NULL; END');
+IF OBJECT_ID(N'mw.fn_Html') IS NULL EXEC (N'CREATE FUNCTION mw.fn_Html (@s nvarchar(max)) RETURNS nvarchar(max) AS BEGIN RETURN NULL; END');
 GO
-ALTER FUNCTION dbo.fn_Html (@s nvarchar(max))
+ALTER FUNCTION mw.fn_Html (@s nvarchar(max))
 RETURNS nvarchar(max)
 AS
 BEGIN
     RETURN REPLACE(REPLACE(REPLACE(REPLACE(ISNULL(@s, N''), N'&', N'&amp;'), N'<', N'&lt;'), N'>', N'&gt;'), N'"', N'&quot;');
 END
 GO
-IF OBJECT_ID(N'dbo.fn_Date') IS NULL EXEC (N'CREATE FUNCTION dbo.fn_Date (@d datetime) RETURNS nvarchar(30) AS BEGIN RETURN NULL; END');
+IF OBJECT_ID(N'mw.fn_Date') IS NULL EXEC (N'CREATE FUNCTION mw.fn_Date (@d datetime) RETURNS nvarchar(30) AS BEGIN RETURN NULL; END');
 GO
-ALTER FUNCTION dbo.fn_Date (@d datetime)
+ALTER FUNCTION mw.fn_Date (@d datetime)
 RETURNS nvarchar(30)
 AS
 BEGIN
@@ -438,9 +443,9 @@ BEGIN
                 ELSE CONVERT(nvarchar(11), @d, 106) + N' ' + CONVERT(nvarchar(5), @d, 108) END;
 END
 GO
-IF OBJECT_ID(N'dbo.fn_Age') IS NULL EXEC (N'CREATE FUNCTION dbo.fn_Age (@From datetime, @To datetime) RETURNS nvarchar(30) AS BEGIN RETURN NULL; END');
+IF OBJECT_ID(N'mw.fn_Age') IS NULL EXEC (N'CREATE FUNCTION mw.fn_Age (@From datetime, @To datetime) RETURNS nvarchar(30) AS BEGIN RETURN NULL; END');
 GO
-ALTER FUNCTION dbo.fn_Age (@From datetime, @To datetime)
+ALTER FUNCTION mw.fn_Age (@From datetime, @To datetime)
 RETURNS nvarchar(30)
 AS
 BEGIN
@@ -452,9 +457,9 @@ BEGIN
 END
 GO
 -- Which tool took a backup, from msdb backup history
-IF OBJECT_ID(N'dbo.fn_BackupTool') IS NULL EXEC (N'CREATE FUNCTION dbo.fn_BackupTool (@UserName nvarchar(128), @IsSnapshot bit, @DeviceType tinyint, @SoftwareName nvarchar(128)) RETURNS nvarchar(30) AS BEGIN RETURN NULL; END');
+IF OBJECT_ID(N'mw.fn_BackupTool') IS NULL EXEC (N'CREATE FUNCTION mw.fn_BackupTool (@UserName nvarchar(128), @IsSnapshot bit, @DeviceType tinyint, @SoftwareName nvarchar(128)) RETURNS nvarchar(30) AS BEGIN RETURN NULL; END');
 GO
-ALTER FUNCTION dbo.fn_BackupTool (@UserName nvarchar(128), @IsSnapshot bit, @DeviceType tinyint, @SoftwareName nvarchar(128))
+ALTER FUNCTION mw.fn_BackupTool (@UserName nvarchar(128), @IsSnapshot bit, @DeviceType tinyint, @SoftwareName nvarchar(128))
 RETURNS nvarchar(30)
 AS
 BEGIN
@@ -471,9 +476,9 @@ GO
 /*=============================================================================
   5. CONFIGURATION PROCEDURE
 =============================================================================*/
-IF OBJECT_ID(N'dbo.usp_Configure', N'P') IS NULL EXEC (N'CREATE PROCEDURE dbo.usp_Configure AS RETURN 0;');
+IF OBJECT_ID(N'mw.usp_Configure', N'P') IS NULL EXEC (N'CREATE PROCEDURE mw.usp_Configure AS RETURN 0;');
 GO
-ALTER PROCEDURE dbo.usp_Configure
+ALTER PROCEDURE mw.usp_Configure
     @ClientName                  nvarchar(200)  = NULL,
     @InstanceDisplayName         nvarchar(200)  = NULL,
     @ReportEmailProfile          sysname        = NULL,
@@ -485,35 +490,35 @@ ALTER PROCEDURE dbo.usp_Configure
 AS
 BEGIN
     SET NOCOUNT ON;
-    IF @ClientName IS NOT NULL                  UPDATE dbo.Setting SET Value = @ClientName WHERE Name = 'ClientName';
-    IF @InstanceDisplayName IS NOT NULL         UPDATE dbo.Setting SET Value = @InstanceDisplayName WHERE Name = 'InstanceDisplayName';
-    IF @ReportEmailProfile IS NOT NULL          UPDATE dbo.Setting SET Value = @ReportEmailProfile WHERE Name = 'ReportEmailProfile';
-    IF @ReportEmailRecipients IS NOT NULL       UPDATE dbo.Setting SET Value = @ReportEmailRecipients WHERE Name = 'ReportEmailRecipients';
-    IF @ReportEmailIncludeQueryText IS NOT NULL UPDATE dbo.Setting SET Value = CONVERT(nvarchar(1), @ReportEmailIncludeQueryText) WHERE Name = 'ReportEmailIncludeQueryText';
-    IF @UnsupportedRiskAccepted IS NOT NULL     UPDATE dbo.Setting SET Value = @UnsupportedRiskAccepted WHERE Name = 'UnsupportedRiskAccepted';
+    IF @ClientName IS NOT NULL                  UPDATE mw.Setting SET Value = @ClientName WHERE Name = 'ClientName';
+    IF @InstanceDisplayName IS NOT NULL         UPDATE mw.Setting SET Value = @InstanceDisplayName WHERE Name = 'InstanceDisplayName';
+    IF @ReportEmailProfile IS NOT NULL          UPDATE mw.Setting SET Value = @ReportEmailProfile WHERE Name = 'ReportEmailProfile';
+    IF @ReportEmailRecipients IS NOT NULL       UPDATE mw.Setting SET Value = @ReportEmailRecipients WHERE Name = 'ReportEmailRecipients';
+    IF @ReportEmailIncludeQueryText IS NOT NULL UPDATE mw.Setting SET Value = CONVERT(nvarchar(1), @ReportEmailIncludeQueryText) WHERE Name = 'ReportEmailIncludeQueryText';
+    IF @UnsupportedRiskAccepted IS NOT NULL     UPDATE mw.Setting SET Value = @UnsupportedRiskAccepted WHERE Name = 'UnsupportedRiskAccepted';
     IF @SettingName IS NOT NULL
     BEGIN
-        IF NOT EXISTS (SELECT 1 FROM dbo.Setting WHERE Name = @SettingName)
+        IF NOT EXISTS (SELECT 1 FROM mw.Setting WHERE Name = @SettingName)
         BEGIN
-            RAISERROR(N'Unknown setting "%s". SELECT * FROM MolehillWatch.dbo.Setting to see valid names.', 16, 1, @SettingName);
+            RAISERROR(N'Unknown setting "%s". SELECT * FROM mw.Setting to see valid names.', 16, 1, @SettingName);
             RETURN;
         END
-        UPDATE dbo.Setting SET Value = @SettingValue WHERE Name = @SettingName;
+        UPDATE mw.Setting SET Value = @SettingValue WHERE Name = @SettingName;
     END
-    SELECT Name, Value, Description FROM dbo.Setting ORDER BY Name;
+    SELECT Name, Value, Description FROM mw.Setting ORDER BY Name;
 END
 GO
 
 /*=============================================================================
   6. COLLECTORS
 =============================================================================*/
-IF OBJECT_ID(N'dbo.usp_CollectErrorLog', N'P') IS NULL EXEC (N'CREATE PROCEDURE dbo.usp_CollectErrorLog AS RETURN 0;');
+IF OBJECT_ID(N'mw.usp_CollectErrorLog', N'P') IS NULL EXEC (N'CREATE PROCEDURE mw.usp_CollectErrorLog AS RETURN 0;');
 GO
-ALTER PROCEDURE dbo.usp_CollectErrorLog
+ALTER PROCEDURE mw.usp_CollectErrorLog
 AS
 BEGIN
     SET NOCOUNT ON;
-    DECLARE @since datetime = ISNULL((SELECT DateValue FROM dbo.CollectorState WHERE StateName = 'ErrorLogHighWater'), DATEADD(day, -8, GETDATE()));
+    DECLARE @since datetime = ISNULL((SELECT DateValue FROM mw.CollectorState WHERE StateName = 'ErrorLogHighWater'), DATEADD(day, -8, GETDATE()));
     DECLARE @start nvarchar(30) = CONVERT(nvarchar(30), DATEADD(minute, -1, @since), 120);
     DECLARE @end   nvarchar(30) = CONVERT(nvarchar(30), DATEADD(minute, 5, GETDATE()), 120);
     DECLARE @lognum int = 1;
@@ -548,38 +553,38 @@ BEGIN
     FROM x
     WHERE NOT (LogText LIKE N'Error: %, Severity: %' AND NextDate = LogDate AND NextProc = ProcessInfo);
 
-    INSERT dbo.ErrorLogEntry (LogDate, ProcessInfo, LogText, TextHash, PatternId, Category, Severity)
+    INSERT mw.ErrorLogEntry (LogDate, ProcessInfo, LogText, TextHash, PatternId, Category, Severity)
     SELECT m.LogDate, m.ProcessInfo, m.FullText, HASHBYTES('SHA1', m.FullText), p.PatternId, p.Category, p.Severity
     FROM #merged m
     CROSS APPLY (SELECT TOP (1) PatternId, Category, Severity
-                 FROM dbo.ErrorLogPattern ip
+                 FROM mw.ErrorLogPattern ip
                  WHERE ip.IsExclusion = 0 AND ip.IsEnabled = 1 AND m.FullText LIKE ip.Pattern
                  ORDER BY ip.Priority, ip.PatternId) p
     WHERE m.LogDate >= DATEADD(minute, -1, @since)
-      AND NOT EXISTS (SELECT 1 FROM dbo.ErrorLogPattern ep
+      AND NOT EXISTS (SELECT 1 FROM mw.ErrorLogPattern ep
                       WHERE ep.IsExclusion = 1 AND ep.IsEnabled = 1 AND m.FullText LIKE ep.Pattern);
 
     DECLARE @hw datetime = (SELECT MAX(LogDate) FROM #log);
     IF @hw IS NOT NULL
     BEGIN
-        UPDATE dbo.CollectorState SET DateValue = @hw WHERE StateName = 'ErrorLogHighWater';
-        IF @@ROWCOUNT = 0 INSERT dbo.CollectorState (StateName, DateValue) VALUES ('ErrorLogHighWater', @hw);
+        UPDATE mw.CollectorState SET DateValue = @hw WHERE StateName = 'ErrorLogHighWater';
+        IF @@ROWCOUNT = 0 INSERT mw.CollectorState (StateName, DateValue) VALUES ('ErrorLogHighWater', @hw);
     END
 END
 GO
 
-IF OBJECT_ID(N'dbo.usp_CollectJobFailures', N'P') IS NULL EXEC (N'CREATE PROCEDURE dbo.usp_CollectJobFailures AS RETURN 0;');
+IF OBJECT_ID(N'mw.usp_CollectJobFailures', N'P') IS NULL EXEC (N'CREATE PROCEDURE mw.usp_CollectJobFailures AS RETURN 0;');
 GO
-ALTER PROCEDURE dbo.usp_CollectJobFailures
+ALTER PROCEDURE mw.usp_CollectJobFailures
 AS
 BEGIN
     SET NOCOUNT ON;
-    DECLARE @last bigint = ISNULL((SELECT IntValue FROM dbo.CollectorState WHERE StateName = 'JobHistoryHighWater'), 0);
+    DECLARE @last bigint = ISNULL((SELECT IntValue FROM mw.CollectorState WHERE StateName = 'JobHistoryHighWater'), 0);
     DECLARE @max  bigint = (SELECT MAX(instance_id) FROM msdb.dbo.sysjobhistory);
     IF @max IS NULL RETURN;
     IF @max < @last SET @last = 0;   -- msdb history was reset
 
-    INSERT dbo.JobFailure (JobHistoryId, JobName, StepId, StepName, RunDateTime, DurationSeconds, RunStatus, Message)
+    INSERT mw.JobFailure (JobHistoryId, JobName, StepId, StepName, RunDateTime, DurationSeconds, RunStatus, Message)
     SELECT h.instance_id, j.name, h.step_id, h.step_name,
            msdb.dbo.agent_datetime(h.run_date, h.run_time),
            (h.run_duration / 10000) * 3600 + (h.run_duration / 100 % 100) * 60 + h.run_duration % 100,
@@ -589,16 +594,16 @@ BEGIN
     WHERE h.instance_id > @last
       AND h.run_status IN (0, 3)
       AND h.run_date > 0
-      AND NOT EXISTS (SELECT 1 FROM dbo.JobFailure f WHERE f.JobHistoryId = h.instance_id);
+      AND NOT EXISTS (SELECT 1 FROM mw.JobFailure f WHERE f.JobHistoryId = h.instance_id);
 
-    UPDATE dbo.CollectorState SET IntValue = @max WHERE StateName = 'JobHistoryHighWater';
-    IF @@ROWCOUNT = 0 INSERT dbo.CollectorState (StateName, IntValue) VALUES ('JobHistoryHighWater', @max);
+    UPDATE mw.CollectorState SET IntValue = @max WHERE StateName = 'JobHistoryHighWater';
+    IF @@ROWCOUNT = 0 INSERT mw.CollectorState (StateName, IntValue) VALUES ('JobHistoryHighWater', @max);
 END
 GO
 
-IF OBJECT_ID(N'dbo.usp_CollectQueryStats', N'P') IS NULL EXEC (N'CREATE PROCEDURE dbo.usp_CollectQueryStats AS RETURN 0;');
+IF OBJECT_ID(N'mw.usp_CollectQueryStats', N'P') IS NULL EXEC (N'CREATE PROCEDURE mw.usp_CollectQueryStats AS RETURN 0;');
 GO
-ALTER PROCEDURE dbo.usp_CollectQueryStats
+ALTER PROCEDURE mw.usp_CollectQueryStats
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -631,11 +636,11 @@ BEGIN
     FROM ranked
     WHERE rc <= 50 OR rr <= 50 OR rd <= 50;
 
-    INSERT dbo.QuerySnapshot (SnapshotTime, QueryHash, ExecutionCount, CpuMs, DurationMs, LogicalReads, LogicalWrites, OldestPlanCreation, LastExecution)
+    INSERT mw.QuerySnapshot (SnapshotTime, QueryHash, ExecutionCount, CpuMs, DurationMs, LogicalReads, LogicalWrites, OldestPlanCreation, LastExecution)
     SELECT @now, query_hash, ExecutionCount, CpuMs, DurationMs, LogicalReads, LogicalWrites, OldestPlan, LastExec
     FROM #top;
 
-    INSERT dbo.QueryText (QueryHash, DatabaseName, ObjectName, QueryText)
+    INSERT mw.QueryText (QueryHash, DatabaseName, ObjectName, QueryText)
     SELECT t.query_hash, DB_NAME(pa.dbid), OBJECT_NAME(st.objectid, st.dbid),
            SUBSTRING(st.text, (s.statement_start_offset / 2) + 1,
                      ((CASE s.statement_end_offset WHEN -1 THEN DATALENGTH(st.text) ELSE s.statement_end_offset END
@@ -645,13 +650,13 @@ BEGIN
                  FROM #qs q WHERE q.query_hash = t.query_hash ORDER BY q.total_worker_time DESC) s
     OUTER APPLY sys.dm_exec_sql_text(s.sql_handle) st
     OUTER APPLY (SELECT dbid = CONVERT(int, pa.value) FROM sys.dm_exec_plan_attributes(s.plan_handle) pa WHERE pa.attribute = N'dbid') pa
-    WHERE NOT EXISTS (SELECT 1 FROM dbo.QueryText x WHERE x.QueryHash = t.query_hash);
+    WHERE NOT EXISTS (SELECT 1 FROM mw.QueryText x WHERE x.QueryHash = t.query_hash);
 END
 GO
 
-IF OBJECT_ID(N'dbo.usp_CollectAvailabilityGroups', N'P') IS NULL EXEC (N'CREATE PROCEDURE dbo.usp_CollectAvailabilityGroups AS RETURN 0;');
+IF OBJECT_ID(N'mw.usp_CollectAvailabilityGroups', N'P') IS NULL EXEC (N'CREATE PROCEDURE mw.usp_CollectAvailabilityGroups AS RETURN 0;');
 GO
-ALTER PROCEDURE dbo.usp_CollectAvailabilityGroups
+ALTER PROCEDURE mw.usp_CollectAvailabilityGroups
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -662,7 +667,7 @@ BEGIN
         CASE WHEN EXISTS (SELECT 1 FROM sys.all_columns WHERE object_id = OBJECT_ID(N'sys.dm_hadr_database_replica_states') AND name = N'secondary_lag_seconds')
              THEN N'drs.secondary_lag_seconds' ELSE N'CAST(NULL AS bigint)' END;
 
-    INSERT dbo.AgReplicaSample (SampleTime, AgName, ReplicaServer, ReplicaRole, AvailabilityMode, FailoverMode, ConnectedState, SyncHealth)
+    INSERT mw.AgReplicaSample (SampleTime, AgName, ReplicaServer, ReplicaRole, AvailabilityMode, FailoverMode, ConnectedState, SyncHealth)
     SELECT @now, ag.name, ar.replica_server_name, ars.role_desc, ar.availability_mode_desc, ar.failover_mode_desc,
            ars.connected_state_desc, ars.synchronization_health_desc
     FROM sys.availability_groups ag
@@ -670,7 +675,7 @@ BEGIN
     LEFT JOIN sys.dm_hadr_availability_replica_states ars ON ars.replica_id = ar.replica_id;
 
     DECLARE @sql nvarchar(max) = N'
-    INSERT dbo.AgDatabaseSample (SampleTime, AgName, ReplicaServer, DatabaseName, IsLocal, ReplicaRole, AvailabilityMode, FailoverMode,
+    INSERT mw.AgDatabaseSample (SampleTime, AgName, ReplicaServer, DatabaseName, IsLocal, ReplicaRole, AvailabilityMode, FailoverMode,
                                  SyncState, SyncHealth, IsSuspended, SuspendReason, LogSendQueueKB, RedoQueueKB, SecondaryLagSeconds, IsFailoverReady)
     SELECT @now, ag.name, ar.replica_server_name, ISNULL(adc.database_name, DB_NAME(drs.database_id)), drs.is_local, ars.role_desc,
            ar.availability_mode_desc, ar.failover_mode_desc, drs.synchronization_state_desc, drs.synchronization_health_desc,
@@ -686,14 +691,14 @@ BEGIN
 END
 GO
 
-IF OBJECT_ID(N'dbo.usp_CollectBlocking', N'P') IS NULL EXEC (N'CREATE PROCEDURE dbo.usp_CollectBlocking AS RETURN 0;');
+IF OBJECT_ID(N'mw.usp_CollectBlocking', N'P') IS NULL EXEC (N'CREATE PROCEDURE mw.usp_CollectBlocking AS RETURN 0;');
 GO
-ALTER PROCEDURE dbo.usp_CollectBlocking
+ALTER PROCEDURE mw.usp_CollectBlocking
 AS
 BEGIN
     SET NOCOUNT ON;
     DECLARE @now datetime = GETDATE();
-    DECLARE @thresholdMs bigint = dbo.fn_SettingInt('BlockingThresholdSeconds', 60) * 1000;
+    DECLARE @thresholdMs bigint = mw.fn_SettingInt('BlockingThresholdSeconds', 60) * 1000;
 
     SELECT r.session_id, r.blocking_session_id, r.wait_time, r.wait_type, r.database_id, r.sql_handle
     INTO #blocked
@@ -702,7 +707,7 @@ BEGIN
 
     IF NOT EXISTS (SELECT 1 FROM #blocked) RETURN;
 
-    INSERT dbo.BlockingSample (SampleTime, SessionId, BlockingSessionId, IsHeadBlocker, WaitSeconds, WaitType, DatabaseName,
+    INSERT mw.BlockingSample (SampleTime, SessionId, BlockingSessionId, IsHeadBlocker, WaitSeconds, WaitType, DatabaseName,
                                LoginName, HostName, ProgramName, OpenTransactions, SqlText)
     SELECT @now, b.session_id, b.blocking_session_id, 0, b.wait_time / 1000, b.wait_type, DB_NAME(b.database_id),
            s.login_name, s.host_name, s.program_name, s.open_transaction_count, LEFT(t.text, 4000)
@@ -711,7 +716,7 @@ BEGIN
     OUTER APPLY sys.dm_exec_sql_text(b.sql_handle) t;
 
     -- head blockers: blocking others but not blocked themselves
-    INSERT dbo.BlockingSample (SampleTime, SessionId, BlockingSessionId, IsHeadBlocker, WaitSeconds, WaitType, DatabaseName,
+    INSERT mw.BlockingSample (SampleTime, SessionId, BlockingSessionId, IsHeadBlocker, WaitSeconds, WaitType, DatabaseName,
                                LoginName, HostName, ProgramName, OpenTransactions, SqlText)
     SELECT @now, s.session_id, NULL, 1, NULL, r.wait_type, DB_NAME(ISNULL(r.database_id, s.database_id)),
            s.login_name, s.host_name, s.program_name, s.open_transaction_count, LEFT(t.text, 4000)
@@ -724,14 +729,14 @@ BEGIN
 END
 GO
 
-IF OBJECT_ID(N'dbo.usp_CollectDisk', N'P') IS NULL EXEC (N'CREATE PROCEDURE dbo.usp_CollectDisk AS RETURN 0;');
+IF OBJECT_ID(N'mw.usp_CollectDisk', N'P') IS NULL EXEC (N'CREATE PROCEDURE mw.usp_CollectDisk AS RETURN 0;');
 GO
-ALTER PROCEDURE dbo.usp_CollectDisk
+ALTER PROCEDURE mw.usp_CollectDisk
 AS
 BEGIN
     SET NOCOUNT ON;
     DECLARE @now datetime = GETDATE();
-    INSERT dbo.DiskSnapshot (SnapshotTime, VolumeMountPoint, LogicalVolumeName, TotalMB, FreeMB)
+    INSERT mw.DiskSnapshot (SnapshotTime, VolumeMountPoint, LogicalVolumeName, TotalMB, FreeMB)
     SELECT @now, vs.volume_mount_point, MAX(vs.logical_volume_name),
            MAX(vs.total_bytes) / 1048576, MAX(vs.available_bytes) / 1048576
     FROM sys.master_files mf
@@ -741,9 +746,9 @@ BEGIN
 END
 GO
 
-IF OBJECT_ID(N'dbo.usp_CollectDatabaseFiles', N'P') IS NULL EXEC (N'CREATE PROCEDURE dbo.usp_CollectDatabaseFiles AS RETURN 0;');
+IF OBJECT_ID(N'mw.usp_CollectDatabaseFiles', N'P') IS NULL EXEC (N'CREATE PROCEDURE mw.usp_CollectDatabaseFiles AS RETURN 0;');
 GO
-ALTER PROCEDURE dbo.usp_CollectDatabaseFiles
+ALTER PROCEDURE mw.usp_CollectDatabaseFiles
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -769,7 +774,7 @@ BEGIN
     END
     CLOSE dbs; DEALLOCATE dbs;
 
-    INSERT dbo.DatabaseFileSnapshot (SnapshotTime, DatabaseName, FileId, FileType, LogicalName, PhysicalName, SizeMB, UsedMB, GrowthPages, IsPercentGrowth, MaxSizePages)
+    INSERT mw.DatabaseFileSnapshot (SnapshotTime, DatabaseName, FileId, FileType, LogicalName, PhysicalName, SizeMB, UsedMB, GrowthPages, IsPercentGrowth, MaxSizePages)
     SELECT @now, d.name, mf.file_id, mf.type_desc, mf.name, mf.physical_name, CAST(mf.size / 128.0 AS decimal(18,2)), u.UsedMB,
            mf.growth, mf.is_percent_growth, mf.max_size
     FROM sys.master_files mf
@@ -779,38 +784,38 @@ BEGIN
 END
 GO
 
-IF OBJECT_ID(N'dbo.usp_PurgeHistory', N'P') IS NULL EXEC (N'CREATE PROCEDURE dbo.usp_PurgeHistory AS RETURN 0;');
+IF OBJECT_ID(N'mw.usp_PurgeHistory', N'P') IS NULL EXEC (N'CREATE PROCEDURE mw.usp_PurgeHistory AS RETURN 0;');
 GO
-ALTER PROCEDURE dbo.usp_PurgeHistory
+ALTER PROCEDURE mw.usp_PurgeHistory
 AS
 BEGIN
     SET NOCOUNT ON;
-    DECLARE @keep   datetime = DATEADD(day, -dbo.fn_SettingInt('RetentionDays', 90), GETDATE());
-    DECLARE @sample datetime = DATEADD(day, -dbo.fn_SettingInt('SampleRetentionDays', 35), GETDATE());
-    DECLARE @trend  datetime = DATEADD(day, -dbo.fn_SettingInt('TrendRetentionDays', 400), GETDATE());
+    DECLARE @keep   datetime = DATEADD(day, -mw.fn_SettingInt('RetentionDays', 90), GETDATE());
+    DECLARE @sample datetime = DATEADD(day, -mw.fn_SettingInt('SampleRetentionDays', 35), GETDATE());
+    DECLARE @trend  datetime = DATEADD(day, -mw.fn_SettingInt('TrendRetentionDays', 400), GETDATE());
     DECLARE @n int = 1;
 
-    WHILE @n > 0 BEGIN DELETE TOP (10000) FROM dbo.AgDatabaseSample WHERE SampleTime < @sample; SET @n = @@ROWCOUNT; END
-    SET @n = 1; WHILE @n > 0 BEGIN DELETE TOP (10000) FROM dbo.AgReplicaSample WHERE SampleTime < @sample; SET @n = @@ROWCOUNT; END
-    SET @n = 1; WHILE @n > 0 BEGIN DELETE TOP (10000) FROM dbo.BlockingSample WHERE SampleTime < @sample; SET @n = @@ROWCOUNT; END
-    SET @n = 1; WHILE @n > 0 BEGIN DELETE TOP (10000) FROM dbo.QuerySnapshot WHERE SnapshotTime < @sample; SET @n = @@ROWCOUNT; END
-    SET @n = 1; WHILE @n > 0 BEGIN DELETE TOP (10000) FROM dbo.ErrorLogEntry WHERE LogDate < @keep; SET @n = @@ROWCOUNT; END
-    SET @n = 1; WHILE @n > 0 BEGIN DELETE TOP (10000) FROM dbo.CollectionLog WHERE StartTime < @keep; SET @n = @@ROWCOUNT; END
-    DELETE FROM dbo.JobFailure WHERE RunDateTime < @keep;
-    DELETE FROM dbo.DiskSnapshot WHERE SnapshotTime < @trend;
-    DELETE FROM dbo.DatabaseFileSnapshot WHERE SnapshotTime < @trend;
-    DELETE FROM dbo.QueryText WHERE NOT EXISTS (SELECT 1 FROM dbo.QuerySnapshot s WHERE s.QueryHash = QueryText.QueryHash) AND FirstSeen < @sample;
-    DELETE FROM dbo.WeeklyReport WHERE GeneratedAt < DATEADD(day, -400, GETDATE());
-    DELETE FROM dbo.PatchLevel WHERE CollectedAt < @trend;
+    WHILE @n > 0 BEGIN DELETE TOP (10000) FROM mw.AgDatabaseSample WHERE SampleTime < @sample; SET @n = @@ROWCOUNT; END
+    SET @n = 1; WHILE @n > 0 BEGIN DELETE TOP (10000) FROM mw.AgReplicaSample WHERE SampleTime < @sample; SET @n = @@ROWCOUNT; END
+    SET @n = 1; WHILE @n > 0 BEGIN DELETE TOP (10000) FROM mw.BlockingSample WHERE SampleTime < @sample; SET @n = @@ROWCOUNT; END
+    SET @n = 1; WHILE @n > 0 BEGIN DELETE TOP (10000) FROM mw.QuerySnapshot WHERE SnapshotTime < @sample; SET @n = @@ROWCOUNT; END
+    SET @n = 1; WHILE @n > 0 BEGIN DELETE TOP (10000) FROM mw.ErrorLogEntry WHERE LogDate < @keep; SET @n = @@ROWCOUNT; END
+    SET @n = 1; WHILE @n > 0 BEGIN DELETE TOP (10000) FROM mw.CollectionLog WHERE StartTime < @keep; SET @n = @@ROWCOUNT; END
+    DELETE FROM mw.JobFailure WHERE RunDateTime < @keep;
+    DELETE FROM mw.DiskSnapshot WHERE SnapshotTime < @trend;
+    DELETE FROM mw.DatabaseFileSnapshot WHERE SnapshotTime < @trend;
+    DELETE FROM mw.QueryText WHERE NOT EXISTS (SELECT 1 FROM mw.QuerySnapshot s WHERE s.QueryHash = QueryText.QueryHash) AND FirstSeen < @sample;
+    DELETE FROM mw.WeeklyReport WHERE GeneratedAt < DATEADD(day, -400, GETDATE());
+    DELETE FROM mw.PatchLevel WHERE CollectedAt < @trend;
 END
 GO
 
 /*=============================================================================
   6b. PATCHING
 =============================================================================*/
-IF OBJECT_ID(N'dbo.usp_CollectPatchLevel', N'P') IS NULL EXEC (N'CREATE PROCEDURE dbo.usp_CollectPatchLevel AS RETURN 0;');
+IF OBJECT_ID(N'mw.usp_CollectPatchLevel', N'P') IS NULL EXEC (N'CREATE PROCEDURE mw.usp_CollectPatchLevel AS RETURN 0;');
 GO
-ALTER PROCEDURE dbo.usp_CollectPatchLevel
+ALTER PROCEDURE mw.usp_CollectPatchLevel
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -831,7 +836,7 @@ BEGIN
         END CATCH;
     END
 
-    INSERT dbo.PatchLevel (CollectedAt, OsProductName, OsInstallationType, OsDisplayVersion, OsCurrentBuild, OsUbr, SqlVersion, SqlUpdateLevel, SqlUpdateReference)
+    INSERT mw.PatchLevel (CollectedAt, OsProductName, OsInstallationType, OsDisplayVersion, OsCurrentBuild, OsUbr, SqlVersion, SqlUpdateLevel, SqlUpdateReference)
     VALUES (GETDATE(), @name, @type, @display, TRY_CONVERT(int, @build), @ubr,
             CONVERT(varchar(30), SERVERPROPERTY('ProductVersion')),
             CONVERT(nvarchar(50), SERVERPROPERTY('ProductUpdateLevel')),
@@ -839,20 +844,20 @@ BEGIN
 END
 GO
 
-IF OBJECT_ID(N'dbo.usp_PatchReference_Clear', N'P') IS NULL EXEC (N'CREATE PROCEDURE dbo.usp_PatchReference_Clear AS RETURN 0;');
+IF OBJECT_ID(N'mw.usp_PatchReference_Clear', N'P') IS NULL EXEC (N'CREATE PROCEDURE mw.usp_PatchReference_Clear AS RETURN 0;');
 GO
-ALTER PROCEDURE dbo.usp_PatchReference_Clear
+ALTER PROCEDURE mw.usp_PatchReference_Clear
     @Product varchar(20)
 AS
 BEGIN
     SET NOCOUNT ON;
-    DELETE FROM dbo.PatchReference WHERE Product = @Product;
+    DELETE FROM mw.PatchReference WHERE Product = @Product;
 END
 GO
 
-IF OBJECT_ID(N'dbo.usp_PatchReference_Add', N'P') IS NULL EXEC (N'CREATE PROCEDURE dbo.usp_PatchReference_Add AS RETURN 0;');
+IF OBJECT_ID(N'mw.usp_PatchReference_Add', N'P') IS NULL EXEC (N'CREATE PROCEDURE mw.usp_PatchReference_Add AS RETURN 0;');
 GO
-ALTER PROCEDURE dbo.usp_PatchReference_Add
+ALTER PROCEDURE mw.usp_PatchReference_Add
     @Product     varchar(20),
     @ProductName nvarchar(100),
     @Major       int,
@@ -868,7 +873,7 @@ ALTER PROCEDURE dbo.usp_PatchReference_Add
 AS
 BEGIN
     SET NOCOUNT ON;
-    INSERT dbo.PatchReference (Product, ProductName, Major, Minor, BuildNumber, Revision, ServicePack, UpdateName, CuNumber, KB, ReleaseDate, Source)
+    INSERT mw.PatchReference (Product, ProductName, Major, Minor, BuildNumber, Revision, ServicePack, UpdateName, CuNumber, KB, ReleaseDate, Source)
     VALUES (@Product, @ProductName, @Major, @Minor, @BuildNumber, @Revision, @ServicePack, @UpdateName, @CuNumber, @KB, @ReleaseDate, @Source);
 END
 GO
@@ -876,9 +881,9 @@ GO
 /* Compares this server with the reference data. One row per component; Severity is OK | Info | Warning | Critical.
    Windows: the monthly cumulative security update for the OS, judged by build number (CurrentBuild.UBR).
    SQL Server: position on the servicing branch (CU or GDR) the instance is on. */
-IF OBJECT_ID(N'dbo.usp_PatchStatus', N'P') IS NULL EXEC (N'CREATE PROCEDURE dbo.usp_PatchStatus AS RETURN 0;');
+IF OBJECT_ID(N'mw.usp_PatchStatus', N'P') IS NULL EXEC (N'CREATE PROCEDURE mw.usp_PatchStatus AS RETURN 0;');
 GO
-ALTER PROCEDURE dbo.usp_PatchStatus
+ALTER PROCEDURE mw.usp_PatchStatus
     @SqlVersion varchar(30) = NULL   -- testing only: evaluate this build instead of the running one
 AS
 BEGIN
@@ -891,10 +896,10 @@ BEGIN
     /*---------------------------------------------------------- SQL Server */
     DECLARE @Ver varchar(30) = ISNULL(@SqlVersion, CONVERT(varchar(30), SERVERPROPERTY('ProductVersion')));
     DECLARE @Maj int = CONVERT(int, PARSENAME(@Ver, 4)), @Bld int = CONVERT(int, PARSENAME(@Ver, 2)), @Rev int = CONVERT(int, PARSENAME(@Ver, 1));
-    DECLARE @SqlLoaded datetime = (SELECT MAX(LoadedAt) FROM dbo.PatchReference WHERE Product = 'SQL Server' AND Major = @Maj);
-    DECLARE @Grace int = CONVERT(int, dbo.fn_SettingInt('SqlPatchGraceDays', 30)),
-            @CuCrit int = CONVERT(int, dbo.fn_SettingInt('SqlCuBehindCritical', 3)),
-            @SecSev varchar(10) = CASE WHEN dbo.fn_Setting('SqlSecurityUpdateSeverity') = N'Warning' THEN 'Warning' ELSE 'Info' END;
+    DECLARE @SqlLoaded datetime = (SELECT MAX(LoadedAt) FROM mw.PatchReference WHERE Product = 'SQL Server' AND Major = @Maj);
+    DECLARE @Grace int = CONVERT(int, mw.fn_SettingInt('SqlPatchGraceDays', 30)),
+            @CuCrit int = CONVERT(int, mw.fn_SettingInt('SqlCuBehindCritical', 3)),
+            @SecSev varchar(10) = CASE WHEN mw.fn_Setting('SqlSecurityUpdateSeverity') = N'Warning' THEN 'Warning' ELSE 'Info' END;
 
     IF @SqlLoaded IS NULL
         INSERT @R VALUES (1, 'SQL Server', @Ver, CONVERT(nvarchar(50), SERVERPROPERTY('ProductUpdateLevel')), NULL, NULL, NULL, N'Not checked', 'Info',
@@ -905,14 +910,14 @@ BEGIN
         DECLARE @InstUpdate nvarchar(60), @InstCu int, @InstSp nvarchar(30), @InstDate date, @Exact bit;
         SELECT TOP (1) @InstUpdate = UpdateName, @InstCu = CuNumber, @InstSp = ISNULL(ServicePack, N'None'), @InstDate = ReleaseDate,
                        @Exact = CASE WHEN BuildNumber = @Bld AND Revision = @Rev THEN 1 ELSE 0 END
-        FROM dbo.PatchReference
+        FROM mw.PatchReference
         WHERE Product = 'SQL Server' AND Major = @Maj AND (BuildNumber < @Bld OR (BuildNumber = @Bld AND Revision <= @Rev))
         ORDER BY BuildNumber DESC, Revision DESC;
         SET @InstSp = ISNULL(@InstSp, N'None');
 
         DECLARE @Track varchar(3) =
             CASE WHEN @InstUpdate LIKE N'%CU%' THEN 'CU'
-                 WHEN EXISTS (SELECT 1 FROM dbo.PatchReference WHERE Product = 'SQL Server' AND Major = @Maj AND ISNULL(ServicePack, N'None') = @InstSp
+                 WHEN EXISTS (SELECT 1 FROM mw.PatchReference WHERE Product = 'SQL Server' AND Major = @Maj AND ISNULL(ServicePack, N'None') = @InstSp
                               AND CuNumber IS NOT NULL AND (BuildNumber > @Bld OR (BuildNumber = @Bld AND Revision > @Rev))) AND ISNULL(@InstUpdate, N'') NOT LIKE N'%GDR%' THEN 'CU'
                  ELSE 'GDR' END;
 
@@ -924,11 +929,11 @@ BEGIN
         BEGIN
             -- latest plain CU, and latest release on the CU branch (may be "CU + GDR")
             SELECT TOP (1) @LName = UpdateName, @LBld = BuildNumber, @LRev = Revision, @LKB = KB, @LDate = ReleaseDate, @LCu = CuNumber
-            FROM dbo.PatchReference
+            FROM mw.PatchReference
             WHERE Product = 'SQL Server' AND Major = @Maj AND ISNULL(ServicePack, N'None') = @InstSp AND CuNumber IS NOT NULL AND UpdateName NOT LIKE N'%GDR%'
             ORDER BY BuildNumber DESC, Revision DESC;
             SELECT TOP (1) @AName = UpdateName, @ABld = BuildNumber, @ARev = Revision, @AKB = KB, @ADate = ReleaseDate
-            FROM dbo.PatchReference
+            FROM mw.PatchReference
             WHERE Product = 'SQL Server' AND Major = @Maj AND ISNULL(ServicePack, N'None') = @InstSp AND CuNumber IS NOT NULL
             ORDER BY BuildNumber DESC, Revision DESC;
 
@@ -958,7 +963,7 @@ BEGIN
             -- GDR (security-only) branch; SQL Server 2016 SP3 also has a parallel "Azure Connect feature pack" branch
             DECLARE @Family int = CASE WHEN @InstUpdate LIKE N'%Azure Connect%' THEN 1 ELSE 0 END;
             SELECT TOP (1) @AName = UpdateName, @ABld = BuildNumber, @ARev = Revision, @AKB = KB, @ADate = ReleaseDate
-            FROM dbo.PatchReference
+            FROM mw.PatchReference
             WHERE Product = 'SQL Server' AND Major = @Maj AND ISNULL(ServicePack, N'None') = @InstSp AND CuNumber IS NULL
               AND (UpdateName LIKE N'%GDR%' OR UpdateName LIKE N'%Security%')
               AND CASE WHEN UpdateName LIKE N'%Azure Connect%' THEN 1 ELSE 0 END = @Family
@@ -969,7 +974,7 @@ BEGIN
                                   @AName, @ADate, N'Up to date (GDR branch)', 'OK', N'On the latest security (GDR) release for this branch.', NULL, @SqlLoaded);
             ELSE
             BEGIN
-                SET @LAll = (SELECT COUNT(*) FROM dbo.PatchReference
+                SET @LAll = (SELECT COUNT(*) FROM mw.PatchReference
                              WHERE Product = 'SQL Server' AND Major = @Maj AND ISNULL(ServicePack, N'None') = @InstSp AND CuNumber IS NULL
                                AND (UpdateName LIKE N'%GDR%' OR UpdateName LIKE N'%Security%')
                                AND CASE WHEN UpdateName LIKE N'%Azure Connect%' THEN 1 ELSE 0 END = @Family
@@ -986,10 +991,10 @@ BEGIN
     /*---------------------------------------------------------- Windows */
     DECLARE @OsName nvarchar(200), @OsType nvarchar(50), @OsBuild int, @OsUbr int, @OsAt datetime;
     SELECT TOP (1) @OsName = OsProductName, @OsType = OsInstallationType, @OsBuild = OsCurrentBuild, @OsUbr = OsUbr, @OsAt = CollectedAt
-    FROM dbo.PatchLevel ORDER BY CollectedAt DESC;
+    FROM mw.PatchLevel ORDER BY CollectedAt DESC;
     DECLARE @OsText nvarchar(100) = CASE WHEN @OsBuild IS NOT NULL THEN CONVERT(nvarchar(10), @OsBuild) + ISNULL(N'.' + CONVERT(nvarchar(10), @OsUbr), N'') END;
-    DECLARE @WinLoaded datetime = (SELECT MAX(LoadedAt) FROM dbo.PatchReference WHERE Product = 'Windows Server');
-    DECLARE @WGrace int = CONVERT(int, dbo.fn_SettingInt('WindowsPatchGraceDays', 14));
+    DECLARE @WinLoaded datetime = (SELECT MAX(LoadedAt) FROM mw.PatchReference WHERE Product = 'Windows Server');
+    DECLARE @WGrace int = CONVERT(int, mw.fn_SettingInt('WindowsPatchGraceDays', 14));
 
     IF EXISTS (SELECT 1 FROM sys.all_objects WHERE name = N'dm_os_host_info')
        AND NOT EXISTS (SELECT 1 FROM sys.dm_os_host_info WHERE host_platform = N'Windows')
@@ -1003,7 +1008,7 @@ BEGIN
         INSERT @R VALUES (2, 'Windows', @OsText, @OsName, NULL, NULL, NULL, N'Not checked (Windows Server 2012 / 2012 R2)', 'Info',
                           N'Windows Server 2012 and 2012 R2 do not record their monthly update level in a way that can be compared automatically.',
                           N'Confirm in Windows Update that the latest monthly rollup is installed.', NULL);
-    ELSE IF NOT EXISTS (SELECT 1 FROM dbo.PatchReference WHERE Product = 'Windows Server' AND BuildNumber = @OsBuild)
+    ELSE IF NOT EXISTS (SELECT 1 FROM mw.PatchReference WHERE Product = 'Windows Server' AND BuildNumber = @OsBuild)
         INSERT @R VALUES (2, 'Windows', @OsText, @OsName, NULL, NULL, NULL, N'Not checked', 'Info',
                           N'No security update reference data is loaded for Windows build ' + CONVERT(nvarchar(10), @OsBuild) + N'.',
                           N'Run Update-PatchReference.ps1 to load the latest security updates from Microsoft.', @WinLoaded);
@@ -1011,10 +1016,10 @@ BEGIN
     BEGIN
         DECLARE @WName nvarchar(100), @WRev int, @WKB varchar(20), @WDate date, @WSource nvarchar(200), @Missing int, @Loaded int, @OldestMissing date;
         SELECT TOP (1) @WName = ProductName, @WRev = Revision, @WKB = KB, @WDate = ReleaseDate, @WSource = Source
-        FROM dbo.PatchReference WHERE Product = 'Windows Server' AND BuildNumber = @OsBuild ORDER BY ReleaseDate DESC, Revision DESC;
+        FROM mw.PatchReference WHERE Product = 'Windows Server' AND BuildNumber = @OsBuild ORDER BY ReleaseDate DESC, Revision DESC;
         SELECT @Missing = SUM(CASE WHEN Revision > @OsUbr THEN 1 ELSE 0 END), @Loaded = COUNT(*),
                @OldestMissing = MIN(CASE WHEN Revision > @OsUbr THEN ReleaseDate END)
-        FROM dbo.PatchReference WHERE Product = 'Windows Server' AND BuildNumber = @OsBuild;
+        FROM mw.PatchReference WHERE Product = 'Windows Server' AND BuildNumber = @OsBuild;
 
         INSERT @R VALUES (2, 'Windows', @OsText, ISNULL(@OsName, @WName),
                           CONVERT(nvarchar(10), @OsBuild) + N'.' + CONVERT(nvarchar(10), @WRev), N'KB' + ISNULL(@WKB, N'?') + N' (' + ISNULL(@WSource, N'') + N' security update)', @WDate,
@@ -1034,7 +1039,7 @@ BEGIN
     END
 
     /*---------------------------------------------------------- Reference freshness */
-    DECLARE @RefLoaded datetime = (SELECT MAX(LoadedAt) FROM dbo.PatchReference), @MaxAge int = CONVERT(int, dbo.fn_SettingInt('PatchReferenceMaxAgeDays', 40));
+    DECLARE @RefLoaded datetime = (SELECT MAX(LoadedAt) FROM mw.PatchReference), @MaxAge int = CONVERT(int, mw.fn_SettingInt('PatchReferenceMaxAgeDays', 40));
     IF @RefLoaded IS NOT NULL AND DATEDIFF(day, @RefLoaded, GETDATE()) > @MaxAge
         INSERT @R VALUES (3, 'Reference data', NULL, NULL, NULL, NULL, NULL, N'Out of date', 'Warning',
                           N'Patch reference data was last refreshed ' + CONVERT(nvarchar(11), @RefLoaded, 106) + N', so newer updates may not be taken into account.',
@@ -1048,11 +1053,11 @@ GO
 /*=============================================================================
   7. WEEKLY REPORT
 =============================================================================*/
-IF OBJECT_ID(N'dbo.usp_ShowReport', N'P') IS NULL EXEC (N'CREATE PROCEDURE dbo.usp_ShowReport @ReportId int = NULL AS RETURN 0;');
+IF OBJECT_ID(N'mw.usp_ShowReport', N'P') IS NULL EXEC (N'CREATE PROCEDURE mw.usp_ShowReport @ReportId int = NULL AS RETURN 0;');
 GO
-IF OBJECT_ID(N'dbo.usp_BuildWeeklyReport', N'P') IS NULL EXEC (N'CREATE PROCEDURE dbo.usp_BuildWeeklyReport AS RETURN 0;');
+IF OBJECT_ID(N'mw.usp_BuildWeeklyReport', N'P') IS NULL EXEC (N'CREATE PROCEDURE mw.usp_BuildWeeklyReport AS RETURN 0;');
 GO
-ALTER PROCEDURE dbo.usp_BuildWeeklyReport
+ALTER PROCEDURE mw.usp_BuildWeeklyReport
     @DaysBack      int = 7,
     @SendEmail     bit = 0,
     @ReturnResults bit = 1
@@ -1063,9 +1068,9 @@ BEGIN
     DECLARE @Now      datetime = GETDATE();
     DECLARE @Start    datetime = DATEADD(day, -@DaysBack, @Now);
     DECLARE @Today    date     = CAST(@Now AS date);
-    DECLARE @Client   nvarchar(200) = ISNULL(NULLIF(dbo.fn_Setting('ClientName'), N''), N'(client name not set)');
-    DECLARE @Instance nvarchar(200) = ISNULL(NULLIF(dbo.fn_Setting('InstanceDisplayName'), N''), ISNULL(@@SERVERNAME, CONVERT(nvarchar(128), SERVERPROPERTY('ServerName'))));
-    DECLARE @RiskAccepted nvarchar(400) = ISNULL(dbo.fn_Setting('UnsupportedRiskAccepted'), N'');
+    DECLARE @Client   nvarchar(200) = ISNULL(NULLIF(mw.fn_Setting('ClientName'), N''), N'(client name not set)');
+    DECLARE @Instance nvarchar(200) = ISNULL(NULLIF(mw.fn_Setting('InstanceDisplayName'), N''), ISNULL(@@SERVERNAME, CONVERT(nvarchar(128), SERVERPROPERTY('ServerName'))));
+    DECLARE @RiskAccepted nvarchar(400) = ISNULL(mw.fn_Setting('UnsupportedRiskAccepted'), N'');
     DECLARE @List nvarchar(max), @Cnt int;
 
     CREATE TABLE #F (
@@ -1084,7 +1089,7 @@ BEGIN
     DECLARE @Level nvarchar(100) = CONVERT(nvarchar(50), SERVERPROPERTY('ProductLevel')) + ISNULL(N' ' + CONVERT(nvarchar(50), SERVERPROPERTY('ProductUpdateLevel')), N'');
     DECLARE @SqlProduct nvarchar(100), @SqlMainEnd date, @SqlExtEnd date;
     SELECT TOP (1) @SqlProduct = ProductName, @SqlMainEnd = MainstreamEnd, @SqlExtEnd = ExtendedEnd
-    FROM dbo.ProductLifecycle WHERE Product = 'SQL Server' AND MajorVersion = @Major;
+    FROM mw.ProductLifecycle WHERE Product = 'SQL Server' AND MajorVersion = @Major;
     SET @SqlProduct = ISNULL(@SqlProduct, N'SQL Server (version ' + CONVERT(nvarchar(10), @Major) + N')');
 
     DECLARE @Ver nvarchar(4000) = @@VERSION, @OsName nvarchar(200);
@@ -1095,7 +1100,7 @@ BEGIN
     END
     DECLARE @OsProduct nvarchar(100), @OsMainEnd date, @OsExtEnd date;
     SELECT TOP (1) @OsProduct = ProductName, @OsMainEnd = MainstreamEnd, @OsExtEnd = ExtendedEnd
-    FROM dbo.ProductLifecycle
+    FROM mw.ProductLifecycle
     WHERE Product = 'Windows Server'
       AND (@OsName LIKE N'%' + ProductName + N' %' OR @OsName LIKE N'%' + ProductName)
     ORDER BY LEN(ProductName) DESC;
@@ -1147,7 +1152,7 @@ BEGIN
 
     IF @StartTime > @Start
         INSERT #F VALUES ('Server', 'Info', N'SQL Server restarted during the period',
-            N'Service started ' + dbo.fn_Date(@StartTime) + N'. Query performance data only covers activity since the restart.', NULL);
+            N'Service started ' + mw.fn_Date(@StartTime) + N'. Query performance data only covers activity since the restart.', NULL);
 
     /*-------------------------------------------------------------- BACKUPS */
     CREATE TABLE #bk (DatabaseName sysname, RecoveryModel nvarchar(60), StateDesc nvarchar(60), IsAgDatabase bit, IsPreferred bit,
@@ -1170,7 +1175,7 @@ BEGIN
 
     UPDATE bk SET LastFullDevice = x.physical_device_name, FullTool = x.Tool
     FROM #bk bk
-    CROSS APPLY (SELECT TOP (1) mf.physical_device_name, Tool = dbo.fn_BackupTool(b.user_name, b.is_snapshot, mf.device_type, ms.software_name)
+    CROSS APPLY (SELECT TOP (1) mf.physical_device_name, Tool = mw.fn_BackupTool(b.user_name, b.is_snapshot, mf.device_type, ms.software_name)
                  FROM msdb.dbo.backupset b
                  JOIN msdb.dbo.backupmediafamily mf ON mf.media_set_id = b.media_set_id
                  LEFT JOIN msdb.dbo.backupmediaset ms ON ms.media_set_id = b.media_set_id
@@ -1179,7 +1184,7 @@ BEGIN
 
     -- every tool that took log backups during the period
     SELECT DISTINCT DatabaseName = b.database_name COLLATE DATABASE_DEFAULT,
-           Tool = dbo.fn_BackupTool(b.user_name, b.is_snapshot, mf.device_type, ms.software_name)
+           Tool = mw.fn_BackupTool(b.user_name, b.is_snapshot, mf.device_type, ms.software_name)
     INTO #logtools
     FROM msdb.dbo.backupset b
     OUTER APPLY (SELECT TOP (1) x.device_type FROM msdb.dbo.backupmediafamily x WHERE x.media_set_id = b.media_set_id) mf
@@ -1192,22 +1197,22 @@ BEGIN
 
     UPDATE #bk SET Evaluate = 1 WHERE StateDesc = N'ONLINE' AND NOT (IsAgDatabase = 1 AND IsPreferred = 0);
 
-    DECLARE @FullMaxH bigint = dbo.fn_SettingInt('BackupFullMaxAgeHours', 170),
-            @DiffMaxH bigint = dbo.fn_SettingInt('BackupFullOrDiffMaxAgeHours', 26),
-            @LogMaxM  bigint = dbo.fn_SettingInt('BackupLogMaxAgeMinutes', 90);
+    DECLARE @FullMaxH bigint = mw.fn_SettingInt('BackupFullMaxAgeHours', 170),
+            @DiffMaxH bigint = mw.fn_SettingInt('BackupFullOrDiffMaxAgeHours', 26),
+            @LogMaxM  bigint = mw.fn_SettingInt('BackupLogMaxAgeMinutes', 90);
 
     SET @List = STUFF((SELECT N', ' + DatabaseName FROM #bk WHERE Evaluate = 1 AND LastFull IS NULL ORDER BY DatabaseName FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N'');
     IF @List IS NOT NULL
         INSERT #F VALUES ('Backups', 'Critical', N'Databases with no full backup', N'No full backup found in msdb history: ' + @List + N'.',
                           N'Take a full backup as soon as possible and add these databases to the backup schedule.');
 
-    SET @List = STUFF((SELECT N', ' + DatabaseName + N' (' + dbo.fn_Age(LastFull, @Now) + N')' FROM #bk
+    SET @List = STUFF((SELECT N', ' + DatabaseName + N' (' + mw.fn_Age(LastFull, @Now) + N')' FROM #bk
                        WHERE Evaluate = 1 AND LastFull < DATEADD(hour, -@FullMaxH, @Now) ORDER BY DatabaseName FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N'');
     IF @List IS NOT NULL
         INSERT #F VALUES ('Backups', 'Critical', N'Full backups overdue', N'Last full backup older than ' + CONVERT(nvarchar(10), @FullMaxH) + N' hours: ' + @List + N'.',
                           N'Check the backup job/tool is running and succeeding for these databases.');
 
-    SET @List = STUFF((SELECT N', ' + DatabaseName + N' (' + dbo.fn_Age(CASE WHEN LastDiff > LastFull THEN LastDiff ELSE LastFull END, @Now) + N')' FROM #bk
+    SET @List = STUFF((SELECT N', ' + DatabaseName + N' (' + mw.fn_Age(CASE WHEN LastDiff > LastFull THEN LastDiff ELSE LastFull END, @Now) + N')' FROM #bk
                        WHERE Evaluate = 1 AND LastFull >= DATEADD(hour, -@FullMaxH, @Now)
                          AND (CASE WHEN LastDiff > LastFull THEN LastDiff ELSE LastFull END) < DATEADD(hour, -@DiffMaxH, @Now)
                        ORDER BY DatabaseName FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N'');
@@ -1215,7 +1220,7 @@ BEGIN
         INSERT #F VALUES ('Backups', 'Warning', N'No full or differential backup in the last ' + CONVERT(nvarchar(10), @DiffMaxH) + N' hours', @List + N'.',
                           N'Confirm a daily full or differential backup is scheduled and succeeding.');
 
-    SET @List = STUFF((SELECT N', ' + DatabaseName + N' (' + dbo.fn_Age(LastLog, @Now) + N')' FROM #bk
+    SET @List = STUFF((SELECT N', ' + DatabaseName + N' (' + mw.fn_Age(LastLog, @Now) + N')' FROM #bk
                        WHERE Evaluate = 1 AND RecoveryModel IN (N'FULL', N'BULK_LOGGED') AND DatabaseName <> N'model'
                          AND (LastLog IS NULL OR LastLog < DATEADD(minute, -@LogMaxM, @Now))
                        ORDER BY DatabaseName FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N'');
@@ -1258,7 +1263,7 @@ BEGIN
         INSERT #F VALUES ('Backups', 'Info', N'Availability Group databases backed up on another replica',
                           CONVERT(nvarchar(10), @Cnt) + N' AG database(s) are not preferred for backups on this replica; check the preferred replica''s report.', NULL);
 
-    SELECT @Cnt = COUNT(*) FROM dbo.ErrorLogEntry WHERE LogDate >= @Start AND Category = 'Backup failure';
+    SELECT @Cnt = COUNT(*) FROM mw.ErrorLogEntry WHERE LogDate >= @Start AND Category = 'Backup failure';
     IF @Cnt > 0
         INSERT #F VALUES ('Backups', 'Critical', N'Backup failures in the error log',
                           CONVERT(nvarchar(10), @Cnt) + N' backup failure message(s) during the period. See the error log section.',
@@ -1271,24 +1276,24 @@ BEGIN
            FirstSeen = MIN(e.LogDate),
            LastSeen  = MAX(e.LogDate)
     INTO #el
-    FROM dbo.ErrorLogEntry e
+    FROM mw.ErrorLogEntry e
     WHERE e.LogDate >= @Start
     GROUP BY e.Category;
 
     INSERT #F (Section, Severity, Item, Detail, Recommendation)
     SELECT 'Error log', el.Severity, el.Category + N' (' + CONVERT(nvarchar(10), el.Entries) + N')',
-           N'Last seen ' + dbo.fn_Date(el.LastSeen) + N': ' + LEFT(l.LogText, 400),
+           N'Last seen ' + mw.fn_Date(el.LastSeen) + N': ' + LEFT(l.LogText, 400),
            p.Recommendation
     FROM #el el
-    CROSS APPLY (SELECT TOP (1) LogText, PatternId FROM dbo.ErrorLogEntry x WHERE x.Category = el.Category AND x.LogDate >= @Start ORDER BY x.LogDate DESC) l
-    LEFT JOIN dbo.ErrorLogPattern p ON p.PatternId = l.PatternId
+    CROSS APPLY (SELECT TOP (1) LogText, PatternId FROM mw.ErrorLogEntry x WHERE x.Category = el.Category AND x.LogDate >= @Start ORDER BY x.LogDate DESC) l
+    LEFT JOIN mw.ErrorLogPattern p ON p.PatternId = l.PatternId
     WHERE el.Severity IN ('Critical', 'Warning') OR el.Entries >= 50
     ORDER BY CASE el.Severity WHEN 'Critical' THEN 1 WHEN 'Warning' THEN 2 ELSE 3 END, el.Entries DESC;
 
     /*----------------------------------------------------------- AGENT JOBS */
     SELECT JobName, Failures = COUNT(*), LastFailure = MAX(RunDateTime)
     INTO #jf
-    FROM dbo.JobFailure
+    FROM mw.JobFailure
     WHERE StepId = 0 AND RunDateTime >= @Start
     GROUP BY JobName;
 
@@ -1296,11 +1301,11 @@ BEGIN
     SELECT 'Agent jobs',
            CASE WHEN jf.JobName LIKE N'%backup%' THEN 'Critical' ELSE 'Warning' END,
            N'Job failed: ' + jf.JobName,
-           CONVERT(nvarchar(10), jf.Failures) + N' failure(s), last ' + dbo.fn_Date(jf.LastFailure)
+           CONVERT(nvarchar(10), jf.Failures) + N' failure(s), last ' + mw.fn_Date(jf.LastFailure)
              + ISNULL(N'. Step "' + s.StepName + N'": ' + LEFT(s.Message, 400), N''),
            N'Review the job history and the failing step. Raise a ticket if you would like us to investigate.'
     FROM #jf jf
-    OUTER APPLY (SELECT TOP (1) StepName, Message FROM dbo.JobFailure f
+    OUTER APPLY (SELECT TOP (1) StepName, Message FROM mw.JobFailure f
                  WHERE f.JobName = jf.JobName AND f.StepId > 0 AND f.RunDateTime >= @Start
                  ORDER BY f.RunDateTime DESC) s
     ORDER BY jf.LastFailure DESC;
@@ -1319,7 +1324,7 @@ BEGIN
 
     /*-------------------------------------------------------------- QUERIES */
     DECLARE @QFirst datetime, @QLast datetime;
-    SELECT @QFirst = MIN(SnapshotTime), @QLast = MAX(SnapshotTime) FROM dbo.QuerySnapshot WHERE SnapshotTime >= @Start;
+    SELECT @QFirst = MIN(SnapshotTime), @QLast = MAX(SnapshotTime) FROM mw.QuerySnapshot WHERE SnapshotTime >= @Start;
 
     CREATE TABLE #q (RankNo int, QueryHash binary(8), DatabaseName sysname NULL, ObjectName sysname NULL, QueryText nvarchar(max) NULL,
                      Executions bigint, CpuMs bigint, DurationMs bigint, Reads bigint);
@@ -1333,13 +1338,13 @@ BEGIN
                    CpuMs      = CASE WHEN r.IsDelta = 1 THEN l.CpuMs - f.CpuMs ELSE l.CpuMs END,
                    DurationMs = CASE WHEN r.IsDelta = 1 THEN l.DurationMs - f.DurationMs ELSE l.DurationMs END,
                    Reads      = CASE WHEN r.IsDelta = 1 THEN l.LogicalReads - f.LogicalReads ELSE l.LogicalReads END
-            FROM dbo.QuerySnapshot l
-            LEFT JOIN dbo.QuerySnapshot f ON f.SnapshotTime = @QFirst AND f.QueryHash = l.QueryHash AND @QFirst < @QLast
+            FROM mw.QuerySnapshot l
+            LEFT JOIN mw.QuerySnapshot f ON f.SnapshotTime = @QFirst AND f.QueryHash = l.QueryHash AND @QFirst < @QLast
             CROSS APPLY (SELECT IsDelta = CASE WHEN f.QueryHash IS NOT NULL AND l.ExecutionCount >= f.ExecutionCount AND l.CpuMs >= f.CpuMs
                                                     AND l.DurationMs >= f.DurationMs AND l.LogicalReads >= f.LogicalReads THEN 1 ELSE 0 END) r
             WHERE l.SnapshotTime = @QLast) x
-        LEFT JOIN dbo.QueryText t ON t.QueryHash = x.QueryHash
-        WHERE x.Executions > 0 AND ISNULL(t.DatabaseName, N'') <> N'MolehillWatch'
+        LEFT JOIN mw.QueryText t ON t.QueryHash = x.QueryHash
+        WHERE x.Executions > 0 AND ISNULL(t.DatabaseName, N'') <> DB_NAME()
         ORDER BY x.CpuMs DESC;
 
     IF NOT EXISTS (SELECT 1 FROM #q)
@@ -1347,8 +1352,8 @@ BEGIN
                           N'Query statistics are collected hourly; data will appear once collection has run.', NULL);
 
     /*------------------------------------------------------------- CAPACITY */
-    DECLARE @DiskWarn bigint = dbo.fn_SettingInt('DiskWarnFreePct', 15), @DiskCrit bigint = dbo.fn_SettingInt('DiskCritFreePct', 10);
-    DECLARE @DiskLatest datetime = (SELECT MAX(SnapshotTime) FROM dbo.DiskSnapshot);
+    DECLARE @DiskWarn bigint = mw.fn_SettingInt('DiskWarnFreePct', 15), @DiskCrit bigint = mw.fn_SettingInt('DiskCritFreePct', 10);
+    DECLARE @DiskLatest datetime = (SELECT MAX(SnapshotTime) FROM mw.DiskSnapshot);
 
     SELECT d.VolumeMountPoint, d.LogicalVolumeName, d.TotalMB, d.FreeMB,
            FreePct   = CAST(100.0 * d.FreeMB / NULLIF(d.TotalMB, 0) AS decimal(5,1)),
@@ -1356,8 +1361,8 @@ BEGIN
            DaysToFull = CASE WHEN o.FreeMB > d.FreeMB AND DATEDIFF(hour, o.SnapshotTime, d.SnapshotTime) >= 72
                              THEN CAST(d.FreeMB / ((o.FreeMB - d.FreeMB) / (DATEDIFF(hour, o.SnapshotTime, d.SnapshotTime) / 24.0)) AS int) END
     INTO #disk
-    FROM dbo.DiskSnapshot d
-    OUTER APPLY (SELECT TOP (1) FreeMB, SnapshotTime FROM dbo.DiskSnapshot o
+    FROM mw.DiskSnapshot d
+    OUTER APPLY (SELECT TOP (1) FreeMB, SnapshotTime FROM mw.DiskSnapshot o
                  WHERE o.VolumeMountPoint = d.VolumeMountPoint AND o.SnapshotTime >= DATEADD(day, -30, @DiskLatest)
                  ORDER BY o.SnapshotTime) o
     WHERE d.SnapshotTime = @DiskLatest;
@@ -1376,13 +1381,13 @@ BEGIN
            N'Plan extra capacity or reduce growth (archiving, backup retention, index maintenance).'
     FROM #disk WHERE DaysToFull < 30 AND FreePct >= @DiskWarn;
 
-    DECLARE @FileLatest datetime = (SELECT MAX(SnapshotTime) FROM dbo.DatabaseFileSnapshot);
+    DECLARE @FileLatest datetime = (SELECT MAX(SnapshotTime) FROM mw.DatabaseFileSnapshot);
     ;WITH s AS (
         SELECT SnapshotTime, DatabaseName,
                DataMB     = SUM(CASE WHEN FileType = N'ROWS' THEN SizeMB END),
                DataUsedMB = SUM(CASE WHEN FileType = N'ROWS' THEN ISNULL(UsedMB, SizeMB) END),
                LogMB      = SUM(CASE WHEN FileType = N'LOG' THEN SizeMB END)
-        FROM dbo.DatabaseFileSnapshot
+        FROM mw.DatabaseFileSnapshot
         GROUP BY SnapshotTime, DatabaseName)
     SELECT l.DatabaseName, l.DataMB, l.DataUsedMB, l.LogMB,
            Growth7dMB  = l.DataUsedMB - w.DataUsedMB,
@@ -1401,7 +1406,7 @@ BEGIN
            ON pc.counter_name LIKE N'Percent Log Used%' AND pc.object_name LIKE N'%:Databases%'
           AND RTRIM(pc.instance_name) = db.DatabaseName;
 
-    DECLARE @LogWarn bigint = dbo.fn_SettingInt('LogUsedWarnPct', 75);
+    DECLARE @LogWarn bigint = mw.fn_SettingInt('LogUsedWarnPct', 75);
     SET @List = STUFF((SELECT N', ' + DatabaseName + N' (' + CONVERT(nvarchar(10), LogUsedPct) + N'% of ' + FORMAT(LogMB / 1024.0, 'N1') + N' GB, waiting on ' + LogReuseWait + N')'
                        FROM #db WHERE LogUsedPct >= @LogWarn AND LogMB >= 512 AND LogReuseWait NOT IN (N'NOTHING', N'CHECKPOINT')
                        ORDER BY DatabaseName FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N'');
@@ -1410,7 +1415,7 @@ BEGIN
                           N'LOG_BACKUP: check log backups are running. ACTIVE_TRANSACTION: look for long-running open transactions. AVAILABILITY_REPLICA: check AG synchronisation.');
 
     SET @List = STUFF((SELECT N', ' + DatabaseName + N'/' + LogicalName + N' (' + FORMAT(SizeMB / 1024.0, 'N1') + N' GB of ' + FORMAT(MaxSizePages / 128.0 / 1024.0, 'N1') + N' GB max)'
-                       FROM dbo.DatabaseFileSnapshot
+                       FROM mw.DatabaseFileSnapshot
                        WHERE SnapshotTime = @FileLatest AND MaxSizePages NOT IN (-1, 0, 268435456) AND SizeMB >= 0.9 * (MaxSizePages / 128.0)
                        ORDER BY DatabaseName FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N'');
     IF @List IS NOT NULL
@@ -1418,7 +1423,7 @@ BEGIN
                           N'Raise the file max size or add a file before the database stops accepting writes.');
 
     SET @List = STUFF((SELECT N', ' + DatabaseName + N'/' + LogicalName
-                       FROM dbo.DatabaseFileSnapshot
+                       FROM mw.DatabaseFileSnapshot
                        WHERE SnapshotTime = @FileLatest AND DatabaseName NOT IN (N'master', N'model', N'msdb')
                          AND ((IsPercentGrowth = 1 AND SizeMB >= 1024) OR (IsPercentGrowth = 0 AND GrowthPages BETWEEN 1 AND 1280 AND SizeMB >= 1024))
                        ORDER BY DatabaseName FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N'');
@@ -1428,7 +1433,7 @@ BEGIN
                           N'Use fixed growth increments sized to the file (e.g. 256 MB - 1 GB) to avoid many small or very large growth events.');
 
     SET @List = STUFF((SELECT N', ' + DatabaseName + N'/' + LogicalName
-                       FROM dbo.DatabaseFileSnapshot
+                       FROM mw.DatabaseFileSnapshot
                        WHERE SnapshotTime = @FileLatest AND GrowthPages = 0 AND DatabaseName <> N'tempdb'
                        ORDER BY DatabaseName FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N'');
     IF @List IS NOT NULL
@@ -1436,11 +1441,11 @@ BEGIN
                           N'Confirm this is intentional and that free space inside these files is monitored.');
 
     /*--------------------------------------------------------- AVAILABILITY */
-    DECLARE @AgLatest datetime = (SELECT MAX(SampleTime) FROM dbo.AgDatabaseSample);
-    DECLARE @AgRepLatest datetime = (SELECT MAX(SampleTime) FROM dbo.AgReplicaSample);
-    DECLARE @SendWarn bigint = dbo.fn_SettingInt('AgSendQueueWarnKB', 102400),
-            @RedoWarn bigint = dbo.fn_SettingInt('AgRedoQueueWarnKB', 102400),
-            @LagWarn  bigint = dbo.fn_SettingInt('AgLagWarnSeconds', 60);
+    DECLARE @AgLatest datetime = (SELECT MAX(SampleTime) FROM mw.AgDatabaseSample);
+    DECLARE @AgRepLatest datetime = (SELECT MAX(SampleTime) FROM mw.AgReplicaSample);
+    DECLARE @SendWarn bigint = mw.fn_SettingInt('AgSendQueueWarnKB', 102400),
+            @RedoWarn bigint = mw.fn_SettingInt('AgRedoQueueWarnKB', 102400),
+            @LagWarn  bigint = mw.fn_SettingInt('AgLagWarnSeconds', 60);
 
     SELECT AgName, ReplicaServer, DatabaseName, ReplicaRole, AvailabilityMode, FailoverMode,
            CurrentSyncState  = MAX(CASE WHEN SampleTime = @AgLatest THEN SyncState END),
@@ -1454,7 +1459,7 @@ BEGIN
            Samples           = COUNT(*),
            IsCurrent         = MAX(CASE WHEN SampleTime = @AgLatest THEN 1 ELSE 0 END)
     INTO #ag
-    FROM dbo.AgDatabaseSample
+    FROM mw.AgDatabaseSample
     WHERE SampleTime >= @Start
     GROUP BY AgName, ReplicaServer, DatabaseName, ReplicaRole, AvailabilityMode, FailoverMode;
 
@@ -1462,12 +1467,12 @@ BEGIN
     BEGIN
         IF @AgLatest IS NULL OR @AgLatest < DATEADD(hour, -1, @Now)
             INSERT #F VALUES ('Availability', 'Warning', N'Availability Group sampling is not running',
-                              N'The last AG sample was ' + dbo.fn_Date(@AgLatest) + N'.', N'Check the "Molehill Watch - Collect Frequent" job.');
+                              N'The last AG sample was ' + mw.fn_Date(@AgLatest) + N'.', N'Check the "Molehill Watch - Collect Frequent" job.');
 
         INSERT #F (Section, Severity, Item, Detail, Recommendation)
         SELECT 'Availability', 'Critical', N'AG replica disconnected: ' + ReplicaServer + N' (' + AgName + N')',
                N'Replica connection state is ' + ConnectedState + N'.', N'Check the replica is online and the endpoint/network between replicas is healthy.'
-        FROM dbo.AgReplicaSample WHERE SampleTime = @AgRepLatest AND ConnectedState = N'DISCONNECTED';
+        FROM mw.AgReplicaSample WHERE SampleTime = @AgRepLatest AND ConnectedState = N'DISCONNECTED';
 
         SET @List = STUFF((SELECT N', ' + DatabaseName + N' on ' + ReplicaServer FROM #ag WHERE IsCurrent = 1 AND IsSuspended = 1 FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N'');
         IF @List IS NOT NULL
@@ -1520,14 +1525,14 @@ BEGIN
     -- Log shipping
     INSERT #F (Section, Severity, Item, Detail, Recommendation)
     SELECT 'Availability', 'Critical', N'Log shipping backup overdue: ' + primary_database,
-           N'Last log shipping backup ' + dbo.fn_Date(last_backup_date) + N' (threshold ' + CONVERT(nvarchar(10), backup_threshold) + N' min).',
+           N'Last log shipping backup ' + mw.fn_Date(last_backup_date) + N' (threshold ' + CONVERT(nvarchar(10), backup_threshold) + N' min).',
            N'Check the log shipping backup job on the primary.'
     FROM msdb.dbo.log_shipping_monitor_primary
     WHERE last_backup_date IS NULL OR DATEDIFF(minute, last_backup_date, @Now) > backup_threshold;
 
     INSERT #F (Section, Severity, Item, Detail, Recommendation)
     SELECT 'Availability', 'Critical', N'Log shipping restore overdue: ' + secondary_database,
-           N'Last restore ' + dbo.fn_Date(last_restored_date) + N', last copy ' + dbo.fn_Date(last_copied_date) + N' (threshold ' + CONVERT(nvarchar(10), restore_threshold) + N' min).',
+           N'Last restore ' + mw.fn_Date(last_restored_date) + N', last copy ' + mw.fn_Date(last_copied_date) + N' (threshold ' + CONVERT(nvarchar(10), restore_threshold) + N' min).',
            N'Check the copy and restore jobs on the secondary and the share between servers.'
     FROM msdb.dbo.log_shipping_monitor_secondary
     WHERE last_restored_date IS NULL OR DATEDIFF(minute, last_restored_date, @Now) > restore_threshold;
@@ -1548,14 +1553,14 @@ BEGIN
     END
 
     /*------------------------------------------------------------- BLOCKING */
-    DECLARE @BlockWarn bigint = dbo.fn_SettingInt('BlockingWarnSeconds', 300);
+    DECLARE @BlockWarn bigint = mw.fn_SettingInt('BlockingWarnSeconds', 300);
     DECLARE @BlockSamples int, @BlockMaxWait int;
     SELECT @BlockSamples = COUNT(DISTINCT SampleTime), @BlockMaxWait = MAX(WaitSeconds)
-    FROM dbo.BlockingSample WHERE SampleTime >= @Start AND IsHeadBlocker = 0;
+    FROM mw.BlockingSample WHERE SampleTime >= @Start AND IsHeadBlocker = 0;
 
     SELECT TOP (5) LoginName, HostName, ProgramName, DatabaseName, Occurrences = COUNT(DISTINCT SampleTime), SampleSql = MAX(SqlText)
     INTO #blk
-    FROM dbo.BlockingSample
+    FROM mw.BlockingSample
     WHERE SampleTime >= @Start AND IsHeadBlocker = 1
     GROUP BY LoginName, HostName, ProgramName, DatabaseName
     ORDER BY COUNT(DISTINCT SampleTime) DESC;
@@ -1563,7 +1568,7 @@ BEGIN
     IF @BlockSamples > 0
         INSERT #F VALUES ('Blocking', CASE WHEN @BlockMaxWait >= @BlockWarn THEN 'Warning' ELSE 'Info' END,
                           N'Blocking detected',
-                          N'Blocking over ' + CONVERT(nvarchar(10), dbo.fn_SettingInt('BlockingThresholdSeconds', 60)) + N' seconds was seen in '
+                          N'Blocking over ' + CONVERT(nvarchar(10), mw.fn_SettingInt('BlockingThresholdSeconds', 60)) + N' seconds was seen in '
                           + CONVERT(nvarchar(10), @BlockSamples) + N' five-minute sample(s). Longest wait ' + CONVERT(nvarchar(10), @BlockMaxWait) + N' seconds.',
                           N'Review the head blockers below. Long-held transactions or missing indexes are the usual causes.');
 
@@ -1572,8 +1577,8 @@ BEGIN
                          LatestUpdate nvarchar(100), LatestReleased date, Status nvarchar(100), Severity varchar(10),
                          Detail nvarchar(1000), Recommendation nvarchar(1000), ReferenceLoaded datetime);
     BEGIN TRY
-        EXEC dbo.usp_CollectPatchLevel;
-        INSERT #patch EXEC dbo.usp_PatchStatus;
+        EXEC mw.usp_CollectPatchLevel;
+        INSERT #patch EXEC mw.usp_PatchStatus;
     END TRY
     BEGIN CATCH
         INSERT #F VALUES ('Patching', 'Info', N'Patch status could not be checked', LEFT(ERROR_MESSAGE(), 400), NULL);
@@ -1619,8 +1624,8 @@ BEGIN
     END
     CLOSE dbs; DEALLOCATE dbs;
 
-    DECLARE @CheckDbDays bigint = dbo.fn_SettingInt('CheckDbMaxAgeDays', 8);
-    SET @List = STUFF((SELECT N', ' + DatabaseName + N' (' + dbo.fn_Age(LastGood, @Now) + N')' FROM #checkdb
+    DECLARE @CheckDbDays bigint = mw.fn_SettingInt('CheckDbMaxAgeDays', 8);
+    SET @List = STUFF((SELECT N', ' + DatabaseName + N' (' + mw.fn_Age(LastGood, @Now) + N')' FROM #checkdb
                        WHERE LastGood IS NULL OR LastGood < DATEADD(day, -@CheckDbDays, @Now)
                        ORDER BY DatabaseName FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N'');
     IF @List IS NOT NULL
@@ -1649,23 +1654,23 @@ BEGIN
         INSERT #F VALUES ('Risks', 'Warning', N'Priority boost enabled', N'"priority boost" is on.', N'Microsoft recommends leaving priority boost off; it can destabilise the server.');
 
     /*----------------------------------------------------------- MONITORING */
-    SET @List = STUFF((SELECT TOP (5) N'; ' + CollectionType + N'/' + StepName + N' at ' + dbo.fn_Date(StartTime) + N': ' + LEFT(ISNULL(ErrorMessage, N''), 200)
-                       FROM dbo.CollectionLog WHERE StartTime >= @Start AND Succeeded = 0
+    SET @List = STUFF((SELECT TOP (5) N'; ' + CollectionType + N'/' + StepName + N' at ' + mw.fn_Date(StartTime) + N': ' + LEFT(ISNULL(ErrorMessage, N''), 200)
+                       FROM mw.CollectionLog WHERE StartTime >= @Start AND Succeeded = 0
                        ORDER BY StartTime DESC FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N'');
     IF @List IS NOT NULL
         INSERT #F VALUES ('Monitoring', 'Warning', N'Molehill Watch collection errors', @List,
                           N'Some report data may be incomplete. Molehill Data Services will review.');
 
-    DECLARE @LastHourly datetime = (SELECT MAX(StartTime) FROM dbo.CollectionLog WHERE CollectionType IN ('Hourly', 'All') AND Succeeded = 1);
+    DECLARE @LastHourly datetime = (SELECT MAX(StartTime) FROM mw.CollectionLog WHERE CollectionType IN ('Hourly', 'All') AND Succeeded = 1);
     IF @LastHourly IS NULL OR @LastHourly < DATEADD(hour, -3, @Now)
         INSERT #F VALUES ('Monitoring', 'Warning', N'Molehill Watch collection jobs not running',
-                          N'Last successful hourly collection: ' + dbo.fn_Date(@LastHourly) + N'.',
+                          N'Last successful hourly collection: ' + mw.fn_Date(@LastHourly) + N'.',
                           N'Check the "Molehill Watch" SQL Agent jobs (or scheduled tasks on Express) are enabled and SQL Server Agent is running.');
 
-    DECLARE @FirstData datetime = (SELECT MIN(SnapshotTime) FROM dbo.DiskSnapshot);
+    DECLARE @FirstData datetime = (SELECT MIN(SnapshotTime) FROM mw.DiskSnapshot);
     IF @FirstData IS NULL OR @FirstData > DATEADD(day, 1, @Start)
         INSERT #F VALUES ('Monitoring', 'Info', N'Monitoring recently installed',
-                          N'Data collection began ' + dbo.fn_Date(@FirstData) + N'. Trends and weekly totals will be more complete in future reports.', NULL);
+                          N'Data collection began ' + mw.fn_Date(@FirstData) + N'. Trends and weekly totals will be more complete in future reports.', NULL);
 
     /*--------------------------------------------------------------- SAVE */
     DECLARE @Crit int = (SELECT COUNT(*) FROM #F WHERE Severity = 'Critical'),
@@ -1674,11 +1679,11 @@ BEGIN
     DECLARE @Overall varchar(10) = CASE WHEN @Crit > 0 THEN 'Red' WHEN @Warn > 0 THEN 'Amber' ELSE 'Green' END;
     DECLARE @OverallText nvarchar(100) = CASE @Overall WHEN 'Red' THEN N'Action required' WHEN 'Amber' THEN N'Attention recommended' ELSE N'No issues found' END;
 
-    INSERT dbo.WeeklyReport (GeneratedAt, PeriodStart, PeriodEnd, ClientName, InstanceName, OverallStatus, CriticalCount, WarningCount, InfoCount)
+    INSERT mw.WeeklyReport (GeneratedAt, PeriodStart, PeriodEnd, ClientName, InstanceName, OverallStatus, CriticalCount, WarningCount, InfoCount)
     VALUES (@Now, @Start, @Now, @Client, @Instance, @Overall, @Crit, @Warn, @Info);
     DECLARE @ReportId int = SCOPE_IDENTITY();
 
-    INSERT dbo.ReportFinding (ReportId, Section, Severity, Item, Detail, Recommendation)
+    INSERT mw.ReportFinding (ReportId, Section, Severity, Item, Detail, Recommendation)
     SELECT @ReportId, Section, Severity, Item, Detail, Recommendation
     FROM #F
     ORDER BY CASE Severity WHEN 'Critical' THEN 1 WHEN 'Warning' THEN 2 ELSE 3 END, Seq;
@@ -1687,7 +1692,7 @@ BEGIN
     DECLARE @H nvarchar(max), @QFull nvarchar(max), @QNoText nvarchar(max), @T nvarchar(max);
     DECLARE @Empty nvarchar(200) = N'<tr><td colspan="9" class="note">Nothing to report.</td></tr>';
 
-    SET @H = N'<html><head><meta charset="utf-8" /><title>Molehill Watch - ' + dbo.fn_Html(@Client) + N' - ' + dbo.fn_Html(@Instance) + N'</title>
+    SET @H = N'<html><head><meta charset="utf-8" /><title>Molehill Watch - ' + mw.fn_Html(@Client) + N' - ' + mw.fn_Html(@Instance) + N'</title>
 <style>
 body{margin:0;background:#F4F2F1;font-family:"Segoe UI",Arial,sans-serif;color:#231F20;font-size:14px;line-height:1.5}
 .wrap{max-width:1040px;margin:0 auto;padding:24px}
@@ -1715,7 +1720,7 @@ td.key{font-weight:600;width:28%;background:#FAF9F9}
 </style></head><body><div class="wrap">
 <div class="hero"><div class="brand">Molehill Watch</div><div class="tag">Catching molehills before they''re mountains</div>
 <h1>Weekly SQL Server Status Report</h1>
-<div class="meta">' + dbo.fn_Html(@Client) + N' &#183; ' + dbo.fn_Html(@Instance) + N' &#183; ' + dbo.fn_Date(@Start) + N' to ' + dbo.fn_Date(@Now) + N'</div>
+<div class="meta">' + mw.fn_Html(@Client) + N' &#183; ' + mw.fn_Html(@Instance) + N' &#183; ' + mw.fn_Date(@Start) + N' to ' + mw.fn_Date(@Now) + N'</div>
 <div class="rag rag-' + LOWER(@Overall) + N'">' + @Overall + N': ' + @OverallText + N' &#8212; ' + CONVERT(nvarchar(10), @Crit) + N' critical, ' + CONVERT(nvarchar(10), @Warn) + N' warning(s)</div></div>';
 
     -- At a glance
@@ -1756,7 +1761,7 @@ td.key{font-weight:600;width:28%;background:#FAF9F9}
                                 (4, N'Operating system', ISNULL(@OsName, N'Unknown')
                                                         + ISNULL(CASE WHEN @OsExtEnd < @Today THEN N' - UNSUPPORTED since ' + CONVERT(nvarchar(11), @OsExtEnd, 106)
                                                                       ELSE N' - supported until ' + CONVERT(nvarchar(11), @OsExtEnd, 106) END, N'')),
-                                (5, N'Running since', dbo.fn_Date(@StartTime)),
+                                (5, N'Running since', mw.fn_Date(@StartTime)),
                                 (6, N'CPU / memory', CONVERT(nvarchar(10), @Cpus) + N' logical CPUs, ' + CONVERT(nvarchar(20), @MemGB) + N' GB RAM, max server memory '
                                                      + CASE WHEN @MaxMem >= 2147483647 THEN N'unlimited' ELSE FORMAT(@MaxMem, 'N0') + N' MB' END),
                                 (7, N'High availability', @HaDesc),
@@ -1775,15 +1780,15 @@ td.key{font-weight:600;width:28%;background:#FAF9F9}
                           td = Status
                    FROM #patch ORDER BY SortOrder
                    FOR XML PATH('tr'), TYPE) AS nvarchar(max));
-    DECLARE @PatchRef datetime = (SELECT MAX(LoadedAt) FROM dbo.PatchReference);
+    DECLARE @PatchRef datetime = (SELECT MAX(LoadedAt) FROM mw.PatchReference);
     SET @H = @H + N'<h2>Patching</h2><table><tr><th>Component</th><th>Installed</th><th>Latest available</th><th>Released</th><th>Status</th></tr>' + ISNULL(@T, @Empty) + N'</table>'
             + N'<p class="note">Windows: the monthly cumulative security update for the operating system (feature and optional preview updates are ignored; other software such as .NET or drivers is not covered). '
-            + N'SQL Server: the latest cumulative update on the servicing branch in use. Build data from Microsoft, last refreshed ' + ISNULL(dbo.fn_Date(@PatchRef), N'never') + N'.</p>';
+            + N'SQL Server: the latest cumulative update on the servicing branch in use. Build data from Microsoft, last refreshed ' + ISNULL(mw.fn_Date(@PatchRef), N'never') + N'.</p>';
 
     -- Backups
     SET @T = CAST((SELECT td = DatabaseName, '', td = RecoveryModel, '',
-                          td = dbo.fn_Date(LastFull), '', td = dbo.fn_Date(LastDiff), '',
-                          td = CASE WHEN RecoveryModel = N'SIMPLE' THEN N'n/a (SIMPLE)' ELSE dbo.fn_Date(LastLog) END, '',
+                          td = mw.fn_Date(LastFull), '', td = mw.fn_Date(LastDiff), '',
+                          td = CASE WHEN RecoveryModel = N'SIMPLE' THEN N'n/a (SIMPLE)' ELSE mw.fn_Date(LastLog) END, '',
                           td = ISNULL(N'Full: ' + FullTool, N'') + ISNULL(CASE WHEN FullTool IS NOT NULL THEN N'; ' ELSE N'' END + N'Log: ' + LogTools, N''), '',
                           td = CASE WHEN StateDesc <> N'ONLINE' THEN StateDesc WHEN IsAgDatabase = 1 AND IsPreferred = 0 THEN N'Backed up on another AG replica' ELSE N'' END
                    FROM #bk ORDER BY CASE WHEN DatabaseName IN (N'master', N'model', N'msdb') THEN 0 ELSE 1 END, DatabaseName
@@ -1792,25 +1797,25 @@ td.key{font-weight:600;width:28%;background:#FAF9F9}
 
     -- Error log
     SET @T = CAST((SELECT [td/@class] = LOWER(Severity), td = Severity, '', td = Category, '',
-                          [td/@class] = 'num', td = Entries, '', td = dbo.fn_Date(FirstSeen), '', td = dbo.fn_Date(LastSeen)
+                          [td/@class] = 'num', td = Entries, '', td = mw.fn_Date(FirstSeen), '', td = mw.fn_Date(LastSeen)
                    FROM #el ORDER BY CASE Severity WHEN 'Critical' THEN 1 WHEN 'Warning' THEN 2 ELSE 3 END, Entries DESC
                    FOR XML PATH('tr'), TYPE) AS nvarchar(max));
     SET @H = @H + N'<h2>2. SQL Server error log</h2><table><tr><th>Severity</th><th>Category</th><th>Entries</th><th>First seen</th><th>Last seen</th></tr>' + ISNULL(@T, @Empty) + N'</table>';
-    SET @T = CAST((SELECT TOP (15) td = dbo.fn_Date(LogDate), '', [td/@class] = LOWER(Severity), td = Severity, '', [td/@class] = 'code', td = LEFT(LogText, 600)
-                   FROM dbo.ErrorLogEntry WHERE LogDate >= @Start AND Severity IN ('Critical', 'Warning')
+    SET @T = CAST((SELECT TOP (15) td = mw.fn_Date(LogDate), '', [td/@class] = LOWER(Severity), td = Severity, '', [td/@class] = 'code', td = LEFT(LogText, 600)
+                   FROM mw.ErrorLogEntry WHERE LogDate >= @Start AND Severity IN ('Critical', 'Warning')
                    ORDER BY LogDate DESC
                    FOR XML PATH('tr'), TYPE) AS nvarchar(max));
     IF @T IS NOT NULL
         SET @H = @H + N'<h3>Most recent notable entries</h3><table><tr><th>When</th><th>Severity</th><th>Message</th></tr>' + @T + N'</table>';
 
     -- Jobs
-    SET @T = CAST((SELECT td = jf.JobName, '', [td/@class] = 'num', td = jf.Failures, '', td = dbo.fn_Date(jf.LastFailure), '',
+    SET @T = CAST((SELECT td = jf.JobName, '', [td/@class] = 'num', td = jf.Failures, '', td = mw.fn_Date(jf.LastFailure), '',
                           [td/@class] = 'code', td = ISNULL(s.StepName + N': ' + LEFT(s.Message, 500), N'')
                    FROM #jf jf
-                   OUTER APPLY (SELECT TOP (1) StepName, Message FROM dbo.JobFailure f WHERE f.JobName = jf.JobName AND f.StepId > 0 AND f.RunDateTime >= @Start ORDER BY f.RunDateTime DESC) s
+                   OUTER APPLY (SELECT TOP (1) StepName, Message FROM mw.JobFailure f WHERE f.JobName = jf.JobName AND f.StepId > 0 AND f.RunDateTime >= @Start ORDER BY f.RunDateTime DESC) s
                    ORDER BY jf.LastFailure DESC
                    FOR XML PATH('tr'), TYPE) AS nvarchar(max));
-    SET @H = @H + N'<h2>3. SQL Agent jobs</h2><p>SQL Server Agent: ' + CASE WHEN @EngineEdition = 4 THEN N'not available (Express edition)' ELSE ISNULL(dbo.fn_Html(@AgentStatus), N'unknown') END + N'.</p>'
+    SET @H = @H + N'<h2>3. SQL Agent jobs</h2><p>SQL Server Agent: ' + CASE WHEN @EngineEdition = 4 THEN N'not available (Express edition)' ELSE ISNULL(mw.fn_Html(@AgentStatus), N'unknown') END + N'.</p>'
             + N'<table><tr><th>Failed job</th><th>Failures</th><th>Last failure</th><th>Failing step</th></tr>' + ISNULL(@T, N'<tr><td colspan="4" class="ok">No job failures this period.</td></tr>') + N'</table>';
 
     -- Queries (two variants: with and without query text)
@@ -1856,7 +1861,7 @@ td.key{font-weight:600;width:28%;background:#FAF9F9}
             + ISNULL(@T, @Empty) + N'</table>';
 
     -- Availability
-    SET @Tail = @Tail + N'<h2>6. High availability</h2><p>' + dbo.fn_Html(@HaDesc) + N'</p>';
+    SET @Tail = @Tail + N'<h2>6. High availability</h2><p>' + mw.fn_Html(@HaDesc) + N'</p>';
     SET @T = CAST((SELECT td = AgName, '', td = ReplicaServer, '', td = DatabaseName, '', td = ISNULL(ReplicaRole, N''), '',
                           td = REPLACE(AvailabilityMode, N'_COMMIT', N''), '',
                           [td/@class] = CASE WHEN CurrentSyncHealth = N'HEALTHY' THEN 'ok' WHEN CurrentSyncHealth = N'PARTIALLY_HEALTHY' THEN 'warning' ELSE 'critical' END,
@@ -1882,49 +1887,49 @@ td.key{font-weight:600;width:28%;background:#FAF9F9}
         SET @Tail = @Tail + N'<h3>Top head blockers</h3><table><tr><th>Login</th><th>Host</th><th>Program</th><th>Database</th><th>Samples</th><th>Last statement</th></tr>' + @T + N'</table>';
 
     SET @Tail = @Tail + N'<div class="foot">This is a high-level operational review provided under the Molehill Watch SQL Server Support Package. It is not a full SQL Server health check or performance tuning exercise.<br />'
-            + N'Generated ' + dbo.fn_Date(@Now) + N' by Molehill Watch on ' + dbo.fn_Html(@Instance) + N'. Report #' + CONVERT(nvarchar(10), @ReportId) + N'.<br />'
+            + N'Generated ' + mw.fn_Date(@Now) + N' by Molehill Watch on ' + mw.fn_Html(@Instance) + N'. Report #' + CONVERT(nvarchar(10), @ReportId) + N'.<br />'
             + N'Molehill Data Services &#183; jay@jayparry.co.uk &#183; molehilldataservices.com</div></div></body></html>';
 
     DECLARE @HtmlFull nvarchar(max) = @H + @QHead + ISNULL(@QFull, @Empty) + @QFoot + @Tail;
-    UPDATE dbo.WeeklyReport SET Html = @HtmlFull WHERE ReportId = @ReportId;
+    UPDATE mw.WeeklyReport SET Html = @HtmlFull WHERE ReportId = @ReportId;
 
     /*-------------------------------------------------------------- E-MAIL */
-    DECLARE @Profile sysname = NULLIF(dbo.fn_Setting('ReportEmailProfile'), N''),
-            @Recipients nvarchar(1000) = NULLIF(dbo.fn_Setting('ReportEmailRecipients'), N'');
+    DECLARE @Profile sysname = NULLIF(mw.fn_Setting('ReportEmailProfile'), N''),
+            @Recipients nvarchar(1000) = NULLIF(mw.fn_Setting('ReportEmailRecipients'), N'');
     IF @SendEmail = 1 AND @Profile IS NOT NULL AND @Recipients IS NOT NULL
     BEGIN
-        DECLARE @Body nvarchar(max) = CASE WHEN dbo.fn_SettingInt('ReportEmailIncludeQueryText', 0) = 1 THEN @HtmlFull
+        DECLARE @Body nvarchar(max) = CASE WHEN mw.fn_SettingInt('ReportEmailIncludeQueryText', 0) = 1 THEN @HtmlFull
                                            ELSE @H + @QHead + ISNULL(@QNoText, @Empty) + @QFoot + @Tail END;
         DECLARE @Subject nvarchar(255) = LEFT(N'[Molehill Watch] ' + UPPER(@Overall) + N' - ' + @Client + N' - ' + @Instance + N' - week to ' + CONVERT(nvarchar(11), @Now, 106), 255);
         BEGIN TRY
             EXEC msdb.dbo.sp_send_dbmail @profile_name = @Profile, @recipients = @Recipients, @subject = @Subject, @body = @Body, @body_format = 'HTML';
-            UPDATE dbo.WeeklyReport SET EmailedAt = GETDATE() WHERE ReportId = @ReportId;
+            UPDATE mw.WeeklyReport SET EmailedAt = GETDATE() WHERE ReportId = @ReportId;
         END TRY
         BEGIN CATCH
-            UPDATE dbo.WeeklyReport SET EmailError = LEFT(ERROR_MESSAGE(), 2000) WHERE ReportId = @ReportId;
+            UPDATE mw.WeeklyReport SET EmailError = LEFT(ERROR_MESSAGE(), 2000) WHERE ReportId = @ReportId;
         END CATCH;
     END
 
     IF @ReturnResults = 1
-        EXEC dbo.usp_ShowReport @ReportId = @ReportId;
+        EXEC mw.usp_ShowReport @ReportId = @ReportId;
 END
 GO
 
-IF OBJECT_ID(N'dbo.usp_ShowReport', N'P') IS NULL EXEC (N'CREATE PROCEDURE dbo.usp_ShowReport AS RETURN 0;');
+IF OBJECT_ID(N'mw.usp_ShowReport', N'P') IS NULL EXEC (N'CREATE PROCEDURE mw.usp_ShowReport AS RETURN 0;');
 GO
-ALTER PROCEDURE dbo.usp_ShowReport
+ALTER PROCEDURE mw.usp_ShowReport
     @ReportId int = NULL      -- NULL = latest
 AS
 BEGIN
     SET NOCOUNT ON;
-    IF @ReportId IS NULL SET @ReportId = (SELECT MAX(ReportId) FROM dbo.WeeklyReport);
+    IF @ReportId IS NULL SET @ReportId = (SELECT MAX(ReportId) FROM mw.WeeklyReport);
 
     SELECT ReportId, GeneratedAt, PeriodStart, PeriodEnd, ClientName, InstanceName, OverallStatus,
            CriticalCount, WarningCount, InfoCount, EmailedAt, EmailError
-    FROM dbo.WeeklyReport WHERE ReportId = @ReportId;
+    FROM mw.WeeklyReport WHERE ReportId = @ReportId;
 
     SELECT Severity, Section, Item, Detail, Recommendation
-    FROM dbo.ReportFinding WHERE ReportId = @ReportId
+    FROM mw.ReportFinding WHERE ReportId = @ReportId
     ORDER BY CASE Severity WHEN 'Critical' THEN 1 WHEN 'Warning' THEN 2 ELSE 3 END, FindingId;
 END
 GO
@@ -1932,9 +1937,9 @@ GO
 /*=============================================================================
   8. INVENTORY (used by Export-WeeklyReports.ps1 for AG replica parity checks)
 =============================================================================*/
-IF OBJECT_ID(N'dbo.usp_Inventory', N'P') IS NULL EXEC (N'CREATE PROCEDURE dbo.usp_Inventory AS RETURN 0;');
+IF OBJECT_ID(N'mw.usp_Inventory', N'P') IS NULL EXEC (N'CREATE PROCEDURE mw.usp_Inventory AS RETURN 0;');
 GO
-ALTER PROCEDURE dbo.usp_Inventory
+ALTER PROCEDURE mw.usp_Inventory
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -1972,9 +1977,9 @@ GO
 /*=============================================================================
   9. ORCHESTRATION, ACCESS AND JOBS
 =============================================================================*/
-IF OBJECT_ID(N'dbo.usp_Collect', N'P') IS NULL EXEC (N'CREATE PROCEDURE dbo.usp_Collect AS RETURN 0;');
+IF OBJECT_ID(N'mw.usp_Collect', N'P') IS NULL EXEC (N'CREATE PROCEDURE mw.usp_Collect AS RETURN 0;');
 GO
-ALTER PROCEDURE dbo.usp_Collect
+ALTER PROCEDURE mw.usp_Collect
     @Type varchar(20)   -- Frequent | Hourly | Daily | Weekly | All
 AS
 BEGIN
@@ -1982,17 +1987,17 @@ BEGIN
     DECLARE @steps TABLE (StepOrder int IDENTITY(1,1), StepName varchar(100), Command nvarchar(400));
 
     IF @Type IN ('Frequent', 'All')
-        INSERT @steps (StepName, Command) VALUES ('AvailabilityGroups', N'EXEC dbo.usp_CollectAvailabilityGroups;'), ('Blocking', N'EXEC dbo.usp_CollectBlocking;');
+        INSERT @steps (StepName, Command) VALUES ('AvailabilityGroups', N'EXEC mw.usp_CollectAvailabilityGroups;'), ('Blocking', N'EXEC mw.usp_CollectBlocking;');
     IF @Type IN ('Hourly', 'All', 'Weekly')
-        INSERT @steps (StepName, Command) VALUES ('ErrorLog', N'EXEC dbo.usp_CollectErrorLog;'), ('JobFailures', N'EXEC dbo.usp_CollectJobFailures;');
+        INSERT @steps (StepName, Command) VALUES ('ErrorLog', N'EXEC mw.usp_CollectErrorLog;'), ('JobFailures', N'EXEC mw.usp_CollectJobFailures;');
     IF @Type IN ('Hourly', 'All')
-        INSERT @steps (StepName, Command) VALUES ('QueryStats', N'EXEC dbo.usp_CollectQueryStats;');
+        INSERT @steps (StepName, Command) VALUES ('QueryStats', N'EXEC mw.usp_CollectQueryStats;');
     IF @Type IN ('Daily', 'All')
-        INSERT @steps (StepName, Command) VALUES ('Disk', N'EXEC dbo.usp_CollectDisk;'), ('DatabaseFiles', N'EXEC dbo.usp_CollectDatabaseFiles;'), ('Purge', N'EXEC dbo.usp_PurgeHistory;');
+        INSERT @steps (StepName, Command) VALUES ('Disk', N'EXEC mw.usp_CollectDisk;'), ('DatabaseFiles', N'EXEC mw.usp_CollectDatabaseFiles;'), ('Purge', N'EXEC mw.usp_PurgeHistory;');
     IF @Type IN ('Daily', 'All', 'Weekly')
-        INSERT @steps (StepName, Command) VALUES ('PatchLevel', N'EXEC dbo.usp_CollectPatchLevel;');
+        INSERT @steps (StepName, Command) VALUES ('PatchLevel', N'EXEC mw.usp_CollectPatchLevel;');
     IF @Type = 'Weekly'
-        INSERT @steps (StepName, Command) VALUES ('WeeklyReport', N'EXEC dbo.usp_BuildWeeklyReport @SendEmail = 1, @ReturnResults = 0;');
+        INSERT @steps (StepName, Command) VALUES ('WeeklyReport', N'EXEC mw.usp_BuildWeeklyReport @SendEmail = 1, @ReturnResults = 0;');
 
     IF NOT EXISTS (SELECT 1 FROM @steps)
     BEGIN
@@ -2004,16 +2009,16 @@ BEGIN
     WHILE @i <= @max
     BEGIN
         SELECT @name = StepName, @cmd = Command FROM @steps WHERE StepOrder = @i;
-        INSERT dbo.CollectionLog (CollectionType, StepName, StartTime) VALUES (@Type, @name, GETDATE());
+        INSERT mw.CollectionLog (CollectionType, StepName, StartTime) VALUES (@Type, @name, GETDATE());
         SET @logId = SCOPE_IDENTITY();
         BEGIN TRY
             EXEC sp_executesql @cmd;
-            UPDATE dbo.CollectionLog SET EndTime = GETDATE(), Succeeded = 1 WHERE LogId = @logId;
+            UPDATE mw.CollectionLog SET EndTime = GETDATE(), Succeeded = 1 WHERE LogId = @logId;
         END TRY
         BEGIN CATCH
             SET @msg = LEFT(ERROR_MESSAGE(), 4000);
             IF XACT_STATE() <> 0 ROLLBACK;
-            UPDATE dbo.CollectionLog SET EndTime = GETDATE(), Succeeded = 0, ErrorMessage = @msg WHERE LogId = @logId;
+            UPDATE mw.CollectionLog SET EndTime = GETDATE(), Succeeded = 0, ErrorMessage = @msg WHERE LogId = @logId;
             SET @failed = @failed + 1;
             PRINT N'Step ' + @name + N' failed: ' + @msg;
         END CATCH;
@@ -2021,13 +2026,13 @@ BEGIN
     END
 
     IF @failed > 0
-        RAISERROR(N'Molehill Watch: %d collection step(s) failed. See MolehillWatch.dbo.CollectionLog.', 16, 1, @failed);
+        RAISERROR(N'Molehill Watch: %d collection step(s) failed. See mw.CollectionLog.', 16, 1, @failed);
 END
 GO
 
-IF OBJECT_ID(N'dbo.usp_GrantMolehillAccess', N'P') IS NULL EXEC (N'CREATE PROCEDURE dbo.usp_GrantMolehillAccess AS RETURN 0;');
+IF OBJECT_ID(N'mw.usp_GrantMolehillAccess', N'P') IS NULL EXEC (N'CREATE PROCEDURE mw.usp_GrantMolehillAccess AS RETURN 0;');
 GO
-ALTER PROCEDURE dbo.usp_GrantMolehillAccess
+ALTER PROCEDURE mw.usp_GrantMolehillAccess
     @LoginName sysname,                -- N'CONTOSO\svc-molehill' (Windows) or N'molehill_support' (SQL login)
     @Password  nvarchar(128) = NULL,   -- SQL logins only: creates the login if it does not exist
     @Sid       varbinary(85) = NULL    -- SQL logins only: create with this SID (keep AG replicas identical)
@@ -2080,16 +2085,16 @@ BEGIN
         SET @sql = @sql + N' GRANT CONNECT ANY DATABASE TO ' + @q + N';';
     EXEC (@sql);
 
-    -- MolehillWatch: read everything, run the report viewers
+    -- Molehill Watch objects (mw schema only): read everything, run the report viewers
     IF DATABASE_PRINCIPAL_ID(N'MolehillWatchReader') IS NULL
         CREATE ROLE MolehillWatchReader;
-    GRANT SELECT ON SCHEMA::dbo TO MolehillWatchReader;
-    GRANT EXECUTE ON dbo.usp_ShowReport TO MolehillWatchReader;
-    GRANT EXECUTE ON dbo.usp_Inventory TO MolehillWatchReader;
-    GRANT EXECUTE ON dbo.usp_PatchStatus TO MolehillWatchReader;
-    -- lets the weekly export refresh Microsoft's published build list (writes only to dbo.PatchReference)
-    GRANT EXECUTE ON dbo.usp_PatchReference_Clear TO MolehillWatchReader;
-    GRANT EXECUTE ON dbo.usp_PatchReference_Add TO MolehillWatchReader;
+    GRANT SELECT ON SCHEMA::mw TO MolehillWatchReader;
+    GRANT EXECUTE ON mw.usp_ShowReport TO MolehillWatchReader;
+    GRANT EXECUTE ON mw.usp_Inventory TO MolehillWatchReader;
+    GRANT EXECUTE ON mw.usp_PatchStatus TO MolehillWatchReader;
+    -- lets the weekly export refresh Microsoft's published build list (writes only to mw.PatchReference)
+    GRANT EXECUTE ON mw.usp_PatchReference_Clear TO MolehillWatchReader;
+    GRANT EXECUTE ON mw.usp_PatchReference_Add TO MolehillWatchReader;
 
     SET @user = (SELECT name FROM sys.database_principals WHERE sid = SUSER_SID(@LoginName));
     IF @user IS NULL
@@ -2116,9 +2121,9 @@ BEGIN
 END
 GO
 
-IF OBJECT_ID(N'dbo.usp_InstallJobs', N'P') IS NULL EXEC (N'CREATE PROCEDURE dbo.usp_InstallJobs AS RETURN 0;');
+IF OBJECT_ID(N'mw.usp_InstallJobs', N'P') IS NULL EXEC (N'CREATE PROCEDURE mw.usp_InstallJobs AS RETURN 0;');
 GO
-ALTER PROCEDURE dbo.usp_InstallJobs
+ALTER PROCEDURE mw.usp_InstallJobs
     @Remove bit = 0,     -- 1 = remove the Molehill Watch jobs only
     @Force  bit = 0      -- 1 = create jobs even on Express (testing only)
 AS
@@ -2150,7 +2155,7 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM msdb.dbo.syscategories WHERE name = N'Molehill Watch' AND category_class = 1)
         EXEC msdb.dbo.sp_add_category @class = N'JOB', @type = N'LOCAL', @name = N'Molehill Watch';
 
-    DECLARE @owner sysname = SUSER_SNAME(0x01);
+    DECLARE @owner sysname = SUSER_SNAME(0x01), @db sysname = DB_NAME();
     DECLARE @defs TABLE (JobName sysname, CollectType varchar(20), Descr nvarchar(512),
                          FreqType int, FreqInterval int, SubdayType int, SubdayInterval int, StartTime int);
     INSERT @defs VALUES
@@ -2165,9 +2170,9 @@ BEGIN
     FETCH NEXT FROM d INTO @name, @type, @descr, @ft, @fi, @st, @si, @start;
     WHILE @@FETCH_STATUS = 0
     BEGIN
-        SET @cmd = N'EXEC dbo.usp_Collect @Type = ''' + @type + N''';';
+        SET @cmd = N'EXEC mw.usp_Collect @Type = ''' + @type + N''';';
         EXEC msdb.dbo.sp_add_job @job_name = @name, @enabled = 1, @description = @descr, @category_name = N'Molehill Watch', @owner_login_name = @owner;
-        EXEC msdb.dbo.sp_add_jobstep @job_name = @name, @step_name = N'Collect', @subsystem = N'TSQL', @database_name = N'MolehillWatch', @command = @cmd, @retry_attempts = 0;
+        EXEC msdb.dbo.sp_add_jobstep @job_name = @name, @step_name = N'Collect', @subsystem = N'TSQL', @database_name = @db, @command = @cmd, @retry_attempts = 0;
         EXEC msdb.dbo.sp_add_jobschedule @job_name = @name, @name = @name, @enabled = 1, @freq_type = @ft, @freq_interval = @fi,
              @freq_subday_type = @st, @freq_subday_interval = @si, @freq_recurrence_factor = 1, @active_start_time = @start;
         EXEC msdb.dbo.sp_add_jobserver @job_name = @name, @server_name = N'(local)';
@@ -2181,27 +2186,28 @@ GO
 /*=============================================================================
   10. FINISH
 =============================================================================*/
-EXEC dbo.usp_InstallJobs;
-INSERT dbo.InstallHistory (Version) VALUES ('1.0.0');
-PRINT N'Molehill Watch 1.0.0 installed on ' + ISNULL(@@SERVERNAME, N'this instance') + N'.';
+EXEC mw.usp_InstallJobs;
+INSERT mw.InstallHistory (Version) VALUES ('1.0.0');
+PRINT N'Molehill Watch 1.0.0 installed in database ' + QUOTENAME(DB_NAME()) + N' (schema mw) on ' + ISNULL(@@SERVERNAME, N'this instance') + N'.';
 GO
 
 /*=============================================================================
   CONFIGURE  (manual installs only - the PowerShell installer does this for you)
-  Highlight and run the lines below after editing the values.
+  Highlight and run the lines below after editing the values, in the database
+  Molehill Watch was installed into.
 =============================================================================
 
-EXEC MolehillWatch.dbo.usp_Configure
+EXEC mw.usp_Configure
      @ClientName            = N'Client Ltd',
      @InstanceDisplayName   = N'',                   -- blank = server name
      @ReportEmailProfile    = N'',                   -- Database Mail profile, blank = no e-mail
      @ReportEmailRecipients = N'';                   -- e.g. N'it@client.co.uk'
 
-EXEC MolehillWatch.dbo.usp_GrantMolehillAccess @LoginName = N'DOMAIN\svc-molehill';
+EXEC mw.usp_GrantMolehillAccess @LoginName = N'DOMAIN\svc-molehill';
 -- or, without a domain, a SQL login (created if missing; on AG replicas pass the first replica's SID):
--- EXEC MolehillWatch.dbo.usp_GrantMolehillAccess @LoginName = N'molehill_support', @Password = N'<strong password>', @Sid = NULL;
+-- EXEC mw.usp_GrantMolehillAccess @LoginName = N'molehill_support', @Password = N'<strong password>', @Sid = NULL;
 
-EXEC MolehillWatch.dbo.usp_Collect @Type = 'All';          -- first collection
-EXEC MolehillWatch.dbo.usp_BuildWeeklyReport;              -- baseline report
+EXEC mw.usp_Collect @Type = 'All';          -- first collection
+EXEC mw.usp_BuildWeeklyReport;              -- baseline report
 
 =============================================================================*/

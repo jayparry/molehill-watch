@@ -35,7 +35,7 @@ It creates:
 
 | Item | Details |
 |---|---|
-| Database **MolehillWatch** | Small (typically under 1 GB), SIMPLE recovery. It holds health history and weekly reports. It does **not** need backing up or adding to an Availability Group. |
+| Database **MolehillWatch** *(or your existing DBA database)* | Small (typically under 1 GB), SIMPLE recovery. It holds health history and weekly reports. It does **not** need backing up or adding to an Availability Group. **If you already have a DBA/admin database, we can use that instead of creating a new one.** Everything goes in its own `mw` schema, your database's settings aren't changed, and we can't see anything outside that schema. The database must not be in an Availability Group. |
 | SQL Agent job **Molehill Watch - Collect Frequent** | Every 5 minutes: Availability Group health and long blocking chains. It takes milliseconds. |
 | SQL Agent job **Molehill Watch - Collect Hourly** | New error log entries, failed job history, query statistics |
 | SQL Agent job **Molehill Watch - Collect Daily** | 05:30: disk space and database sizes, old-history clean-up |
@@ -56,7 +56,7 @@ The installer grants **read-only** visibility:
 * `VIEW SERVER STATE` and `VIEW ANY DEFINITION` to see health, configuration and performance data
 * `CONNECT ANY DATABASE` (SQL Server 2014+) to see database-level health information. It does **not** allow reading your data.
 * Read access to SQL Agent job definitions and history, and backup history, in msdb
-* Read access to the MolehillWatch database, plus permission to refresh its table of Microsoft's published update builds
+* Read access to the Molehill Watch objects (the `mw` schema only), plus permission to refresh its table of Microsoft's published update builds
 
 To carry out fixes you've approved, we may need higher rights temporarily, for example to restart a job or change a setting. We'll always ask first.
 
@@ -71,7 +71,7 @@ To carry out fixes you've approved, we may need higher rights temporarily, for e
 
 ## 4. Your data
 
-* All work happens remotely inside your environment. Reports are stored in your MolehillWatch database and saved on your jump box. **Your data is not copied off your infrastructure.**
+* All work happens remotely inside your environment. Reports are stored in the Molehill Watch database on your server and saved on your jump box. **Your data is not copied off your infrastructure.**
 * We can e-mail the weekly report through your own Database Mail if you'd like. Query text is left out of e-mails by default, because it can contain personal data.
 
 ---
@@ -101,4 +101,4 @@ If a piece of work looks likely to take **more than 1 hour**, we'll send you an 
 
 ## 6. If you stop the service
 
-We can remove everything in a couple of minutes: the jobs, the MolehillWatch database and our access.
+We can remove everything in a couple of minutes: the jobs, the Molehill Watch objects (and the MolehillWatch database if we created it) and our access. An existing DBA database is left exactly as it was.

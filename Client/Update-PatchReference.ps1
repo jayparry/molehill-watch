@@ -32,7 +32,8 @@ param(
     [pscredential] $SqlCredential,
     [string] $OutFile,
     [string] $InFile,
-    [ValidateRange(2, 12)] [int] $Months = 3
+    [ValidateRange(2, 12)] [int] $Months = 3,
+    [string] $Database = 'MolehillWatch'   # the database Molehill Watch was installed into
 )
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -156,7 +157,7 @@ if ($OutFile) {
 $failed = 0
 foreach ($instance in $SqlInstance) {
     $b = New-Object System.Data.SqlClient.SqlConnectionStringBuilder
-    $b['Data Source'] = $instance; $b['Initial Catalog'] = 'MolehillWatch'; $b['TrustServerCertificate'] = $true
+    $b['Data Source'] = $instance; $b['Initial Catalog'] = $Database; $b['TrustServerCertificate'] = $true
     $b['Application Name'] = 'Molehill Watch Patch Reference'; $b['Connect Timeout'] = 15
     if ($SqlCredential) { $b['User ID'] = $SqlCredential.UserName; $b['Password'] = $SqlCredential.GetNetworkCredential().Password }
     else { $b['Integrated Security'] = $true }
@@ -166,12 +167,12 @@ foreach ($instance in $SqlInstance) {
         $tran = $conn.BeginTransaction()
         foreach ($product in ($reference | Select-Object -ExpandProperty Product -Unique)) {
             $clear = $conn.CreateCommand(); $clear.Transaction = $tran
-            $clear.CommandText = 'EXEC dbo.usp_PatchReference_Clear @Product = @Product;'
+            $clear.CommandText = 'EXEC mw.usp_PatchReference_Clear @Product = @Product;'
             [void]$clear.Parameters.AddWithValue('@Product', $product)
             [void]$clear.ExecuteNonQuery()
         }
         $cmd = $conn.CreateCommand(); $cmd.Transaction = $tran
-        $cmd.CommandText = 'EXEC dbo.usp_PatchReference_Add @Product, @ProductName, @Major, @Minor, @BuildNumber, @Revision, @ServicePack, @UpdateName, @CuNumber, @KB, @ReleaseDate, @Source;'
+        $cmd.CommandText = 'EXEC mw.usp_PatchReference_Add @Product, @ProductName, @Major, @Minor, @BuildNumber, @Revision, @ServicePack, @UpdateName, @CuNumber, @KB, @ReleaseDate, @Source;'
         foreach ($name in 'Product', 'ProductName', 'Major', 'Minor', 'BuildNumber', 'Revision', 'ServicePack', 'UpdateName', 'CuNumber', 'KB', 'ReleaseDate', 'Source') {
             [void]$cmd.Parameters.Add((New-Object System.Data.SqlClient.SqlParameter("@$name", [System.Data.SqlDbType]::NVarChar, 200)))
         }

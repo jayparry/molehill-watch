@@ -5,13 +5,14 @@
 #>
 param(
     [Parameter(Mandatory)] [string] $SqlInstance,
-    [Parameter(Mandatory)] [ValidateSet('Frequent', 'Hourly', 'Daily', 'Weekly')] [string] $Type
+    [Parameter(Mandatory)] [ValidateSet('Frequent', 'Hourly', 'Daily', 'Weekly')] [string] $Type,
+    [string] $Database = 'MolehillWatch'
 )
-$conn = New-Object System.Data.SqlClient.SqlConnection "Data Source=$SqlInstance;Initial Catalog=MolehillWatch;Integrated Security=True;TrustServerCertificate=True;Application Name=Molehill Watch Collector"
+$conn = New-Object System.Data.SqlClient.SqlConnection "Data Source=$SqlInstance;Initial Catalog=$Database;Integrated Security=True;TrustServerCertificate=True;Application Name=Molehill Watch Collector"
 try {
     $conn.Open()
     $cmd = $conn.CreateCommand()
-    $cmd.CommandText = 'EXEC dbo.usp_Collect @Type = @Type;'
+    $cmd.CommandText = 'EXEC mw.usp_Collect @Type = @Type;'
     $cmd.CommandTimeout = 0
     [void]$cmd.Parameters.AddWithValue('@Type', $Type)
     [void]$cmd.ExecuteNonQuery()

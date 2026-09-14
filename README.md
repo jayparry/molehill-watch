@@ -8,7 +8,7 @@ It has two halves:
 
 | | Where it runs | What it does |
 |---|---|---|
-| **Client** (`Client\`) | Each covered client SQL Server (and every AG replica) | The `MolehillWatch` database and Agent jobs. They collect health data and build the **weekly status report**. |
+| **Client** (`Client\`) | Each covered client SQL Server (and every AG replica) | Objects in an `mw` schema, in the `MolehillWatch` database or the client's existing DBA database, plus Agent jobs. They collect health data and build the **weekly status report**. |
 | **Admin** (`Admin\`) | Your own SQL Server (Express is fine) | The `MolehillAdmin` database: clients, agreements, pricing, **tickets and SLA times**, time logging, **included hours**, billing cycles, **invoices**, notice periods and a daily **dashboard**. |
 
 ---
@@ -35,6 +35,18 @@ cd Client
 .\Install-MolehillWatch.ps1 -SqlInstance SQL01,SQL02 -ClientName "Contoso Ltd" -MolehillLogin "CONTOSO\svc-molehill"
 ```
 
+**Client already has a DBA database?** Install into it instead of creating another database:
+
+```powershell
+.\Install-MolehillWatch.ps1 -SqlInstance SQL01 -ClientName "Contoso Ltd" -Database DBA
+```
+
+* `MolehillWatch` is the default, and is the **only** database the installer will ever create.
+* A database given with `-Database` must already exist. Its settings (recovery model, owner and so on) are never changed.
+* Everything goes in its own `mw` schema, so it can't clash with the client's objects, and the read-only login can't see anything outside it.
+* The installer refuses a database that's read-only, in an Availability Group (each replica needs its own writable copy), or has a different collation from the server.
+* Pass the same `-Database` to `Export-WeeklyReports.ps1` and `Update-PatchReference.ps1`.
+
 **No domain (SQL authentication only)?** Connect with a SQL sysadmin login, and let the installer create a SQL login for you:
 
 ```powershell
@@ -46,7 +58,7 @@ The SQL login is created with password policy on and expiry off. Every instance 
 
 That's the whole install. It creates the database, collectors, report builder and 4 Agent jobs. It grants read-only access to your login, runs a first collection and builds a baseline report. It is safe to re-run, and re-running upgrades an existing install in place.
 
-*Manual alternative:* open `MolehillWatch_Install.sql` in SSMS, press F5, then run the short CONFIGURE block at the bottom.
+*Manual alternative:* open `MolehillWatch_Install.sql` in SSMS and select the target database in the drop-down. That's `MolehillWatch` (create it first; the commands are at the top of the script) or the client's DBA database. Press F5, then run the short CONFIGURE block at the bottom.
 
 ### 3. Every Monday: weekly reports
 
@@ -152,5 +164,5 @@ A single script, separate from Molehill Watch, for a quick "how out of date is t
 
 ## Uninstall
 
-* Client: run `Client\MolehillWatch_Uninstall.sql` (removes the jobs and the `MolehillWatch` database; the header lists anything left for manual removal).
+* Client: run `Client\MolehillWatch_Uninstall.sql` in the database Molehill Watch was installed into. It removes the jobs and everything in the `mw` schema. It drops the database only if it's the default `MolehillWatch` and is left empty; a client's DBA database is never dropped. The header lists anything left for manual removal.
 * Admin: `DROP DATABASE MolehillAdmin;` and `Unregister-ScheduledTask -TaskName 'Molehill Admin - Daily'`.
