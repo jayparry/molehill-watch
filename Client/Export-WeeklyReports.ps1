@@ -12,6 +12,9 @@
       <Client>_<Instance>_<date>.html    the weekly report for each instance
       AG-Parity_<AG>_<date>.html         job/login differences between replicas (where applicable)
 
+    index.html also shows the live SQL Server and Windows patch status of every instance.
+    Use -UpdatePatchReference to refresh Microsoft's build data first (needs internet access).
+
     Needs only read access (the MolehillWatchReader role granted by the installer),
     unless -BuildNew is used, which requires sysadmin.
 
@@ -27,6 +30,7 @@ param(
     [Parameter(ParameterSetName = 'List')] [string] $ServerList,
     [string] $OutputFolder,
     [switch] $BuildNew,
+    [switch] $UpdatePatchReference,   # download Microsoft's latest build data and load it before exporting
     [pscredential] $SqlCredential
 )
 
@@ -77,8 +81,17 @@ function Page([string]$Title, [string]$Body) {
     "<p class=`"note`" style=`"margin-top:30px`">Molehill Data Services &#183; jay@jayparry.co.uk &#183; molehilldataservices.com</p></div></body></html>"
 }
 
+if ($UpdatePatchReference) {
+    $refArgs = @{ SqlInstance = $SqlInstance }
+    if ($SqlCredential) { $refArgs.SqlCredential = $SqlCredential }
+    try { & (Join-Path $PSScriptRoot 'Update-PatchReference.ps1') @refArgs }
+    catch { Write-Warning "Patch reference not refreshed: $($_.Exception.Message)" }
+    Write-Host ''
+}
+
 $summary = @()
 $inventory = @{}
+$patching = @{}
 
 foreach ($instance in $SqlInstance) {
     Write-Host "[$instance] " -NoNewline
@@ -96,6 +109,8 @@ foreach ($instance in $SqlInstance) {
 
         $inv = Get-Data $instance 'EXEC dbo.usp_Inventory;'
         $inventory[$instance] = $inv
+        try { $patching[$instance] = (Get-Data $instance 'EXEC dbo.usp_PatchStatus;').Tables[0] }
+        catch { Write-Warning "  Patch status unavailable (re-run Install-MolehillWatch.ps1 to upgrade): $($_.Exception.Message)" }
     }
     catch {
         Write-Host "FAILED: $($_.Exception.Message)" -ForegroundColor Red
@@ -173,6 +188,19 @@ $tr = ($summary | ForEach-Object {
     "<tr><td>$(Enc $_.Client)</td><td>$(Enc $_.Instance)</td><td class=`"$($_.Status)`">$($_.Status)</td><td>$($_.Critical)</td><td>$($_.Warnings)</td><td>$($_.Info)</td><td>$gen</td><td>$link</td></tr>"
 }) -join ''
 $body = "<h2>Instances</h2><table><tr><th>Client</th><th>Instance</th><th>Status</th><th>Critical</th><th>Warnings</th><th>Info</th><th>Generated</th><th></th></tr>$tr</table>"
+if ($patching.Count) {
+    $sevClass = @{ Critical = 'critical'; Warning = 'warning'; OK = 'ok'; Info = 'info' }
+    $pr = foreach ($inst in $SqlInstance) {
+        if (-not $patching.ContainsKey($inst)) { continue }
+        foreach ($row in $patching[$inst].Rows) {
+            $installed = "$($row.Installed)" + $(if ("$($row.InstalledUpdate)") { " - $($row.InstalledUpdate)" })
+            $latest = if ("$($row.Latest)") { "$($row.Latest)" + $(if ("$($row.LatestUpdate)") { " - $($row.LatestUpdate)" }) } else { '-' }
+            "<tr><td>$(Enc $inst)</td><td>$(Enc $row.Component)</td><td>$(Enc $installed)</td><td>$(Enc $latest)</td><td class=`"$($sevClass[[string]$row.Severity])`">$(Enc $row.Status)</td><td>$(Enc $row.Recommendation)</td></tr>"
+        }
+    }
+    $body += "<h2>Patching</h2><table><tr><th>Instance</th><th>Component</th><th>Installed</th><th>Latest available</th><th>Status</th><th>Action</th></tr>$($pr -join '')</table>" +
+             "<p class=`"note`">Windows: latest monthly security update for the OS. SQL Server: latest cumulative update on the branch in use. Live status at export time.</p>"
+}
 if ($parityLinks) {
     $pr = ($parityLinks | ForEach-Object { "<tr><td>$(Enc $_.Ag)</td><td>$($_.Compared)</td><td class=`"$(if ($_.Issues) { 'warning' } else { 'ok' })`">$($_.Issues)</td><td><a href=`"$(Enc $_.File)`">Open</a></td></tr>" }) -join ''
     $body += "<h2>Availability Group parity</h2><table><tr><th>Availability Group</th><th>Replicas compared</th><th>Differences</th><th></th></tr>$pr</table>"

@@ -9,8 +9,9 @@
       2. runs MolehillWatch_Install.sql (database, collectors, report, Agent jobs)
       3. sets the client name / report e-mail settings
       4. optionally grants read access to the Molehill Data Services login
-      5. optionally schedules collection with Windows Task Scheduler (Express edition)
-      6. runs a first collection and builds a baseline weekly report
+      5. loads Microsoft's latest SQL Server / Windows Server build data for the patching checks
+      6. optionally schedules collection with Windows Task Scheduler (Express edition)
+      7. runs a first collection and builds a baseline weekly report
 
     No modules required - works in Windows PowerShell 5.1 and PowerShell 7.
     Safe to re-run (upgrades in place and keeps collected data).
@@ -43,7 +44,8 @@ param(
     [string] $UnsupportedRiskAccepted,
     [pscredential] $SqlCredential,
     [switch] $UseTaskScheduler,
-    [switch] $SkipInitialCollection
+    [switch] $SkipInitialCollection,
+    [switch] $SkipPatchReference    # no internet here: load it later with Update-PatchReference.ps1 -InFile
 )
 
 $ErrorActionPreference = 'Stop'
@@ -132,13 +134,28 @@ Write-Host 'Molehill Watch installer' -ForegroundColor Cyan
 Write-Host 'Catching molehills before they''re mountains' -ForegroundColor DarkCyan
 Write-Host ''
 
+# Download the patch reference once for all instances
+$patchFile = $null
+if (-not $SkipPatchReference) {
+    $patchFile = Join-Path ([System.IO.Path]::GetTempPath()) "molehill-patch-reference-$PID.json"
+    try {
+        & (Join-Path $scriptRoot 'Update-PatchReference.ps1') -OutFile $patchFile | Out-Null
+        if (-not (Test-Path $patchFile)) { throw 'no data saved' }
+    }
+    catch {
+        Write-Warning "Could not download patch reference data ($($_.Exception.Message)). Patching checks will show 'Not checked' until you run Update-PatchReference.ps1 from a machine with internet access."
+        $patchFile = $null
+    }
+    Write-Host ''
+}
+
 $results = @()
 foreach ($instance in $SqlInstance) {
     Write-Host "[$instance]" -ForegroundColor Cyan
     $conn = $null
     $warnings = 0
     try {
-        Write-Host '  1/6 Checking connection and permissions'
+        Write-Host '  1/7 Checking connection and permissions'
         $conn = New-SqlConnection $instance
         $info = Invoke-Sql $conn "SELECT Version = CONVERT(varchar(30), SERVERPROPERTY('ProductVersion')), Edition = CONVERT(nvarchar(200), SERVERPROPERTY('Edition')), EngineEdition = CONVERT(int, SERVERPROPERTY('EngineEdition')), IsSysadmin = IS_SRVROLEMEMBER('sysadmin'), ServerName = @@SERVERNAME" -Table
         $row = $info.Rows[0]
@@ -147,10 +164,10 @@ foreach ($instance in $SqlInstance) {
         if ($row.IsSysadmin -ne 1) { throw 'The installing account must be a member of sysadmin.' }
         $isExpress = ($row.EngineEdition -eq 4)
 
-        Write-Host '  2/6 Installing MolehillWatch database, procedures and jobs'
+        Write-Host '  2/7 Installing MolehillWatch database, procedures and jobs'
         Invoke-SqlFile $conn $installFile
 
-        Write-Host '  3/6 Applying settings'
+        Write-Host '  3/7 Applying settings'
         Invoke-Sql $conn @'
 EXEC MolehillWatch.dbo.usp_Configure @ClientName = @ClientName, @ReportEmailProfile = @Profile,
      @ReportEmailRecipients = @Recipients, @UnsupportedRiskAccepted = @Risk;
@@ -159,7 +176,7 @@ EXEC MolehillWatch.dbo.usp_Configure @ClientName = @ClientName, @ReportEmailProf
       Recipients = $(if ($PSBoundParameters.ContainsKey('ReportEmailRecipients')) { $ReportEmailRecipients } else { $null })
       Risk       = $(if ($PSBoundParameters.ContainsKey('UnsupportedRiskAccepted')) { $UnsupportedRiskAccepted } else { $null }) }
 
-        Write-Host '  4/6 Molehill Data Services access'
+        Write-Host '  4/7 Molehill Data Services access'
         if ($MolehillLogin) {
             try {
                 # Parameter values are set with plain if-blocks: an if-expression would unroll the SID byte[] into object[]
@@ -187,7 +204,18 @@ EXEC MolehillWatch.dbo.usp_Configure @ClientName = @ClientName, @ReportEmailProf
             Write-Host '    Skipped (no -MolehillLogin given)' -ForegroundColor DarkGray
         }
 
-        Write-Host '  5/6 Scheduling'
+        Write-Host '  5/7 Patch reference data'
+        if ($patchFile) {
+            $refArgs = @{ InFile = $patchFile; SqlInstance = $instance }
+            if ($SqlCredential) { $refArgs.SqlCredential = $SqlCredential }
+            $global:LASTEXITCODE = 0
+            & (Join-Path $scriptRoot 'Update-PatchReference.ps1') @refArgs *>&1 | Where-Object { "$_" -match 'loaded|FAILED' } | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+            if ($LASTEXITCODE -eq 1) { $warnings++ }
+        } else {
+            Write-Host '    Skipped' -ForegroundColor DarkGray
+        }
+
+        Write-Host '  6/7 Scheduling'
         if ($isExpress) {
             if ($UseTaskScheduler) {
                 # SYSTEM runs the collection; on Express it needs sysadmin to read the error log, DMVs and msdb.
@@ -205,7 +233,7 @@ IF IS_SRVROLEMEMBER('sysadmin', N'NT AUTHORITY\SYSTEM') = 0 ALTER SERVER ROLE sy
         }
 
         if (-not $SkipInitialCollection) {
-            Write-Host '  6/6 First collection and baseline report (can take a minute)'
+            Write-Host '  7/7 First collection and baseline report (can take a minute)'
             try { Invoke-Sql $conn "EXEC MolehillWatch.dbo.usp_Collect @Type = 'All';" }
             catch { Write-Warning "    Some collection steps failed: $(Get-SqlError $_)"; $warnings++ }
             $summary = Invoke-Sql $conn @'
@@ -216,7 +244,7 @@ SELECT TOP (1) ReportId, OverallStatus, CriticalCount, WarningCount, InfoCount F
             $colour = @{ Red = 'Red'; Amber = 'Yellow'; Green = 'Green' }[$r.OverallStatus]
             Write-Host "    Baseline report #$($r.ReportId): $($r.OverallStatus) ($($r.CriticalCount) critical, $($r.WarningCount) warnings, $($r.InfoCount) info)" -ForegroundColor $colour
         } else {
-            Write-Host '  6/6 Skipped first collection'
+            Write-Host '  7/7 Skipped first collection'
         }
 
         $status = if ($warnings) { "Installed with $warnings warning(s)" } else { 'Installed' }
@@ -234,6 +262,7 @@ SELECT TOP (1) ReportId, OverallStatus, CriticalCount, WarningCount, InfoCount F
     Write-Host ''
 }
 
+if ($patchFile) { Remove-Item $patchFile -ErrorAction SilentlyContinue }
 $results | Format-Table -AutoSize
 Write-Host 'View the latest findings in SSMS:  EXEC MolehillWatch.dbo.usp_ShowReport;'
 Write-Host 'Export HTML reports:               .\Export-WeeklyReports.ps1 -SqlInstance <instance> -OutputFolder <folder>'

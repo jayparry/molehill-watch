@@ -256,6 +256,40 @@ CREATE TABLE dbo.ReportFinding (
     Item           nvarchar(400)  NOT NULL,
     Detail         nvarchar(max)  NULL,
     Recommendation nvarchar(1000) NULL);
+
+-- Latest builds published by Microsoft, loaded by Update-PatchReference.ps1
+IF OBJECT_ID(N'dbo.PatchReference') IS NULL
+BEGIN
+    CREATE TABLE dbo.PatchReference (
+        ReferenceId int IDENTITY(1,1) NOT NULL CONSTRAINT PK_PatchReference PRIMARY KEY,
+        Product     varchar(20)   NOT NULL,     -- 'SQL Server' | 'Windows Server'
+        ProductName nvarchar(100) NOT NULL,     -- e.g. 'SQL Server 2022', 'Windows Server 2022'
+        Major       int           NOT NULL,
+        Minor       int           NOT NULL,
+        BuildNumber int           NOT NULL,     -- Windows: OS build (20348); SQL: third part of the version
+        Revision    int           NOT NULL,     -- Windows: UBR; SQL: fourth part of the version
+        ServicePack nvarchar(30)  NULL,
+        UpdateName  nvarchar(60)  NULL,         -- 'CU26', 'CU26 + GDR', 'GDR', 'Security Update'
+        CuNumber    int           NULL,
+        KB          varchar(20)   NULL,
+        ReleaseDate date          NULL,
+        Source      nvarchar(200) NULL,
+        LoadedAt    datetime      NOT NULL CONSTRAINT DF_PatchReference_LoadedAt DEFAULT GETDATE());
+    CREATE INDEX IX_PatchReference_Lookup ON dbo.PatchReference (Product, Major, BuildNumber, Revision);
+END
+
+-- What is installed on this server (collected daily)
+IF OBJECT_ID(N'dbo.PatchLevel') IS NULL
+CREATE TABLE dbo.PatchLevel (
+    CollectedAt        datetime      NOT NULL CONSTRAINT PK_PatchLevel PRIMARY KEY,
+    OsProductName      nvarchar(200) NULL,
+    OsInstallationType nvarchar(50)  NULL,
+    OsDisplayVersion   nvarchar(50)  NULL,
+    OsCurrentBuild     int           NULL,
+    OsUbr              int           NULL,
+    SqlVersion         varchar(30)   NULL,
+    SqlUpdateLevel     nvarchar(50)  NULL,
+    SqlUpdateReference nvarchar(50)  NULL);
 GO
 
 /*=============================================================================
@@ -285,7 +319,12 @@ FROM (VALUES
     ('BlockingWarnSeconds',           N'300',   N'Warning when any blocked request waited this long during the period.'),
     ('ReportEmailProfile',            N'',      N'Database Mail profile used to send the weekly report (blank = no e-mail).'),
     ('ReportEmailRecipients',         N'',      N'Semicolon separated recipients for the weekly report.'),
-    ('ReportEmailIncludeQueryText',   N'0',     N'1 = include query text in the e-mailed report. Default 0 - query text can contain personal data.')
+    ('ReportEmailIncludeQueryText',   N'0',     N'1 = include query text in the e-mailed report. Default 0 - query text can contain personal data.'),
+    ('SqlPatchGraceDays',             N'30',    N'Days after a SQL Server CU/GDR is released before not having it becomes a Warning.'),
+    ('SqlCuBehindCritical',           N'3',     N'Critical when this many cumulative updates behind the latest CU.'),
+    ('SqlSecurityUpdateSeverity',     N'Info',  N'Severity when on the latest CU but a newer "CU + GDR" security update exists: Info or Warning.'),
+    ('WindowsPatchGraceDays',         N'14',    N'Days after Patch Tuesday before a missing Windows security update becomes a Warning (Critical once a second month is missed).'),
+    ('PatchReferenceMaxAgeDays',      N'40',    N'Warning when the patch reference data has not been refreshed for this many days.')
 ) v (Name, Value, Description)
 WHERE NOT EXISTS (SELECT 1 FROM dbo.Setting s WHERE s.Name = v.Name);
 
@@ -762,6 +801,247 @@ BEGIN
     DELETE FROM dbo.DatabaseFileSnapshot WHERE SnapshotTime < @trend;
     DELETE FROM dbo.QueryText WHERE NOT EXISTS (SELECT 1 FROM dbo.QuerySnapshot s WHERE s.QueryHash = QueryText.QueryHash) AND FirstSeen < @sample;
     DELETE FROM dbo.WeeklyReport WHERE GeneratedAt < DATEADD(day, -400, GETDATE());
+    DELETE FROM dbo.PatchLevel WHERE CollectedAt < @trend;
+END
+GO
+
+/*=============================================================================
+  6b. PATCHING
+=============================================================================*/
+IF OBJECT_ID(N'dbo.usp_CollectPatchLevel', N'P') IS NULL EXEC (N'CREATE PROCEDURE dbo.usp_CollectPatchLevel AS RETURN 0;');
+GO
+ALTER PROCEDURE dbo.usp_CollectPatchLevel
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @key nvarchar(200) = N'SOFTWARE\Microsoft\Windows NT\CurrentVersion';
+    DECLARE @build nvarchar(50), @ubr int, @type nvarchar(50), @name nvarchar(200), @display nvarchar(50);
+
+    IF NOT EXISTS (SELECT 1 FROM sys.all_objects WHERE name = N'dm_os_host_info')
+       OR EXISTS (SELECT 1 FROM sys.dm_os_host_info WHERE host_platform = N'Windows')
+    BEGIN
+        BEGIN TRY
+            EXEC master.dbo.xp_regread @rootkey = N'HKEY_LOCAL_MACHINE', @key = @key, @value_name = N'CurrentBuild',     @value = @build OUTPUT;
+            EXEC master.dbo.xp_regread @rootkey = N'HKEY_LOCAL_MACHINE', @key = @key, @value_name = N'UBR',              @value = @ubr OUTPUT;
+            EXEC master.dbo.xp_regread @rootkey = N'HKEY_LOCAL_MACHINE', @key = @key, @value_name = N'InstallationType', @value = @type OUTPUT;
+            EXEC master.dbo.xp_regread @rootkey = N'HKEY_LOCAL_MACHINE', @key = @key, @value_name = N'ProductName',      @value = @name OUTPUT;
+            EXEC master.dbo.xp_regread @rootkey = N'HKEY_LOCAL_MACHINE', @key = @key, @value_name = N'DisplayVersion',   @value = @display OUTPUT;
+        END TRY
+        BEGIN CATCH
+        END CATCH;
+    END
+
+    INSERT dbo.PatchLevel (CollectedAt, OsProductName, OsInstallationType, OsDisplayVersion, OsCurrentBuild, OsUbr, SqlVersion, SqlUpdateLevel, SqlUpdateReference)
+    VALUES (GETDATE(), @name, @type, @display, TRY_CONVERT(int, @build), @ubr,
+            CONVERT(varchar(30), SERVERPROPERTY('ProductVersion')),
+            CONVERT(nvarchar(50), SERVERPROPERTY('ProductUpdateLevel')),
+            CONVERT(nvarchar(50), SERVERPROPERTY('ProductUpdateReference')));
+END
+GO
+
+IF OBJECT_ID(N'dbo.usp_PatchReference_Clear', N'P') IS NULL EXEC (N'CREATE PROCEDURE dbo.usp_PatchReference_Clear AS RETURN 0;');
+GO
+ALTER PROCEDURE dbo.usp_PatchReference_Clear
+    @Product varchar(20)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DELETE FROM dbo.PatchReference WHERE Product = @Product;
+END
+GO
+
+IF OBJECT_ID(N'dbo.usp_PatchReference_Add', N'P') IS NULL EXEC (N'CREATE PROCEDURE dbo.usp_PatchReference_Add AS RETURN 0;');
+GO
+ALTER PROCEDURE dbo.usp_PatchReference_Add
+    @Product     varchar(20),
+    @ProductName nvarchar(100),
+    @Major       int,
+    @Minor       int,
+    @BuildNumber int,
+    @Revision    int,
+    @ServicePack nvarchar(30) = NULL,
+    @UpdateName  nvarchar(60) = NULL,
+    @CuNumber    int          = NULL,
+    @KB          varchar(20)  = NULL,
+    @ReleaseDate date         = NULL,
+    @Source      nvarchar(200) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    INSERT dbo.PatchReference (Product, ProductName, Major, Minor, BuildNumber, Revision, ServicePack, UpdateName, CuNumber, KB, ReleaseDate, Source)
+    VALUES (@Product, @ProductName, @Major, @Minor, @BuildNumber, @Revision, @ServicePack, @UpdateName, @CuNumber, @KB, @ReleaseDate, @Source);
+END
+GO
+
+/* Compares this server with the reference data. One row per component; Severity is OK | Info | Warning | Critical.
+   Windows: the monthly cumulative security update for the OS, judged by build number (CurrentBuild.UBR).
+   SQL Server: position on the servicing branch (CU or GDR) the instance is on. */
+IF OBJECT_ID(N'dbo.usp_PatchStatus', N'P') IS NULL EXEC (N'CREATE PROCEDURE dbo.usp_PatchStatus AS RETURN 0;');
+GO
+ALTER PROCEDURE dbo.usp_PatchStatus
+    @SqlVersion varchar(30) = NULL   -- testing only: evaluate this build instead of the running one
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @Today date = CAST(GETDATE() AS date);
+    DECLARE @R TABLE (SortOrder int, Component varchar(20), Installed nvarchar(100), InstalledUpdate nvarchar(100), Latest nvarchar(100),
+                      LatestUpdate nvarchar(100), LatestReleased date, Status nvarchar(100), Severity varchar(10),
+                      Detail nvarchar(1000), Recommendation nvarchar(1000), ReferenceLoaded datetime);
+
+    /*---------------------------------------------------------- SQL Server */
+    DECLARE @Ver varchar(30) = ISNULL(@SqlVersion, CONVERT(varchar(30), SERVERPROPERTY('ProductVersion')));
+    DECLARE @Maj int = CONVERT(int, PARSENAME(@Ver, 4)), @Bld int = CONVERT(int, PARSENAME(@Ver, 2)), @Rev int = CONVERT(int, PARSENAME(@Ver, 1));
+    DECLARE @SqlLoaded datetime = (SELECT MAX(LoadedAt) FROM dbo.PatchReference WHERE Product = 'SQL Server' AND Major = @Maj);
+    DECLARE @Grace int = CONVERT(int, dbo.fn_SettingInt('SqlPatchGraceDays', 30)),
+            @CuCrit int = CONVERT(int, dbo.fn_SettingInt('SqlCuBehindCritical', 3)),
+            @SecSev varchar(10) = CASE WHEN dbo.fn_Setting('SqlSecurityUpdateSeverity') = N'Warning' THEN 'Warning' ELSE 'Info' END;
+
+    IF @SqlLoaded IS NULL
+        INSERT @R VALUES (1, 'SQL Server', @Ver, CONVERT(nvarchar(50), SERVERPROPERTY('ProductUpdateLevel')), NULL, NULL, NULL, N'Not checked', 'Info',
+                          N'No build reference data is loaded for this SQL Server version.', N'Run Update-PatchReference.ps1 to load the latest build list from Microsoft.', NULL);
+    ELSE
+    BEGIN
+        -- where the installed build sits: exact match, or the nearest published build below it
+        DECLARE @InstUpdate nvarchar(60), @InstCu int, @InstSp nvarchar(30), @InstDate date, @Exact bit;
+        SELECT TOP (1) @InstUpdate = UpdateName, @InstCu = CuNumber, @InstSp = ISNULL(ServicePack, N'None'), @InstDate = ReleaseDate,
+                       @Exact = CASE WHEN BuildNumber = @Bld AND Revision = @Rev THEN 1 ELSE 0 END
+        FROM dbo.PatchReference
+        WHERE Product = 'SQL Server' AND Major = @Maj AND (BuildNumber < @Bld OR (BuildNumber = @Bld AND Revision <= @Rev))
+        ORDER BY BuildNumber DESC, Revision DESC;
+        SET @InstSp = ISNULL(@InstSp, N'None');
+
+        DECLARE @Track varchar(3) =
+            CASE WHEN @InstUpdate LIKE N'%CU%' THEN 'CU'
+                 WHEN EXISTS (SELECT 1 FROM dbo.PatchReference WHERE Product = 'SQL Server' AND Major = @Maj AND ISNULL(ServicePack, N'None') = @InstSp
+                              AND CuNumber IS NOT NULL AND (BuildNumber > @Bld OR (BuildNumber = @Bld AND Revision > @Rev))) AND ISNULL(@InstUpdate, N'') NOT LIKE N'%GDR%' THEN 'CU'
+                 ELSE 'GDR' END;
+
+        DECLARE @LName nvarchar(60), @LBld int, @LRev int, @LKB varchar(20), @LDate date, @LCu int, @LAll int;
+        DECLARE @AName nvarchar(60), @ABld int, @ARev int, @AKB varchar(20), @ADate date;
+        DECLARE @InstalledText nvarchar(100) = CASE WHEN @Exact = 1 THEN @InstUpdate WHEN @InstUpdate IS NOT NULL THEN @InstUpdate + N' (or later, unlisted build)' ELSE N'Unlisted build' END;
+
+        IF @Track = 'CU'
+        BEGIN
+            -- latest plain CU, and latest release on the CU branch (may be "CU + GDR")
+            SELECT TOP (1) @LName = UpdateName, @LBld = BuildNumber, @LRev = Revision, @LKB = KB, @LDate = ReleaseDate, @LCu = CuNumber
+            FROM dbo.PatchReference
+            WHERE Product = 'SQL Server' AND Major = @Maj AND ISNULL(ServicePack, N'None') = @InstSp AND CuNumber IS NOT NULL AND UpdateName NOT LIKE N'%GDR%'
+            ORDER BY BuildNumber DESC, Revision DESC;
+            SELECT TOP (1) @AName = UpdateName, @ABld = BuildNumber, @ARev = Revision, @AKB = KB, @ADate = ReleaseDate
+            FROM dbo.PatchReference
+            WHERE Product = 'SQL Server' AND Major = @Maj AND ISNULL(ServicePack, N'None') = @InstSp AND CuNumber IS NOT NULL
+            ORDER BY BuildNumber DESC, Revision DESC;
+
+            IF @Bld > @ABld OR (@Bld = @ABld AND @Rev >= @ARev)
+                INSERT @R VALUES (1, 'SQL Server', @Ver, @InstalledText, CONVERT(nvarchar(20), @Maj) + N'.0.' + CONVERT(nvarchar(10), @ABld) + N'.' + CONVERT(nvarchar(10), @ARev), @AName, @ADate,
+                                  N'Up to date', 'OK', N'On the latest cumulative update and security release.', NULL, @SqlLoaded);
+            ELSE IF @Bld > @LBld OR (@Bld = @LBld AND @Rev >= @LRev)
+                INSERT @R VALUES (1, 'SQL Server', @Ver, @InstalledText, CONVERT(nvarchar(20), @Maj) + N'.0.' + CONVERT(nvarchar(10), @ABld) + N'.' + CONVERT(nvarchar(10), @ARev), @AName, @ADate,
+                                  N'Latest CU - security update available', @SecSev,
+                                  N'On the latest cumulative update (' + @LName + N'). ' + @AName + N' (KB' + ISNULL(@AKB, N'?') + N', released ' + CONVERT(nvarchar(11), @ADate, 106) + N') adds security fixes on top of it.',
+                                  N'Apply KB' + ISNULL(@AKB, N'?') + N' at the next maintenance window.', @SqlLoaded);
+            ELSE
+            BEGIN
+                SET @LAll = @LCu - ISNULL(@InstCu, 0);
+                INSERT @R VALUES (1, 'SQL Server', @Ver, @InstalledText, CONVERT(nvarchar(20), @Maj) + N'.0.' + CONVERT(nvarchar(10), @ABld) + N'.' + CONVERT(nvarchar(10), @ARev), @AName, @ADate,
+                                  CASE WHEN @InstCu IS NULL THEN N'No cumulative update installed' ELSE CONVERT(nvarchar(10), @LAll) + N' CU' + CASE WHEN @LAll = 1 THEN N'' ELSE N's' END + N' behind' END,
+                                  CASE WHEN @LAll >= @CuCrit THEN 'Critical' WHEN DATEDIFF(day, @LDate, @Today) > @Grace THEN 'Warning' ELSE 'Info' END,
+                                  N'Installed: ' + ISNULL(@InstUpdate, N'RTM') + ISNULL(N' (released ' + CONVERT(nvarchar(11), @InstDate, 106) + N')', N'')
+                                  + N'. Latest cumulative update: ' + @LName + N' (KB' + ISNULL(@LKB, N'?') + N', released ' + CONVERT(nvarchar(11), @LDate, 106) + N')'
+                                  + CASE WHEN @AName <> @LName THEN N'; latest security release on that branch: ' + @AName + N' (KB' + ISNULL(@AKB, N'?') + N').' ELSE N'.' END,
+                                  N'Plan to apply ' + CASE WHEN @AName <> @LName THEN @AName + N' (KB' + ISNULL(@AKB, N'?') + N')' ELSE @LName + N' (KB' + ISNULL(@LKB, N'?') + N')' END
+                                  + N' after testing. Molehill Data Services can apply it as planned out-of-hours work.', @SqlLoaded);
+            END
+        END
+        ELSE
+        BEGIN
+            -- GDR (security-only) branch; SQL Server 2016 SP3 also has a parallel "Azure Connect feature pack" branch
+            DECLARE @Family int = CASE WHEN @InstUpdate LIKE N'%Azure Connect%' THEN 1 ELSE 0 END;
+            SELECT TOP (1) @AName = UpdateName, @ABld = BuildNumber, @ARev = Revision, @AKB = KB, @ADate = ReleaseDate
+            FROM dbo.PatchReference
+            WHERE Product = 'SQL Server' AND Major = @Maj AND ISNULL(ServicePack, N'None') = @InstSp AND CuNumber IS NULL
+              AND (UpdateName LIKE N'%GDR%' OR UpdateName LIKE N'%Security%')
+              AND CASE WHEN UpdateName LIKE N'%Azure Connect%' THEN 1 ELSE 0 END = @Family
+            ORDER BY BuildNumber DESC, Revision DESC;
+
+            IF @ABld IS NULL OR @Bld > @ABld OR (@Bld = @ABld AND @Rev >= @ARev)
+                INSERT @R VALUES (1, 'SQL Server', @Ver, @InstalledText, CASE WHEN @ABld IS NOT NULL THEN CONVERT(nvarchar(20), @Maj) + N'.0.' + CONVERT(nvarchar(10), @ABld) + N'.' + CONVERT(nvarchar(10), @ARev) END,
+                                  @AName, @ADate, N'Up to date (GDR branch)', 'OK', N'On the latest security (GDR) release for this branch.', NULL, @SqlLoaded);
+            ELSE
+            BEGIN
+                SET @LAll = (SELECT COUNT(*) FROM dbo.PatchReference
+                             WHERE Product = 'SQL Server' AND Major = @Maj AND ISNULL(ServicePack, N'None') = @InstSp AND CuNumber IS NULL
+                               AND (UpdateName LIKE N'%GDR%' OR UpdateName LIKE N'%Security%')
+                               AND CASE WHEN UpdateName LIKE N'%Azure Connect%' THEN 1 ELSE 0 END = @Family
+                               AND (BuildNumber > @Bld OR (BuildNumber = @Bld AND Revision > @Rev)));
+                INSERT @R VALUES (1, 'SQL Server', @Ver, @InstalledText, CONVERT(nvarchar(20), @Maj) + N'.0.' + CONVERT(nvarchar(10), @ABld) + N'.' + CONVERT(nvarchar(10), @ARev), @AName, @ADate,
+                                  CONVERT(nvarchar(10), @LAll) + N' security update' + CASE WHEN @LAll = 1 THEN N'' ELSE N's' END + N' behind (GDR branch)',
+                                  CASE WHEN @LAll >= 2 THEN 'Critical' WHEN DATEDIFF(day, @ADate, @Today) > @Grace THEN 'Warning' ELSE 'Info' END,
+                                  N'This instance is on the GDR (security fixes only) branch. Latest GDR: KB' + ISNULL(@AKB, N'?') + N' (released ' + CONVERT(nvarchar(11), @ADate, 106) + N').',
+                                  N'Apply KB' + ISNULL(@AKB, N'?') + N'. Consider moving to the cumulative update branch, which Microsoft recommends for ongoing servicing.', @SqlLoaded);
+            END
+        END
+    END
+
+    /*---------------------------------------------------------- Windows */
+    DECLARE @OsName nvarchar(200), @OsType nvarchar(50), @OsBuild int, @OsUbr int, @OsAt datetime;
+    SELECT TOP (1) @OsName = OsProductName, @OsType = OsInstallationType, @OsBuild = OsCurrentBuild, @OsUbr = OsUbr, @OsAt = CollectedAt
+    FROM dbo.PatchLevel ORDER BY CollectedAt DESC;
+    DECLARE @OsText nvarchar(100) = CASE WHEN @OsBuild IS NOT NULL THEN CONVERT(nvarchar(10), @OsBuild) + ISNULL(N'.' + CONVERT(nvarchar(10), @OsUbr), N'') END;
+    DECLARE @WinLoaded datetime = (SELECT MAX(LoadedAt) FROM dbo.PatchReference WHERE Product = 'Windows Server');
+    DECLARE @WGrace int = CONVERT(int, dbo.fn_SettingInt('WindowsPatchGraceDays', 14));
+
+    IF EXISTS (SELECT 1 FROM sys.all_objects WHERE name = N'dm_os_host_info')
+       AND NOT EXISTS (SELECT 1 FROM sys.dm_os_host_info WHERE host_platform = N'Windows')
+        INSERT @R VALUES (2, 'Windows', NULL, NULL, NULL, NULL, NULL, N'Not checked (not Windows)', 'Info', N'SQL Server is not running on Windows, so Windows patching is not checked.', NULL, NULL);
+    ELSE IF @OsBuild IS NULL
+        INSERT @R VALUES (2, 'Windows', NULL, NULL, NULL, NULL, NULL, N'Not collected yet', 'Info', N'The operating system build has not been collected yet (daily collection).', NULL, NULL);
+    ELSE IF ISNULL(@OsType, N'') NOT LIKE N'Server%'
+        INSERT @R VALUES (2, 'Windows', @OsText, @OsName, NULL, NULL, NULL, N'Not checked (not Windows Server)', 'Info',
+                          N'Security update checks cover Windows Server only (this host reports ' + ISNULL(@OsName, N'?') + N', ' + ISNULL(@OsType, N'?') + N').', NULL, NULL);
+    ELSE IF @OsBuild < 10000 OR @OsUbr IS NULL
+        INSERT @R VALUES (2, 'Windows', @OsText, @OsName, NULL, NULL, NULL, N'Not checked (Windows Server 2012 / 2012 R2)', 'Info',
+                          N'Windows Server 2012 and 2012 R2 do not record their monthly update level in a way that can be compared automatically.',
+                          N'Confirm in Windows Update that the latest monthly rollup is installed.', NULL);
+    ELSE IF NOT EXISTS (SELECT 1 FROM dbo.PatchReference WHERE Product = 'Windows Server' AND BuildNumber = @OsBuild)
+        INSERT @R VALUES (2, 'Windows', @OsText, @OsName, NULL, NULL, NULL, N'Not checked', 'Info',
+                          N'No security update reference data is loaded for Windows build ' + CONVERT(nvarchar(10), @OsBuild) + N'.',
+                          N'Run Update-PatchReference.ps1 to load the latest security updates from Microsoft.', @WinLoaded);
+    ELSE
+    BEGIN
+        DECLARE @WName nvarchar(100), @WRev int, @WKB varchar(20), @WDate date, @WSource nvarchar(200), @Missing int, @Loaded int, @OldestMissing date;
+        SELECT TOP (1) @WName = ProductName, @WRev = Revision, @WKB = KB, @WDate = ReleaseDate, @WSource = Source
+        FROM dbo.PatchReference WHERE Product = 'Windows Server' AND BuildNumber = @OsBuild ORDER BY ReleaseDate DESC, Revision DESC;
+        SELECT @Missing = SUM(CASE WHEN Revision > @OsUbr THEN 1 ELSE 0 END), @Loaded = COUNT(*),
+               @OldestMissing = MIN(CASE WHEN Revision > @OsUbr THEN ReleaseDate END)
+        FROM dbo.PatchReference WHERE Product = 'Windows Server' AND BuildNumber = @OsBuild;
+
+        INSERT @R VALUES (2, 'Windows', @OsText, ISNULL(@OsName, @WName),
+                          CONVERT(nvarchar(10), @OsBuild) + N'.' + CONVERT(nvarchar(10), @WRev), N'KB' + ISNULL(@WKB, N'?') + N' (' + ISNULL(@WSource, N'') + N' security update)', @WDate,
+                          CASE WHEN @Missing = 0 THEN N'Up to date'
+                               ELSE CONVERT(nvarchar(10), @Missing) + N' monthly security update' + CASE WHEN @Missing = 1 THEN N'' ELSE N's' END + N' missing' END,
+                          CASE WHEN @Missing = 0 THEN 'OK'
+                               WHEN @Missing >= 2 THEN 'Critical'
+                               WHEN DATEDIFF(day, @WDate, @Today) > @WGrace THEN 'Warning'
+                               ELSE 'Info' END,
+                          CASE WHEN @Missing = 0 THEN N'The latest Windows security update (KB' + ISNULL(@WKB, N'?') + N') is installed.'
+                               ELSE N'Installed OS build ' + @OsText + N'. The latest security update is KB' + ISNULL(@WKB, N'?') + N' (build ' + CONVERT(nvarchar(10), @OsBuild) + N'.' + CONVERT(nvarchar(10), @WRev)
+                                  + N', released ' + CONVERT(nvarchar(11), @WDate, 106) + N'). Missing ' + CONVERT(nvarchar(10), @Missing) + N' of the last ' + CONVERT(nvarchar(10), @Loaded)
+                                  + N' monthly security updates, the oldest from ' + CONVERT(nvarchar(11), @OldestMissing, 106) + N'.' END,
+                          CASE WHEN @Missing = 0 THEN NULL
+                               ELSE N'Install the latest cumulative security update (KB' + ISNULL(@WKB, N'?') + N') via Windows Update / WSUS and restart. Cumulative updates include all earlier security fixes.' END,
+                          @WinLoaded);
+    END
+
+    /*---------------------------------------------------------- Reference freshness */
+    DECLARE @RefLoaded datetime = (SELECT MAX(LoadedAt) FROM dbo.PatchReference), @MaxAge int = CONVERT(int, dbo.fn_SettingInt('PatchReferenceMaxAgeDays', 40));
+    IF @RefLoaded IS NOT NULL AND DATEDIFF(day, @RefLoaded, GETDATE()) > @MaxAge
+        INSERT @R VALUES (3, 'Reference data', NULL, NULL, NULL, NULL, NULL, N'Out of date', 'Warning',
+                          N'Patch reference data was last refreshed ' + CONVERT(nvarchar(11), @RefLoaded, 106) + N', so newer updates may not be taken into account.',
+                          N'Run Update-PatchReference.ps1 (or Export-WeeklyReports.ps1 -UpdatePatchReference).', @RefLoaded);
+
+    SELECT SortOrder, Component, Installed, InstalledUpdate, Latest, LatestUpdate, LatestReleased, Status, Severity, Detail, Recommendation, ReferenceLoaded
+    FROM @R ORDER BY SortOrder;
 END
 GO
 
@@ -1287,6 +1567,23 @@ BEGIN
                           + CONVERT(nvarchar(10), @BlockSamples) + N' five-minute sample(s). Longest wait ' + CONVERT(nvarchar(10), @BlockMaxWait) + N' seconds.',
                           N'Review the head blockers below. Long-held transactions or missing indexes are the usual causes.');
 
+    /*------------------------------------------------------------- PATCHING */
+    CREATE TABLE #patch (SortOrder int, Component varchar(20), Installed nvarchar(100), InstalledUpdate nvarchar(100), Latest nvarchar(100),
+                         LatestUpdate nvarchar(100), LatestReleased date, Status nvarchar(100), Severity varchar(10),
+                         Detail nvarchar(1000), Recommendation nvarchar(1000), ReferenceLoaded datetime);
+    BEGIN TRY
+        EXEC dbo.usp_CollectPatchLevel;
+        INSERT #patch EXEC dbo.usp_PatchStatus;
+    END TRY
+    BEGIN CATCH
+        INSERT #F VALUES ('Patching', 'Info', N'Patch status could not be checked', LEFT(ERROR_MESSAGE(), 400), NULL);
+    END CATCH;
+
+    INSERT #F (Section, Severity, Item, Detail, Recommendation)
+    SELECT 'Patching', Severity, Component + N': ' + Status, Detail, Recommendation
+    FROM #patch WHERE Severity IN ('Critical', 'Warning', 'Info')
+    ORDER BY SortOrder;
+
     /*---------------------------------------------------------------- RISKS */
     INSERT #F (Section, Severity, Item, Detail, Recommendation)
     SELECT 'Risks', CASE WHEN state_desc = N'OFFLINE' THEN 'Info' ELSE 'Critical' END,
@@ -1428,8 +1725,8 @@ td.key{font-weight:600;width:28%;background:#FAF9F9}
                           [td/@class] = 'num', td = c.Crit, '',
                           [td/@class] = 'num', td = c.Warn, '',
                           [td/@class] = 'num', td = c.Info
-                   FROM (VALUES (1, 'Server'), (2, 'Backups'), (3, 'Error log'), (4, 'Agent jobs'), (5, 'Queries'),
-                                (6, 'Capacity'), (7, 'Availability'), (8, 'Blocking'), (9, 'Risks'), (10, 'Monitoring')) s (SortOrder, Section)
+                   FROM (VALUES (1, 'Server'), (2, 'Patching'), (3, 'Backups'), (4, 'Error log'), (5, 'Agent jobs'), (6, 'Queries'),
+                                (7, 'Capacity'), (8, 'Availability'), (9, 'Blocking'), (10, 'Risks'), (11, 'Monitoring')) s (SortOrder, Section)
                    CROSS APPLY (SELECT Crit = ISNULL(SUM(CASE WHEN f.Severity = 'Critical' THEN 1 ELSE 0 END), 0),
                                        Warn = ISNULL(SUM(CASE WHEN f.Severity = 'Warning' THEN 1 ELSE 0 END), 0),
                                        Info = ISNULL(SUM(CASE WHEN f.Severity = 'Info' THEN 1 ELSE 0 END), 0)
@@ -1468,6 +1765,20 @@ td.key{font-weight:600;width:28%;background:#FAF9F9}
                    ORDER BY o
                    FOR XML PATH('tr'), TYPE) AS nvarchar(max));
     SET @H = @H + N'<h2>Server</h2><table>' + @T + N'</table>';
+
+    -- Patching
+    SET @T = CAST((SELECT td = Component, '',
+                          td = ISNULL(Installed, N'-') + ISNULL(N' - ' + NULLIF(InstalledUpdate, N''), N''), '',
+                          td = ISNULL(Latest + ISNULL(N' - ' + LatestUpdate, N''), N'-'), '',
+                          td = ISNULL(CONVERT(nvarchar(11), LatestReleased, 106), N'-'), '',
+                          [td/@class] = CASE Severity WHEN 'Critical' THEN 'critical' WHEN 'Warning' THEN 'warning' WHEN 'OK' THEN 'ok' ELSE 'info' END,
+                          td = Status
+                   FROM #patch ORDER BY SortOrder
+                   FOR XML PATH('tr'), TYPE) AS nvarchar(max));
+    DECLARE @PatchRef datetime = (SELECT MAX(LoadedAt) FROM dbo.PatchReference);
+    SET @H = @H + N'<h2>Patching</h2><table><tr><th>Component</th><th>Installed</th><th>Latest available</th><th>Released</th><th>Status</th></tr>' + ISNULL(@T, @Empty) + N'</table>'
+            + N'<p class="note">Windows: the monthly cumulative security update for the operating system (feature and optional preview updates are ignored; other software such as .NET or drivers is not covered). '
+            + N'SQL Server: the latest cumulative update on the servicing branch in use. Build data from Microsoft, last refreshed ' + ISNULL(dbo.fn_Date(@PatchRef), N'never') + N'.</p>';
 
     -- Backups
     SET @T = CAST((SELECT td = DatabaseName, '', td = RecoveryModel, '',
@@ -1678,6 +1989,8 @@ BEGIN
         INSERT @steps (StepName, Command) VALUES ('QueryStats', N'EXEC dbo.usp_CollectQueryStats;');
     IF @Type IN ('Daily', 'All')
         INSERT @steps (StepName, Command) VALUES ('Disk', N'EXEC dbo.usp_CollectDisk;'), ('DatabaseFiles', N'EXEC dbo.usp_CollectDatabaseFiles;'), ('Purge', N'EXEC dbo.usp_PurgeHistory;');
+    IF @Type IN ('Daily', 'All', 'Weekly')
+        INSERT @steps (StepName, Command) VALUES ('PatchLevel', N'EXEC dbo.usp_CollectPatchLevel;');
     IF @Type = 'Weekly'
         INSERT @steps (StepName, Command) VALUES ('WeeklyReport', N'EXEC dbo.usp_BuildWeeklyReport @SendEmail = 1, @ReturnResults = 0;');
 
@@ -1773,6 +2086,10 @@ BEGIN
     GRANT SELECT ON SCHEMA::dbo TO MolehillWatchReader;
     GRANT EXECUTE ON dbo.usp_ShowReport TO MolehillWatchReader;
     GRANT EXECUTE ON dbo.usp_Inventory TO MolehillWatchReader;
+    GRANT EXECUTE ON dbo.usp_PatchStatus TO MolehillWatchReader;
+    -- lets the weekly export refresh Microsoft's published build list (writes only to dbo.PatchReference)
+    GRANT EXECUTE ON dbo.usp_PatchReference_Clear TO MolehillWatchReader;
+    GRANT EXECUTE ON dbo.usp_PatchReference_Add TO MolehillWatchReader;
 
     SET @user = (SELECT name FROM sys.database_principals WHERE sid = SUSER_SID(@LoginName));
     IF @user IS NULL
