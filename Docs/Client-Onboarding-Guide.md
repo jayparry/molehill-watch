@@ -41,7 +41,9 @@ It creates:
 | SQL Agent job **Molehill Watch - Collect Daily** | 05:30: disk space and database sizes, old-history clean-up |
 | SQL Agent job **Molehill Watch - Weekly Report** | Mondays 06:30: builds the weekly status report |
 
-The jobs only **read** server metadata: DMVs, msdb history and the error log. They don't change your databases, settings or existing jobs.
+The jobs only **read** server metadata: DMVs, msdb history, the error log and the Windows version/update level from the registry. They don't change your databases, settings or existing jobs.
+
+**Patching checks:** each week we compare the SQL Server version and Windows Server security update level against Microsoft's published release lists. This shows whether the latest cumulative update and monthly security patches are installed. The lists are downloaded from Microsoft by us; your servers don't need internet access.
 
 **Express edition** has no SQL Agent. We use Windows Task Scheduler instead, which requires the local SYSTEM account to have sysadmin rights on that instance. We'll agree this with you first.
 
@@ -54,7 +56,7 @@ The installer grants **read-only** visibility:
 * `VIEW SERVER STATE` and `VIEW ANY DEFINITION` to see health, configuration and performance data
 * `CONNECT ANY DATABASE` (SQL Server 2014+) to see database-level health information. It does **not** allow reading your data.
 * Read access to SQL Agent job definitions and history, and backup history, in msdb
-* Read access to the MolehillWatch database
+* Read access to the MolehillWatch database, plus permission to refresh its table of Microsoft's published update builds
 
 To carry out fixes you've approved, we may need higher rights temporarily, for example to restart a job or change a setting. We'll always ask first.
 

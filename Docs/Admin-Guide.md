@@ -94,9 +94,10 @@ The client's **Molehill Watch - Weekly Report** job builds the report at 06:30 e
 
 1. On each client's jump box:
    ```powershell
-   .\Export-WeeklyReports.ps1 -ServerList .\servers.txt
+   .\Export-WeeklyReports.ps1 -ServerList .\servers.txt -UpdatePatchReference
    ```
-2. Open `index.html`. Review each report, and check the **AG parity** page where there is one.
+   `-UpdatePatchReference` refreshes Microsoft's latest SQL Server CU and Windows security update data (needs internet). With no internet on the jump box, create the file on your PC with `.\Update-PatchReference.ps1 -OutFile patch-reference.json`, then load it with `-InFile`.
+2. Open `index.html`. Review each report, check the **Patching** table, and check the **AG parity** page where there is one. Out-of-date patching is a natural prompt to offer planned out-of-hours patching work.
 3. Send the reports to the client. Raise tickets for anything that needs follow-up work.
 4. Log each report:
    ```sql

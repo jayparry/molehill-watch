@@ -53,10 +53,12 @@ That's the whole install. It creates the database, collectors, report builder an
 On the client jump box:
 
 ```powershell
-.\Export-WeeklyReports.ps1 -ServerList .\servers.txt
+.\Export-WeeklyReports.ps1 -ServerList .\servers.txt -UpdatePatchReference
 ```
 
-This writes an `index.html` with the RAG status of every server. Next to it are the full reports and an Availability Group job/login parity check. Review them, send them to the client, then log each one:
+This writes an `index.html` with the RAG status and live patch status of every server. Next to it are the full reports and an Availability Group job/login parity check. `-UpdatePatchReference` first refreshes Microsoft's latest SQL Server and Windows Server build data, and needs internet access.
+
+**If the jump box has no internet access:** on your own PC run `.\Update-PatchReference.ps1 -OutFile patch-reference.json`, copy the file across, then on the jump box run `.\Update-PatchReference.ps1 -InFile patch-reference.json -ServerList .\servers.txt`. Review them, send them to the client, then log each one:
 
 ```sql
 EXEC MolehillAdmin.dbo.usp_WeeklyReport_Log @Client = N'Contoso Ltd', @InstanceName = N'SQL01', @OverallStatus = 'Amber';
@@ -75,7 +77,8 @@ MolehillWatch\
 │  ├─ Install-MolehillWatch.ps1             one-command installer (1..n instances)
 │  ├─ MolehillWatch_Install.sql             the database, collectors, report and jobs (SSMS-runnable)
 │  ├─ MolehillWatch_Uninstall.sql           removes jobs + database
-│  ├─ Export-WeeklyReports.ps1              saves reports as HTML + AG parity check
+│  ├─ Export-WeeklyReports.ps1              saves reports as HTML + AG parity check + patch status
+│  ├─ Update-PatchReference.ps1             loads Microsoft's latest SQL/Windows build data
 │  ├─ Invoke-MolehillCollect.ps1            collector for Express edition (Task Scheduler)
 │  └─ servers.example.txt
 ├─ Admin\                                   ← your machine only
@@ -98,6 +101,7 @@ MolehillWatch\
 | Weekly report: top 10 poorly performing queries | Hourly plan-cache snapshots, ranked by CPU used during the week |
 | Weekly report: capacity (disk, database growth) | Daily disk and file snapshots: % free, days-to-full projection, 7/30-day growth, log usage, max-size and autogrowth risks |
 | Weekly report: AG health, latency, failover readiness | 5-minute AG samples: sync state, send/redo queue, lag, failover readiness, disconnected replicas; plus mirroring, log shipping, FCI nodes |
+| Weekly report: patching (extra) | **Windows Server 2016–2025:** the installed OS build (`CurrentBuild.UBR`) compared with the build that contains each month's security update, from Microsoft's MSRC security API. Info within the 14-day grace period after Patch Tuesday, Warning after that, Critical once two monthly updates are missed. Feature/preview updates are ignored. **SQL Server:** the build compared with Microsoft's published CU/GDR list on the branch in use (CU or GDR). Warning when behind the latest CU for 30+ days, Critical at 3+ CUs behind, Info when a newer "CU + GDR" security release exists on top of the latest CU. |
 | Secondary replicas: job parity between replicas | `Export-WeeklyReports.ps1` compares jobs (steps, enabled) and logins (incl. SQL login SIDs) across replicas |
 | Obvious risks / recommendations | CHECKDB overdue, suspect pages, DBs not online, auto-shrink/close, page verify, max memory, blocking chains |
 | Unsupported versions recorded and noted weekly | Lifecycle table on both sides; risk acceptance recorded in Admin and shown in every weekly report |
@@ -126,7 +130,8 @@ MolehillWatch\
 4. **New instances** are billed from the first cycle that starts after they're covered (no pro-rata). Instances with a bespoke `@AgreedMonthlyFee` don't count towards the multi-server tiers.
 5. **Bank holidays** are England & Wales, seeded to 2030. The dashboard reminds you to add more. Scotland/NI clients: edit `dbo.BankHoliday`.
 6. **Lifecycle dates** for SQL Server and Windows are seeded from Microsoft's published dates. SQL Server 2025 is left blank. Check them at learn.microsoft.com/lifecycle.
-7. **Testing:** everything was installed and exercised end-to-end on SQL Server 2019 (LocalDB/Express), including 39 automated checks of the commercial rules. It has not been run on SQL 2012–2017 or on a live Availability Group or FCI. Those code paths are version-guarded, but do a first install on a non-critical instance.
+7. **Patching checks** cover the monthly Windows OS security update only, not .NET, drivers or other software. Windows Server 2012/2012 R2 can't be checked automatically (their update level isn't in the registry in a comparable form), and neither can hotpatch-only months on Windows Server 2025 Azure Edition. The build data is refreshed by `Update-PatchReference.ps1`; the report warns if it is more than 40 days old. Thresholds are settings in `MolehillWatch.dbo.Setting` (`SqlPatchGraceDays`, `SqlCuBehindCritical`, `SqlSecurityUpdateSeverity`, `WindowsPatchGraceDays`).
+8. **Testing:** everything was installed and exercised end-to-end on SQL Server 2019 (LocalDB/Express), including 39 automated checks of the commercial rules. It has not been run on SQL 2012–2017 or on a live Availability Group or FCI. Those code paths are version-guarded, but do a first install on a non-critical instance.
 
 ## Uninstall
 
