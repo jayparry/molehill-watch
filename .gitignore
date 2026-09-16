@@ -5,3 +5,8 @@ MolehillReports/
 # Downloaded patch reference data
 patch-reference.json
 PatchStatus_*.html
+
+# Build output
+bin/
+obj/
+publish/

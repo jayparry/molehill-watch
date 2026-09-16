@@ -103,7 +103,8 @@ MolehillWatch\
 │  └─ Client-Onboarding-Guide.md            send to the client
 └─ Tools\
    ├─ Get-PatchStatus.ps1                   standalone patch check for any server (no install)
-   └─ Test-SqlConnectionString.ps1          tests connection strings by reading dbo.TestConnection
+   ├─ Test-SqlConnectionString.ps1          tests connection strings by reading dbo.TestConnection
+   └─ SqlConnectionTester\                  C# terminal app: build, save and test connection strings
 ```
 
 ## Standalone patch check (`Tools\Get-PatchStatus.ps1`)
@@ -134,6 +135,22 @@ Takes a list of SQL Server connection strings, reads `dbo.TestConnection` (one c
 * Results are objects, so pipe them to `Format-List`, `Export-Csv` or `-CsvPath`. A plain run shows PowerShell's table, which shortens long errors on screen - use `-Detailed` or `Format-List` to read them.
 * `-MaskPasswords` replaces passwords in the returned connection strings before you share the results. `-ConnectTimeoutSeconds` overrides slow timeouts.
 * Read-only: it creates and changes nothing.
+
+## Connection tester app (`Tools\SqlConnectionTester`)
+
+A C# terminal app (Terminal.Gui) that does the same test as the PowerShell script, but lets you build and keep connection strings interactively and covers every SQL Server sign-in method, including Entra ID interactive/MFA, device code, service principal, managed identity and default. See its [README](Tools/SqlConnectionTester/README.md).
+
+```powershell
+cd Tools\SqlConnectionTester
+dotnet run                     # the app: F2 add, F5 test, F7 full error, F8 export CSV
+dotnet run -- --test           # headless, for scripts
+```
+
+Saved connections live in a JSON file (`--file` for one per client); passwords are only kept if you ask, and are then encrypted for your Windows account. Publish a single self-contained `.exe` for servers without .NET:
+
+```powershell
+dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o publish
+```
 
 ## How the contract maps to the toolkit
 
