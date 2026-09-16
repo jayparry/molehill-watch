@@ -102,7 +102,8 @@ MolehillWatch\
 │  ├─ Admin-Guide.md                        your day-to-day runbook
 │  └─ Client-Onboarding-Guide.md            send to the client
 └─ Tools\
-   └─ Get-PatchStatus.ps1                   standalone patch check for any server (no install)
+   ├─ Get-PatchStatus.ps1                   standalone patch check for any server (no install)
+   └─ Test-SqlConnectionString.ps1          tests connection strings by reading dbo.TestConnection
 ```
 
 ## Standalone patch check (`Tools\Get-PatchStatus.ps1`)
@@ -119,6 +120,20 @@ A single script, separate from Molehill Watch, for a quick "how out of date is t
 * **Compares** against the same Microsoft data as Molehill Watch, using the same rules, and writes an HTML report (`-CsvPath` for CSV too).
 * **Exit code** is 0 (OK), 1 (warnings) or 2 (critical).
 * **No internet on the server?** Run `.\Get-PatchStatus.ps1 -SaveReference patch-reference.json` somewhere with internet, and copy that file next to the script. It's picked up automatically.
+
+## Connection string tester (`Tools\Test-SqlConnectionString.ps1`)
+
+Takes a list of SQL Server connection strings, reads `dbo.TestConnection` (one column `TestText`, one row) through each, and reports `ConnectionString`, `TestText`, `Status` and `ErrorMessage`. Useful when an application can't connect and you need to prove which strings work, from which machine, as which account.
+
+```powershell
+.\Test-SqlConnectionString.ps1 -ConnectionString $strings | Format-List
+.\Test-SqlConnectionString.ps1 -Path .\connections.txt -CsvPath .\results.csv
+```
+
+* **The error is complete**: every error in the `SqlException` collection (message number, severity, state, procedure, line, server), every inner exception, and the client connection id. Nothing is shortened.
+* Results are objects, so pipe them to `Format-List`, `Export-Csv` or `-CsvPath`. A plain run shows PowerShell's table, which shortens long errors on screen - use `-Detailed` or `Format-List` to read them.
+* `-MaskPasswords` replaces passwords in the returned connection strings before you share the results. `-ConnectTimeoutSeconds` overrides slow timeouts.
+* Read-only: it creates and changes nothing.
 
 ## How the contract maps to the toolkit
 
