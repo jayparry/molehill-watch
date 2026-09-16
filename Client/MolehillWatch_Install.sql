@@ -564,6 +564,11 @@ BEGIN
       AND NOT EXISTS (SELECT 1 FROM mw.ErrorLogPattern ep
                       WHERE ep.IsExclusion = 1 AND ep.IsEnabled = 1 AND m.FullText LIKE ep.Pattern);
 
+    -- how many raw lines the error log gave us: 0 means it could not be read (the weekly report flags that)
+    DECLARE @rawRows int = (SELECT COUNT(*) FROM #log);
+    UPDATE mw.CollectorState SET IntValue = @rawRows, DateValue = GETDATE() WHERE StateName = 'ErrorLogRawRows';
+    IF @@ROWCOUNT = 0 INSERT mw.CollectorState (StateName, DateValue, IntValue) VALUES ('ErrorLogRawRows', GETDATE(), @rawRows);
+
     DECLARE @hw datetime = (SELECT MAX(LogDate) FROM #log);
     IF @hw IS NOT NULL
     BEGIN
@@ -1661,6 +1666,12 @@ BEGIN
         INSERT #F VALUES ('Monitoring', 'Warning', N'Molehill Watch collection errors', @List,
                           N'Some report data may be incomplete. Molehill Data Services will review.');
 
+    -- A running SQL Server always writes to its error log, so reading no lines at all means it cannot be read
+    IF EXISTS (SELECT 1 FROM mw.CollectorState WHERE StateName = 'ErrorLogRawRows' AND IntValue = 0)
+        INSERT #F VALUES ('Monitoring', 'Warning', N'SQL Server error log could not be read',
+                          N'xp_readerrorlog returned no lines at all on this instance, so the error log section of this report is empty and error log issues would not be picked up.',
+                          N'Molehill Data Services will check that the error log is readable (this is normal on SQL Server Express LocalDB, but not on a real instance).');
+
     DECLARE @LastHourly datetime = (SELECT MAX(StartTime) FROM mw.CollectionLog WHERE CollectionType IN ('Hourly', 'All') AND Succeeded = 1);
     IF @LastHourly IS NULL OR @LastHourly < DATEADD(hour, -3, @Now)
         INSERT #F VALUES ('Monitoring', 'Warning', N'Molehill Watch collection jobs not running',
@@ -1989,13 +2000,17 @@ BEGIN
     IF @Type IN ('Frequent', 'All')
         INSERT @steps (StepName, Command) VALUES ('AvailabilityGroups', N'EXEC mw.usp_CollectAvailabilityGroups;'), ('Blocking', N'EXEC mw.usp_CollectBlocking;');
     IF @Type IN ('Hourly', 'All', 'Weekly')
-        INSERT @steps (StepName, Command) VALUES ('ErrorLog', N'EXEC mw.usp_CollectErrorLog;'), ('JobFailures', N'EXEC mw.usp_CollectJobFailures;');
+        INSERT @steps (StepName, Command) VALUES ('JobFailures', N'EXEC mw.usp_CollectJobFailures;');
     IF @Type IN ('Hourly', 'All')
         INSERT @steps (StepName, Command) VALUES ('QueryStats', N'EXEC mw.usp_CollectQueryStats;');
     IF @Type IN ('Daily', 'All')
         INSERT @steps (StepName, Command) VALUES ('Disk', N'EXEC mw.usp_CollectDisk;'), ('DatabaseFiles', N'EXEC mw.usp_CollectDatabaseFiles;'), ('Purge', N'EXEC mw.usp_PurgeHistory;');
     IF @Type IN ('Daily', 'All', 'Weekly')
         INSERT @steps (StepName, Command) VALUES ('PatchLevel', N'EXEC mw.usp_CollectPatchLevel;');
+    -- Error log last: on a few installations (notably LocalDB) xp_readerrorlog ends the connection with a
+    -- severity 20 error that T-SQL cannot catch, so everything else is collected before it is attempted.
+    IF @Type IN ('Hourly', 'All', 'Weekly')
+        INSERT @steps (StepName, Command) VALUES ('ErrorLog', N'EXEC mw.usp_CollectErrorLog;');
     IF @Type = 'Weekly'
         INSERT @steps (StepName, Command) VALUES ('WeeklyReport', N'EXEC mw.usp_BuildWeeklyReport @SendEmail = 1, @ReturnResults = 0;');
 
@@ -2009,6 +2024,7 @@ BEGIN
     WHILE @i <= @max
     BEGIN
         SELECT @name = StepName, @cmd = Command FROM @steps WHERE StepOrder = @i;
+
         INSERT mw.CollectionLog (CollectionType, StepName, StartTime) VALUES (@Type, @name, GETDATE());
         SET @logId = SCOPE_IDENTITY();
         BEGIN TRY
