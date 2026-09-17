@@ -103,7 +103,8 @@ MolehillWatch\
 │  └─ Client-Onboarding-Guide.md            send to the client
 └─ Tools\
    ├─ Get-PatchStatus.ps1                   standalone patch check for any server (no install)
-   ├─ Test-SqlConnectionString.ps1          tests connection strings by reading dbo.TestConnection
+   ├─ Test-SqlConnectionString.ps1          tests a list of connection strings (one-shot, no UI)
+   ├─ SqlConnectionTester.ps1               the same app in PowerShell, for sites that forbid .exe files
    └─ SqlConnectionTester\                  C# terminal app: build, save and test connection strings
 ```
 
@@ -145,6 +146,16 @@ cd Tools\SqlConnectionTester
 dotnet run                     # the app: F2 add, F5 test, F7 full error, F8 export CSV
 dotnet run -- --test           # headless, for scripts
 ```
+
+**Cannot run an .exe at a client site?** `Tools\SqlConnectionTester.ps1` is the same app written in PowerShell, with the same screen, keys and JSON file, so the two can share a connections file:
+
+```powershell
+.\SqlConnectionTester.ps1                        # the app
+.\SqlConnectionTester.ps1 -Test                  # headless
+.\SqlConnectionTester.ps1 'Server=SQL01;...'     # test one connection string
+```
+
+It needs no modules. Windows and SQL logins always work; the Entra ID methods need Microsoft.Data.SqlClient, which it finds in the SqlServer module, SSMS or Azure Data Studio (or `-SqlClientDll`), and it marks the methods it cannot do rather than failing oddly later.
 
 Saved connections live in a JSON file (`--file` for one per client); passwords are only kept if you ask, and are then encrypted for your Windows account. Publish a single self-contained `.exe` for servers without .NET:
 
