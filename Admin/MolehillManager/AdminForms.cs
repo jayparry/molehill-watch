@@ -48,13 +48,33 @@ public static class AdminForms
     private static readonly (string Name, string Label, bool Memo, string Help)[] BusinessSettings =
     {
         ("BusinessName", "Business name", false, ""),
+        ("BusinessTradingName", "Trading as", false, "the line under your name on invoices"),
+        ("BusinessContact", "Contact name", false, "who the client should ask for"),
         ("BusinessEmail", "E-mail", false, ""),
+        ("BusinessPhone", "Phone", false, ""),
         ("BusinessWebsite", "Website", false, ""),
         ("BusinessAddress", "Postal address", true, ""),
-        ("PaymentDetails", "Payment details", true, ""),
+        ("PaymentDetails", "Payment details", true, "one per line, as 'Sort code: 12-34-56'"),
         ("InvoicePrefix", "Invoice prefix", false, "MDS -> MDS-2026-0001"),
         ("PaymentTermsDays", "Payment terms (days)", false, "")
     };
+
+    /// <summary>Reads an image file and returns it as a data: URI for the invoice header.</summary>
+    private static string LogoDataUri(string path)
+    {
+        var file = new FileInfo(path);
+        if (!file.Exists) throw new FormatException($"No file at {path}.");
+        if (file.Length > 400 * 1024) throw new FormatException($"That file is {file.Length / 1024} KB. Use one under 400 KB - a PNG about 500 pixels wide is plenty.");
+        var type = file.Extension.ToLowerInvariant() switch
+        {
+            ".png" => "image/png",
+            ".jpg" or ".jpeg" => "image/jpeg",
+            ".gif" => "image/gif",
+            ".svg" => "image/svg+xml",
+            _ => throw new FormatException("The logo must be a .png, .jpg, .gif or .svg file.")
+        };
+        return $"data:{type};base64,{Convert.ToBase64String(File.ReadAllBytes(file.FullName))}";
+    }
 
     /// <summary>The details printed on invoices and the dashboard (dbo.Setting).</summary>
     public static FormSpec BusinessDetails(AdminDb db)
@@ -65,16 +85,32 @@ public static class AdminForms
         return new FormSpec
         {
             Title = "Business and invoice details",
-            Intro = "Printed on every invoice and on the dashboard. Change them any time from File > Business and invoice details.",
+            Intro = "Printed on every invoice and on the dashboard. Change them any time from File > Business and invoice details. "
+                    + "The logo sits at the top of every invoice: leave it alone to keep the one you have.",
             Fields = BusinessSettings.Select(b => b.Name == "PaymentTermsDays"
                         ? Field.Int(b.Name, b.Label, required: true, def: Cur(b.Name))
                         : b.Memo ? Field.Memo(b.Name, b.Label, def: Cur(b.Name))
-                        : Field.Text(b.Name, b.Label, required: b.Name is "BusinessName" or "InvoicePrefix", def: Cur(b.Name), help: b.Help)).ToList(),
+                        : Field.Text(b.Name, b.Label, required: b.Name is "BusinessName" or "InvoicePrefix", def: Cur(b.Name), help: b.Help))
+                    .Append(Field.Text("LogoFile", "Logo file", help: Cur("LogoDataUri") == "" ? "no logo yet - give a .png to add one" : "blank = keep the logo you have"))
+                    .Append(Field.Bool("RemoveLogo", "Remove the logo", help: "print the business name instead"))
+                    .ToList(),
             Submit = v =>
             {
+                var r = new ProcResult();
                 foreach (var b in BusinessSettings)
                     db.Execute("UPDATE dbo.Setting SET Value = @v WHERE Name = @n;", ("@v", v[b.Name].Trim()), ("@n", b.Name));
-                var r = new ProcResult();
+
+                if (v.Bool("RemoveLogo"))
+                {
+                    db.Execute("UPDATE dbo.Setting SET Value = N'' WHERE Name = 'LogoDataUri';");
+                    r.Messages.Add("Logo removed: invoices now show the business name.");
+                }
+                else if (v.Str("LogoFile") is { } path)
+                {
+                    var uri = LogoDataUri(path.Trim('"'));
+                    db.Execute("UPDATE dbo.Setting SET Value = @v WHERE Name = 'LogoDataUri';", ("@v", uri));
+                    r.Messages.Add($"Logo loaded from {Path.GetFileName(path)} ({uri.Length / 1024} KB on each invoice).");
+                }
                 r.Messages.Add("Saved. New invoices use these details.");
                 return r;
             }

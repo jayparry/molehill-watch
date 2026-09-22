@@ -750,8 +750,10 @@ public static class SelfTest
             t => t.Rows.Cast<DataRow>().Any(r => (string)r["Type"] == "Adjustment" && (decimal)r["Amount"] == -10m) ? null : "no adjustment line");
         var folder = Path.Combine(Path.GetTempPath(), "MolehillManager-selftest");
         Step("invoice HTML saved", () => AdminForms.SaveInvoiceHtml(db, invoice, folder), p => File.ReadAllText(p).Contains(invoice) ? null : "HTML lacks invoice number");
-        Step("invoice is billed to the contact that receives invoices, not the ticket contact", () => File.ReadAllText(Path.Combine(folder, invoice + ".html")),
-            h => h.Contains("accounts@selftest.example") && !h.Contains("pat@selftest.example") ? null : "wrong recipients");
+        Step("invoice is addressed to the contact that receives invoices, not the ticket contact", () => File.ReadAllText(Path.Combine(folder, invoice + ".html")),
+            h => h.Contains("For the attention of Accounts") && !h.Contains("Pat Tester") ? null : "wrong recipients");
+        Step("invoice carries the logo and the brand", () => File.ReadAllText(Path.Combine(folder, invoice + ".html")),
+            h => h.Contains("src=\"data:image/png;base64,") && h.Contains("#44C8F5") && h.Contains("Krungthep") ? null : "brand missing");
         Step("dashboard HTML saved", () => AdminForms.SaveDashboardHtml(db, folder), p => File.ReadAllText(p).Contains("<html", StringComparison.OrdinalIgnoreCase) ? null : "not HTML");
         Step("mark sent", () => Submit(AdminForms.SetInvoiceStatus(db, invoice, "Sent")));
         Step("mark paid", () => Submit(AdminForms.SetInvoiceStatus(db, invoice, "Paid")));

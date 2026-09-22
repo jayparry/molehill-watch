@@ -1,7 +1,7 @@
 /*
 ===============================================================================
  Molehill Watch - SQL Server Support Package
- Molehill Admin: clients, engagements, tickets, time and billing  Version 2.3.0
+ Molehill Admin: clients, engagements, tickets, time and billing  Version 2.4.0
  Molehill Data Services  -  jay@jayparry.co.uk  -  molehilldataservices.com
 -------------------------------------------------------------------------------
  Runs on YOUR OWN SQL Server (Express is fine), not on client servers.
@@ -65,7 +65,7 @@ CREATE TABLE dbo.InstallHistory (
 IF OBJECT_ID(N'dbo.Setting') IS NULL
 CREATE TABLE dbo.Setting (
     Name        varchar(100)   NOT NULL CONSTRAINT PK_Setting PRIMARY KEY,
-    Value       nvarchar(4000) NULL,
+    Value       nvarchar(max)  NULL,        -- big enough for the logo, held as a data: URI
     Description nvarchar(1000) NULL);
 
 IF OBJECT_ID(N'dbo.BankHoliday') IS NULL
@@ -459,6 +459,10 @@ BEGIN
         CHECK (LineType IN ('MonthlyFee', 'BusinessHours', 'OutOfHours', 'Project', 'Adjustment', 'Info', 'PrepaidPurchase', 'PrepaidDrawn', 'Consultancy', 'FixedFee', 'Other'));
 END
 
+-- 2.4.0: settings hold the logo now, so Value has to be long
+IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.Setting') AND name = N'Value' AND max_length <> -1)
+    ALTER TABLE dbo.Setting ALTER COLUMN Value nvarchar(max) NULL;
+
 -- 2.3.0: how a pre-paid package is billed, and each engagement's own billing rhythm
 IF COL_LENGTH(N'dbo.PrepaidPackage', N'BillingMethod') IS NULL
 BEGIN
@@ -564,7 +568,11 @@ FROM (VALUES
     ('BusinessEmail',       N'jay@jayparry.co.uk',             N'Shown on invoices.'),
     ('BusinessWebsite',     N'molehilldataservices.com',       N'Shown on invoices.'),
     ('BusinessAddress',     N'',                               N'Your postal address for invoices.'),
-    ('PaymentDetails',      N'',                               N'Bank / payment details printed on invoices (e.g. account name, sort code, account number).'),
+    ('PaymentDetails',      N'',                               N'Bank / payment details printed on invoices, one per line as "Label: value" (account name, sort code, account number, bank).'),
+    ('BusinessTradingName', N'',                               N'The "trading as" line under your name on invoices.'),
+    ('BusinessContact',     N'',                               N'Who to ask for - printed with your details on invoices.'),
+    ('BusinessPhone',       N'',                               N'Printed with your details on invoices.'),
+    ('LogoDataUri',         N'',                               N'Your logo for invoices, as a data: URI. Set it in Molehill Manager (File > Business and invoice details).'),
     ('InvoicePrefix',       N'MDS',                            N'Invoice numbers look like MDS-2026-0001.'),
     ('PaymentTermsDays',    N'14',                             N'Days from invoice date to due date.'),
     ('VatRegistered',       N'0',                              N'1 once VAT registered (notify clients in advance).'),
@@ -626,7 +634,7 @@ GO
   3. FUNCTIONS
 =============================================================================*/
 CREATE OR ALTER FUNCTION dbo.fn_Setting (@Name varchar(100))
-RETURNS nvarchar(4000)
+RETURNS nvarchar(max)      -- max: the logo lives in a setting, as a data: URI
 AS
 BEGIN
     RETURN (SELECT Value FROM dbo.Setting WHERE Name = @Name);
@@ -2209,7 +2217,7 @@ CREATE OR ALTER FUNCTION dbo.fn_PrepaidLine (@PackageId int)
 RETURNS nvarchar(500)
 AS
 BEGIN
-    RETURN (SELECT N'Pre-paid support hours (' + PackageRef + N'): ' + FORMAT(Hours, 'N2') + N' h at GBP ' + FORMAT(HourlyRate, 'N2') + N'/h, usable '
+    RETURN (SELECT N'Pre-paid support hours (' + PackageRef + N'): ' + FORMAT(Hours, 'N2') + N' h at ' + NCHAR(163) + FORMAT(HourlyRate, 'N2') + N'/h, usable '
                  + CASE WHEN ExpiresOn IS NULL THEN N'from ' + CONVERT(nvarchar(11), StartsOn, 106) + N' (no expiry)'
                         ELSE CONVERT(nvarchar(11), StartsOn, 106) + N' - ' + CONVERT(nvarchar(11), ExpiresOn, 106) END
                  + N', for business-hours support'
@@ -3108,64 +3116,188 @@ BEGIN
     FROM dbo.Invoice i LEFT JOIN dbo.Engagement e ON e.EngagementId = i.EngagementId WHERE i.InvoiceNo = @InvoiceNo;
     IF @InvoiceId IS NULL BEGIN RAISERROR(N'Invoice %s not found.', 16, 1, @InvoiceNo); RETURN; END
 
-    -- what the invoice is for: the agreement reference, or the engagement and its PO number
-    DECLARE @RefHtml nvarchar(1000) = ISNULL((
-        SELECT N'<div class="label" style="margin-top:8px">' + CASE WHEN e.EngagementType = 'Monitoring' THEN N'Agreement' ELSE N'Engagement' END + N'</div>'
-             + dbo.fn_Html(e.EngagementRef)
-             + CASE WHEN e.EngagementType = 'Consultancy' THEN N'<br /><span style="color:#7A7473">' + dbo.fn_Html(e.Name) + N'</span>' ELSE N'' END
-             + ISNULL(N'<div class="label" style="margin-top:8px">Your reference</div>' + dbo.fn_Html(NULLIF(e.PurchaseOrder, N'')), N'')
-        FROM dbo.Engagement e WHERE e.EngagementId = @EngagementId), N'');
-
     DECLARE @Vat bit = CASE WHEN (SELECT VatRatePct FROM dbo.Invoice WHERE InvoiceId = @InvoiceId) > 0 THEN 1 ELSE 0 END;
+    DECLARE @Terms nvarchar(10) = ISNULL(dbo.fn_Setting('PaymentTermsDays'), N'14');
+
+    /*---------------------------------------------------------------- the work */
     DECLARE @Rows nvarchar(max) = (
         SELECT STRING_AGG(CONVERT(nvarchar(max),
-                   N'<tr' + CASE WHEN LineType IN ('Info', 'PrepaidDrawn') THEN N' class="info"' ELSE N'' END + N'><td>' + dbo.fn_Html(Description) + N'</td>'
+                   N'<tr' + CASE WHEN LineType IN ('Info', 'PrepaidDrawn') THEN N' class="note"' ELSE N'' END + N'><td>' + dbo.fn_Html(Description) + N'</td>'
                  + N'<td class="num">' + CASE WHEN LineType = 'Info' THEN N''
-                        WHEN LineType IN ('BusinessHours', 'OutOfHours', 'PrepaidPurchase', 'PrepaidDrawn') THEN FORMAT(Quantity, 'N2') + N' h'
-                        WHEN LineType = 'Consultancy' THEN FORMAT(Quantity, 'N2') + CASE WHEN UnitPrice = 0 THEN N'' ELSE N' d' END
+                        WHEN LineType IN ('BusinessHours', 'OutOfHours', 'PrepaidPurchase', 'PrepaidDrawn') THEN FORMAT(Quantity, 'N2')
+                        WHEN LineType = 'Consultancy' THEN FORMAT(Quantity, 'N2')
                         ELSE FORMAT(Quantity, 'N2') END + N'</td>'
-                 + N'<td class="num">' + CASE WHEN LineType = 'Info' THEN N'' WHEN LineType = 'PrepaidDrawn' THEN N'pre-paid' ELSE N'&#163;' + FORMAT(UnitPrice, 'N2') END + N'</td>'
+                 + N'<td class="num">' + CASE WHEN LineType = 'Info' THEN N''
+                        WHEN LineType = 'PrepaidDrawn' THEN N'pre-paid'
+                        ELSE N'&#163;' + FORMAT(UnitPrice, 'N2') END + N'</td>'
                  + N'<td class="num">' + CASE WHEN LineType = 'Info' THEN N'' ELSE N'&#163;' + FORMAT(Amount, 'N2') END + N'</td></tr>'), N'')
-               WITHIN GROUP (ORDER BY CASE LineType WHEN 'MonthlyFee' THEN 1 WHEN 'PrepaidPurchase' THEN 2 WHEN 'BusinessHours' THEN 3 WHEN 'OutOfHours' THEN 4 WHEN 'PrepaidDrawn' THEN 5 WHEN 'Info' THEN 7 ELSE 6 END, InvoiceLineId)
+               WITHIN GROUP (ORDER BY CASE LineType WHEN 'MonthlyFee' THEN 1 WHEN 'Consultancy' THEN 2 WHEN 'FixedFee' THEN 3 WHEN 'PrepaidPurchase' THEN 4
+                                                    WHEN 'BusinessHours' THEN 5 WHEN 'OutOfHours' THEN 6 WHEN 'PrepaidDrawn' THEN 7
+                                                    WHEN 'Info' THEN 9 ELSE 8 END, InvoiceLineId)
         FROM dbo.InvoiceLine WHERE InvoiceId = @InvoiceId);
 
-    SELECT @Html = N'<html><head><meta charset="utf-8" /><title>Invoice ' + i.InvoiceNo + N'</title><style>
-body{margin:0;background:#F4F2F1;font-family:"Segoe UI",Arial,sans-serif;color:#231F20;font-size:14px;line-height:1.5}
-.page{max-width:820px;margin:24px auto;background:#fff;padding:0 0 30px}
-.hero{background:#231F20;color:#fff;padding:28px 36px;display:flex;justify-content:space-between;align-items:flex-end}
-.brand{font-size:24px;font-weight:700}.tag{color:#44C8F5;font-size:13px}.title{font-size:30px;font-weight:700;color:#44C8F5}
-.body{padding:26px 36px}.cols{display:flex;justify-content:space-between;gap:24px;margin-bottom:24px}
-.label{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#7A7473}
-table{width:100%;border-collapse:collapse;font-size:13px}th{background:#231F20;color:#fff;text-align:left;padding:8px 10px}
-td{padding:8px 10px;border-bottom:1px solid #E2DEDD;vertical-align:top}td.num,th.num{text-align:right;white-space:nowrap}
-tr.info td{color:#55504F;font-style:italic;background:#F2FBFE}
-.totals{margin-left:auto;width:320px;margin-top:14px}.totals td{border:none;padding:4px 10px}.grand td{font-size:17px;font-weight:700;border-top:3px solid #44C8F5}
-.note{color:#55504F;font-size:12px;margin-top:22px;border-left:4px solid #44C8F5;padding:6px 12px;background:#F2FBFE}
-.foot{padding:0 36px;color:#7A7473;font-size:12px}
-@media print{body{background:#fff}.page{margin:0}}
-</style></head><body><div class="page">
-<div class="hero"><div><div class="brand">' + dbo.fn_Html(dbo.fn_Setting('BusinessName')) + N'</div><div class="tag">SQL Server &amp; Azure Consultancy</div></div><div class="title">' + CASE WHEN i.Status = 'Void' THEN N'VOID' ELSE N'INVOICE' END + N'</div></div>
-<div class="body"><div class="cols">
-<div><div class="label">Bill to</div><strong>' + dbo.fn_Html(c.ClientName) + N'</strong><br />' + REPLACE(dbo.fn_Html(c.Address), CHAR(10), N'<br />')
-    + ISNULL(N'<br />' + (SELECT STRING_AGG(dbo.fn_Html(FullName) + ISNULL(N' &#183; ' + dbo.fn_Html(Email), N''), N'<br />') WITHIN GROUP (ORDER BY FullName)
-                         FROM dbo.Contact WHERE ClientId = c.ClientId AND IsBillingContact = 1 AND IsActive = 1), N'') + N'</div>
-<div style="text-align:right"><div class="label">Invoice number</div><strong>' + i.InvoiceNo + N'</strong>
-<div class="label" style="margin-top:8px">Invoice date</div>' + CONVERT(nvarchar(11), i.InvoiceDate, 106) + N'
-<div class="label" style="margin-top:8px">Payment due</div>' + CONVERT(nvarchar(11), i.DueDate, 106) + N'
-' + @RefHtml + N'</div></div>
-<table><tr><th>Description</th><th class="num">Qty</th><th class="num">Rate</th><th class="num">Amount</th></tr>' + ISNULL(@Rows, N'') + N'</table>
+    /*------------------------------------------------- what the invoice is for */
+    DECLARE @RefRows nvarchar(max) = ISNULL((
+        SELECT N'<div class="k">' + CASE WHEN e.EngagementType = 'Monitoring' THEN N'Agreement' ELSE N'Engagement' END + N'</div>'
+             + N'<div class="v">' + dbo.fn_Html(e.EngagementRef)
+             + CASE WHEN e.EngagementType = 'Consultancy' THEN N' &#183; ' + dbo.fn_Html(e.Name) ELSE N'' END + N'</div>'
+             + CASE WHEN NULLIF(LTRIM(RTRIM(e.PurchaseOrder)), N'') IS NULL THEN N''
+                    ELSE N'<div class="k">Your reference</div><div class="v">' + dbo.fn_Html(e.PurchaseOrder) + N'</div>' END
+        FROM dbo.Engagement e WHERE e.EngagementId = @EngagementId), N'');
+
+    /*--------------------------------------------------------- payment details */
+    DECLARE @Pay nvarchar(max) = REPLACE(ISNULL(NULLIF(dbo.fn_Setting('PaymentDetails'), N''), N''), CHAR(13), N'');
+    DECLARE @PayRows nvarchar(max) = NULL;
+    IF @Pay <> N''
+    BEGIN
+        ;WITH split AS (
+            SELECT n = 1, rest = CONVERT(nvarchar(max), @Pay + CHAR(10)), line = CONVERT(nvarchar(max), NULL)
+            UNION ALL
+            SELECT n + 1, SUBSTRING(rest, CHARINDEX(CHAR(10), rest) + 1, 4000), LEFT(rest, CHARINDEX(CHAR(10), rest) - 1)
+            FROM split WHERE CHARINDEX(CHAR(10), rest) > 0 AND n < 25)
+        SELECT @PayRows = STRING_AGG(CONVERT(nvarchar(max),
+                   CASE WHEN CHARINDEX(N':', line) > 0
+                        THEN N'<tr><td class="pk">' + dbo.fn_Html(LTRIM(RTRIM(LEFT(line, CHARINDEX(N':', line) - 1)))) + N'</td>'
+                           + N'<td class="pv">' + dbo.fn_Html(LTRIM(RTRIM(SUBSTRING(line, CHARINDEX(N':', line) + 1, 400)))) + N'</td></tr>'
+                        ELSE N'<tr><td colspan="2" class="pfull">' + dbo.fn_Html(LTRIM(RTRIM(line))) + N'</td></tr>' END), N'')
+               WITHIN GROUP (ORDER BY n)
+        FROM split WHERE line IS NOT NULL AND LTRIM(RTRIM(line)) <> N''
+        OPTION (MAXRECURSION 30);
+    END
+    SET @PayRows = ISNULL(@PayRows, N'') + N'<tr><td class="pk">Payment reference</td><td class="pv">' + dbo.fn_Html(@InvoiceNo) + N'</td></tr>';
+
+    /*------------------------------------------------------------------ people */
+    DECLARE @Logo nvarchar(max) = NULLIF(dbo.fn_Setting('LogoDataUri'), N'');
+    DECLARE @Name nvarchar(200) = dbo.fn_Html(dbo.fn_Setting('BusinessName'));
+
+    SELECT @Html = N'<!doctype html><html lang="en-GB"><head><meta charset="utf-8" /><title>Invoice ' + i.InvoiceNo + N'</title><style>
+/* Molehill. dataServices - brand colours: #231F20, #44C8F5, white; titles in Krungthep where it is installed */
+:root{--ink:#231F20;--cyan:#44C8F5;--muted:#6F6A69;--line:#E2DEDD;--tint:#F2FBFE}
+*{box-sizing:border-box}
+body{margin:0;background:#F4F2F1;color:var(--ink);font-family:"Segoe UI",Arial,Helvetica,sans-serif;font-size:13.5px;line-height:1.5}
+.sheet{max-width:820px;margin:24px auto;background:#fff;padding:34px 40px 40px}
+h1,h2,.brandfont{font-family:Krungthep,Bahnschrift,"Trebuchet MS","Segoe UI",Arial,sans-serif;font-weight:700;letter-spacing:.01em}
+.top{display:flex;justify-content:space-between;align-items:flex-start;gap:24px}
+.logo{max-width:230px;height:auto}
+.logo-text{font-size:26px;color:var(--cyan)}
+.biz{text-align:right;font-size:12.5px;color:var(--muted)}
+.biz .nm{font-size:15px;color:var(--ink);font-weight:700}
+.biz .trading{font-style:italic}
+.rule{height:3px;background:var(--cyan);margin:18px 0 22px}
+.head{display:flex;justify-content:space-between;align-items:flex-start;gap:24px;margin-bottom:26px}
+h1{font-size:40px;line-height:1;margin:0;text-transform:uppercase}
+h1.void{color:#B3302E}
+.meta{display:grid;grid-template-columns:auto auto;gap:2px 14px;font-size:12.5px;text-align:right;justify-content:end}
+.meta .k{color:var(--muted)}
+.meta .v{font-weight:600}
+.meta .due{color:var(--ink);font-weight:700}
+.parties{display:flex;gap:40px;margin-bottom:22px}
+.parties>div{flex:1}
+.label{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:5px}
+.party .nm{font-weight:700;font-size:15px}
+.party .sub{color:var(--muted)}
+.forwhat .k{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-top:6px}
+.forwhat .v{font-weight:600}
+table.lines{width:100%;border-collapse:collapse;margin-top:6px}
+table.lines th{background:var(--ink);color:#fff;text-align:left;padding:9px 11px;font-size:12px;letter-spacing:.06em;text-transform:uppercase}
+table.lines td{padding:9px 11px;border-bottom:1px solid var(--line);vertical-align:top}
+td.num,th.num{text-align:right;white-space:nowrap}
+tr.note td{color:var(--muted);font-style:italic;background:var(--tint)}
+.totals{margin-left:auto;margin-top:16px;width:330px;border-collapse:collapse}
+.totals td{padding:6px 11px}
+.totals .lbl{text-align:right;color:var(--muted)}
+.totals .amt{text-align:right;font-weight:700;white-space:nowrap}
+.totals .vatnote td{text-align:right;color:var(--muted);font-style:italic;font-size:12px;padding-top:0}
+.grand td{background:var(--ink);color:#fff;font-size:17px;padding:12px 11px}
+.grand .lbl{color:#fff;text-align:right}
+h2{font-size:17px;color:var(--ink);margin:30px 0 10px}
+h2 .dot{color:var(--cyan)}
+.pay{background:var(--tint);border-left:4px solid var(--cyan);padding:14px 18px}
+.pay p{margin:0 0 8px}
+.pay table{border-collapse:collapse}
+.pay td{padding:3px 0;vertical-align:top}
+.pay .pk{color:var(--muted);padding-right:22px;white-space:nowrap}
+.pay .pv{font-weight:700}
+.pay .pfull{font-weight:600}
+.terms{margin-top:18px;font-size:12.5px;color:var(--muted)}
+.terms b{color:var(--ink)}
+.thanks{margin-top:16px;font-weight:700;color:var(--ink)}
+.thanks:after{content:"";display:block;width:54px;height:3px;background:var(--cyan);margin-top:6px}
+.foot{margin-top:26px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted);font-size:11.5px;display:flex;justify-content:space-between;gap:16px}
+@page{size:A4;margin:14mm}
+@media print{body{background:#fff}.sheet{margin:0;padding:0;max-width:none}.pay{break-inside:avoid}table.lines{break-inside:auto}tr{break-inside:avoid}}
+</style></head><body><div class="sheet">
+
+<div class="top">
+  <div>' + ISNULL(N'<img class="logo" alt="' + @Name + N'" src="' + @Logo + N'" />',
+                  N'<div class="brandfont logo-text">' + @Name + N'<span style="color:var(--ink)">.</span></div>') + N'</div>
+  <div class="biz">
+    <div class="nm">' + @Name + N'</div>'
+    + ISNULL(N'<div class="trading">' + NULLIF(dbo.fn_Html(dbo.fn_Setting('BusinessTradingName')), N'') + N'</div>', N'')
+    + ISNULL(N'<div>' + NULLIF(dbo.fn_Html(dbo.fn_Setting('BusinessContact')), N'') + N'</div>', N'')
+    + ISNULL(N'<div>' + NULLIF(dbo.fn_Html(dbo.fn_Setting('BusinessEmail')), N'') + N'</div>', N'')
+    + ISNULL(N'<div>' + NULLIF(dbo.fn_Html(dbo.fn_Setting('BusinessPhone')), N'') + N'</div>', N'')
+    + ISNULL(N'<div>' + NULLIF(dbo.fn_Html(dbo.fn_Setting('BusinessWebsite')), N'') + N'</div>', N'') + N'
+  </div>
+</div>
+<div class="rule"></div>
+
+<div class="head">
+  <h1' + CASE WHEN i.Status = 'Void' THEN N' class="void">VOID' ELSE N'>Invoice' END + N'</h1>
+  <div class="meta">
+    <div class="k">Invoice no</div><div class="v">' + i.InvoiceNo + N'</div>
+    <div class="k">Date issued</div><div class="v">' + CONVERT(nvarchar(11), i.InvoiceDate, 106) + N'</div>
+    <div class="k">Due date</div><div class="due">' + CONVERT(nvarchar(11), i.DueDate, 106) + N'</div>
+  </div>
+</div>
+
+<div class="parties">
+  <div class="party">
+    <div class="label">Bill to</div>
+    <div class="nm">' + dbo.fn_Html(c.ClientName) + N'</div>'
+    + ISNULL(N'<div class="sub">For the attention of ' + (SELECT STRING_AGG(dbo.fn_Html(ct.FullName), N', ') WITHIN GROUP (ORDER BY ct.FullName)
+                                                          FROM dbo.Contact ct WHERE ct.ClientId = c.ClientId AND ct.IsBillingContact = 1 AND ct.IsActive = 1) + N'</div>', N'')
+    + ISNULL(N'<div class="sub">' + REPLACE(NULLIF(dbo.fn_Html(c.Address), N''), CHAR(10), N'<br />') + N'</div>', N'') + N'
+  </div>
+  <div class="party">
+    <div class="label">From</div>
+    <div class="nm">' + @Name + N'</div>'
+    + ISNULL(N'<div class="sub">' + NULLIF(dbo.fn_Html(dbo.fn_Setting('BusinessTradingName')), N'') + N'</div>', N'')
+    + ISNULL(N'<div class="sub">' + REPLACE(NULLIF(dbo.fn_Html(dbo.fn_Setting('BusinessAddress')), N''), CHAR(10), N'<br />') + N'</div>', N'') + N'
+  </div>
+  <div class="party forwhat">
+    <div class="label">For</div>' + CASE WHEN @RefRows = N'' THEN N'<div class="v">Services provided</div>' ELSE @RefRows END + N'
+  </div>
+</div>
+
+<table class="lines">
+  <tr><th>Description</th><th class="num">Qty</th><th class="num">Rate</th><th class="num">Amount</th></tr>
+  ' + ISNULL(@Rows, N'') + N'
+</table>
+
 <table class="totals">
-<tr><td>Subtotal</td><td class="num">&#163;' + FORMAT(i.SubTotal, 'N2') + N'</td></tr>'
-    + CASE WHEN @Vat = 1 THEN N'<tr><td>VAT at ' + FORMAT(i.VatRatePct, 'N0') + N'%</td><td class="num">&#163;' + FORMAT(i.VatAmount, 'N2') + N'</td></tr>' ELSE N'' END + N'
-<tr class="grand"><td>Total due</td><td class="num">&#163;' + FORMAT(i.Total, 'N2') + N'</td></tr></table>
-<div class="note">' + CASE WHEN @Vat = 0 THEN dbo.fn_Html(dbo.fn_Setting('BusinessName')) + N' is not currently VAT registered, so no VAT is charged.<br />' ELSE N'' END
-    + CASE WHEN @EngType = 'Monitoring' THEN N'Monthly fees are invoiced in advance; additional support is invoiced in arrears. ' ELSE N'' END
-    + N'Payment is due within ' + ISNULL(dbo.fn_Setting('PaymentTermsDays'), N'14') + N' days of the invoice date.'
-    + CASE WHEN @EngType = 'Monitoring' THEN N' Late payment may result in support being paused until payment is received.' ELSE N'' END
-    + CASE WHEN NULLIF(dbo.fn_Setting('PaymentDetails'), N'') IS NOT NULL THEN N'<br /><br /><strong>Payment details:</strong> ' + REPLACE(dbo.fn_Html(dbo.fn_Setting('PaymentDetails')), CHAR(10), N'<br />') ELSE N'' END
-    + N'</div></div>
-<div class="foot">' + dbo.fn_Html(dbo.fn_Setting('BusinessName')) + ISNULL(N' &#183; ' + dbo.fn_Html(NULLIF(dbo.fn_Setting('BusinessAddress'), N'')), N'')
-    + N' &#183; ' + dbo.fn_Html(dbo.fn_Setting('BusinessEmail')) + N' &#183; ' + dbo.fn_Html(dbo.fn_Setting('BusinessWebsite')) + N'</div>
+  <tr><td class="lbl">Subtotal</td><td class="amt">&#163;' + FORMAT(i.SubTotal, 'N2') + N'</td></tr>'
+  + CASE WHEN @Vat = 1 THEN N'<tr><td class="lbl">VAT at ' + FORMAT(i.VatRatePct, 'N0') + N'%</td><td class="amt">&#163;' + FORMAT(i.VatAmount, 'N2') + N'</td></tr>'
+         ELSE N'<tr class="vatnote"><td colspan="2">Not VAT registered</td></tr>' END + N'
+  <tr class="grand"><td class="lbl">Total due</td><td class="amt">&#163;' + FORMAT(i.Total, 'N2') + N'</td></tr>
+</table>
+
+<h2>Payment details<span class="dot">.</span></h2>
+<div class="pay">
+  <p>Please pay by bank transfer to:</p>
+  <table>' + @PayRows + N'</table>
+</div>
+
+<div class="terms"><b>Terms:</b> Payment is due within ' + @Terms + N' days of the invoice date by bank transfer, quoting the invoice number as the reference.'
+  + CASE WHEN @EngType = 'Monitoring' THEN N' Molehill Watch fees are invoiced in advance and additional support in arrears. Late payment may result in support being paused until payment is received.' ELSE N'' END
+  + CASE WHEN @Vat = 0 THEN N' ' + @Name + N' is not currently VAT registered, so no VAT is charged.' ELSE N'' END + N'</div>
+<div class="thanks">Thank you for your business.</div>
+
+<div class="foot"><div>' + @Name
+  + ISNULL(N' &#183; ' + NULLIF(dbo.fn_Html(REPLACE(dbo.fn_Setting('BusinessAddress'), CHAR(10), N', ')), N''), N'') + N'</div>'
+  + N'<div>' + ISNULL(NULLIF(dbo.fn_Html(dbo.fn_Setting('BusinessEmail')), N''), N'')
+  + ISNULL(N' &#183; ' + NULLIF(dbo.fn_Html(dbo.fn_Setting('BusinessWebsite')), N''), N'') + N'</div></div>
+
 </div></body></html>'
     FROM dbo.Invoice i JOIN dbo.Client c ON c.ClientId = i.ClientId
     WHERE i.InvoiceId = @InvoiceId;
@@ -3469,12 +3601,14 @@ BEGIN
     SET @Html = N'<html><head><meta charset="utf-8" /><title>Molehill Watch - Daily dashboard</title><style>
 body{margin:0;background:#F4F2F1;font-family:"Segoe UI",Arial,sans-serif;color:#231F20;font-size:14px;line-height:1.5}
 .wrap{max-width:1000px;margin:0 auto;padding:24px}.hero{background:#231F20;color:#fff;padding:24px 30px}
-.brand{font-size:26px;font-weight:700}.tag{color:#44C8F5}.meta{color:#BFBBBA;font-size:13px;margin-top:10px}
+.brand{font-size:26px;font-weight:700;font-family:Krungthep,Bahnschrift,"Segoe UI",Arial,sans-serif}.tag{color:#44C8F5}.meta{color:#BFBBBA;font-size:13px;margin-top:10px}
+.logobar{background:#fff;padding:14px 30px}.logobar img{max-width:210px;height:auto;display:block}
 h2{font-size:18px;border-bottom:3px solid #44C8F5;padding-bottom:6px;margin:30px 0 12px}
 table{width:100%;border-collapse:collapse;background:#fff;font-size:13px}th{background:#231F20;color:#fff;text-align:left;padding:8px 10px}
 td{padding:7px 10px;border-bottom:1px solid #E2DEDD;vertical-align:top}td.high{background:#D64545;color:#fff;font-weight:600}
 td.normal{background:#F9D58C;font-weight:600}td.low{background:#DDF3FC}.ok{background:#D5EEDD}
-</style></head><body><div class="wrap"><div class="hero"><div class="brand">Molehill Watch</div><div class="tag">Daily dashboard</div>
+</style></head><body><div class="wrap">'
+        + ISNULL(N'<div class="logobar"><img src="' + NULLIF(dbo.fn_Setting('LogoDataUri'), N'') + N'" alt="" /></div>', N'') + N'<div class="hero"><div class="brand">Molehill Watch</div><div class="tag">Daily dashboard</div>
 <div class="meta">' + dbo.fn_Html(dbo.fn_Setting('BusinessName')) + N' &#183; ' + FORMAT(@Now, 'dddd dd MMMM yyyy HH:mm') + N' (UK)</div></div>
 <h2>To do</h2><table><tr><th>Priority</th><th>Area</th><th>Client</th><th>Item</th></tr>' + ISNULL(@Rows, N'<tr><td class="ok" colspan="4">Nothing needs attention today.</td></tr>') + N'</table>
 <h2>Open tickets</h2><table><tr><th>Ticket</th><th>Client</th><th>Severity</th><th>Title</th><th>Status</th><th>Response due</th></tr>'
@@ -3501,6 +3635,79 @@ BEGIN
 END
 GO
 
-INSERT dbo.InstallHistory (Version) VALUES ('2.3.0');   -- bump with every schema change: Molehill Manager offers the upgrade
-PRINT N'Molehill Admin 2.3.0 installed.';
+/*=============================================================================
+  10. BRAND ASSETS
+  The Molehill. dataServices logo for invoices, held as a data: URI so an
+  invoice is one self-contained file. Replace it in Molehill Manager
+  (File > Business and invoice details > Logo file), or clear the setting to
+  fall back to the business name in text.
+=============================================================================*/
+DECLARE @Logo nvarchar(max) = CONVERT(nvarchar(max), N'data:image/png;base64,')   -- max, or the literals concatenate to 4000 and the logo is cut off
+    + N'iVBORw0KGgoAAAANSUhEUgAAAggAAAB4CAMAAACgn/q5AAAAwFBMVEX///////7//fr+///+//79///+/v/+/v79/v/9/v79/f38/v/8/Pz2/f/7+/v6+vru+f3b8fne3t646/uY4/qB2PRr1fdb0fZMzPVF1v9E1P9D0v9D0P5CzfpBy/dB'
+    + N'yvdDyfNByfRByfNByPRByPNByPJAyfVAyPRAyPM+yvahqq5Bx/RBx/NBx/JBxPA4w/CDhYVhYmNJSkowMDATExMHBwcEBAQDBAQDAwMCAgIBAQIBAQEAAgIEAAAAAAEAAACUSbTAAAAemUlEQVR42u1dCXurutGm5XNwMDEY72tI7BPnUidm'
+    + N'swul/fj//6ozAoEAgbGTkzinnue5S4wEI/EyGs0mQRS0wXhSpvGwJ7SFMlW2H/SEe6EhKYIgaZqK/yt15YadRKE3HF/yRFEQ+6PJeYQ3F0nve85jxconFSZnmLRtCQ+DHAujviDckR551saDB+60lwjZynfUKtlqRr3xbPlYptV82Qf+i3Qn'
+    + N'9Cfc9sv5pN+QE0kSdNv1PNexTR3+lhUpf7VikvuT+YrlcNbsiaL4MJotHs+jJd48eVOL3GPTKwJvcvKTCZM4wElsCb1RftYW82FHBBIG80X+uSONM+0lagmDZYGtca9Jx0rSxjNjt95t8rTb7H49zcpIaIvaZGHA1XJ7Y7nsCZ0mOBBkK4wS'
+    + N'8l0LsZBCQVaYP3JPFnqLFfNk+sR2A4EwnBpFhuuJ3ryFj509/io/ljfQttjLTQ7+39O0L7TvxIfxlJll+O/OmA6EdlsYTDdvTI81/D5+EO9Ojakj9KfrTZ6t+UQT7y8HwmD2a8unX4txS5SKrwMmtaK9MRs2kWqSrDpRcAzCMPCPR8DCwTEl'
+    + N'fPuy3O0CDHDFkHjf9WhuXPJEeJXzKpbryJjizcXOaGFwr/CeVJ6c5+X44Q5fW/HCbrXSYLDG465w4Q2g0zkt5MbL51LHQaMPsYLGy03VVPxjVVwNReFhslxXNN+tJg+nRbXUlZzomEqE0EcsuKaaXNYdz7X1MhJE3pztHienF8YOfHWXAIEM'
+    + N'pw2PXe+aDhTezmvpNgsUH6P5c/m7ATWhX/4Mm6AbxeOu/KTxR1SEyWMlEJDVTlFDWe1qZq6BvtIVrOgYsRT6AYGCrpuW7eEvnibJUklTfNoWOd287LQGkzacXQSER0OD4XMGTK6IPE1xUm78NEcgjMvvDdcGHkY3i3FHuDulIfRnJWTtlk0+'
+    + N'xEuAsAFs5hedzl2/elIbAUERTEYeUAp8gIIXKw1hcIxMRSlvGV6+BwjLzwDCiAOEGQChzwHCEoAgngJCb84DgvabgADrWx6bOKmbjwBBkjUvDKIyBfijf/RDggVTEFTpfwEIgx8BBHi1ea2cqAgfWhoUwS4sDJHvJ1DI9IbIAU1ByykKNyB8'
+    + N'JxCMaf+uk9dRKlXFRkBQBN33w+gkuZald6WbRLgWIKCS0MqpCHUKeCMgOJGf1xQjywrz0AgiT+aZFb8aCLg3uAEh4Smvh7ZgTp8/AATUFP3iSxcEN8ppDcfIFiRV/m4goLWg1b4BgdA6Z7qrVxEaAEGW3JJA8HTVywMBfrP1L5EIm2p7I9gP'
+    + N'Jz3pBoRsr8soCWBFWL5tLwcCCoTijiGMXDfKLQ3H0Dbdg6VKv1tH2Px6WVbSYkocGTcgJAbSnJWrXkU4DQS5pCFQMLCbiCgCcWA6vx0Iu+1sNxlX0Sh25t2AwLt3m2cpbQ4E2DLwTAhBkLMyRo5nKd3fryyCrX/Qe6gk8sgbEBh7Z+bbxIHW'
+    + N'qAgNgMAXCCwoQlAUbUdQfrtlcfcIXvZaF0VbuAEhbxDv1Hk6mgNBFvRDWG9D8KMD2BTNiOt0+lwgbOA1dFpiJTGWkxsQUEmYj9KZPuXGOwGEsrepSMfI1YWupMGeQf7NQEAHTauB8/4GBM7LPaEinACCJGleFNTAANUDwEF1nNpnAuF5PmwU'
+    + N'zsMHwstjT2xxggR665fNHwoEcHL3kzHzAd8YCN2SMam0dbBIMCM/QumTgQDWIrFzKRDQ9M4JAenwfMN/DBAyJaEj9uZv24uBAHvHsAYIYeiZgizXRa5+6tIAQRzixUDYoVu2U4jZ6QidMaftHyMRYMzk22l3hGHtylAPBFAVjzWaIgQhmEXP'
+    + N'829VFtfNAiz5QNi+Qehpue1wxvlQ/hQgEMeTQNTo/uIf24uBcEJVBHOioJ6IZf9UIDwvRvAJV9H9CSAAEkZ9LR8E3B/NeC3/GCBsd3MIzoeBDlaPu8uBIKlunaoYHGGncN9pi18FhO3bbKjVAq8WCNu3xTxvlpzMF9yF888BwnY3exoNR5PZ'
+    + N'9nV7IRDu7rscN0POCen2eu14qW1/DRDgo54MB30+9SgSKoGw3T0/LlhaPfPb/UFAgPlezOarTQMHPpeRWD23w2OdJcmZvo+HYPMl7cWvAML27XFWRctREr9dDQQYb54qWv1JQEB37dNuexEQxBa6bnqDET9UMaF/R/bsbQEvYDIkS295ifgd'
+    + N'buidYTzzXNDPm91s0qv2NZxFfxQQGof0FBkhwgBQ8Djdh/+O6oBg/bXfvxrGcjabEDVMbH9rYIoxH3cw3+gGhE8BAliiOn1AweJ9Wu9v8iMT4GLs93vDeJzPMHdUEMXvjFDazEm+3w0InwAEeJMPkBQ63xpv+3cv+letWdG1TF3rDcZELqzI'
+    + N'Ip1bIL4aCIkh7QaEjwOhJUj98XS5Mbb7/cis0xAS8hwLsTBBsbCbL1AqtL8RCP0bED4DCPA1Yya4ATB4H/ZUOzwViXAM4jh2XeuPCRRmq4GWGf9uQPiZQIC3A/n7v3aw7A813fKiBskMkA+LrRxTBShsnza76RjWafEGhB8MhJagjSB/f/20'
+    + N'H/V0+xA1wUEiGEJMiH3ov++NrbFcDARJvOkIPxYILSzDYuyetvtBF6RBdAyi5oQJsY6ujQEJu8102ImR8NVA+DW7SYQPAwFmDyqHbJ+27z3diaJjGJ1HAIV/W50hIGFjTEedO/HrgfALJ/X+BoQPAeEOIlgWv7brvwAH3vkwiHPjI/vviASS'
+    + N'b4Qm598ChN1zBRlrLGxzsyx+CAhi+2GMtWqe9j3zcCJKsVpxPEYORQIpR/UbgLDbrOYVNI1rYNUDYZ1zNWxuQCgAoR2PztgPQB740aUEGZCtyet6u1ktMO3uN3gfoSrbqILSCnrVQAD7SK4M29bY3IDAAgGn7mm9Xe/Hf3MulQeJTDD7KBKw'
+    + N'lIx49/nxCMtJX6vrdSIeYTnbGixtZ8u3GxAYIEAxOywQZez75kdwgHqCq473a4yR6qOa8MkJLqsJ8WfwqSOejFCCupsaS73+eL65ASEFAszc6gnvuNdqIxCabB4ifYAiAXIrMFTuk0PVYnRdHLM4KksTbTR/uwGBAiEpKbjeT2gaQ3jmtiFt'
+    + N'fwyteG14iUuXfCYQ1stJTVzcKSCsyUjv2jnqYHW9zQ0IKRBIua31fqQfiD0xbG5WLGRHHyOrh0AAkdD/bCCUC8adl9cwqMhruAEhAwJJhwJdUfNiEBwO5yAhjI60PZUIid3/sxNchMsTXNarnijyMp0eb0sDBQJkecRjftOc8J/Rv4KDrnvN'
+    + N'kRCG2D72WUO0yuAqgVCR+9j+k3Mfz9813I8WyCLZNfjRPyNTsD2/oX0RtMv/9+ykJGcQeOoIdw3VQIBJ67UvBcLdZwPhk5JgMT9XvAgIoEuJrStaGkgCIPgd/+6SuliWp4OFsakZydQ9C2ox+qgimL39U1YKmAcEo0Ed6sok2PZ1AgHTTU8N'
+    + N'iguEeJ99PUBIxgYiQf9n4Kq6rwu6ZzdYHrCI1gEaBybU3II6vM7fxjEQdiQ9jQcEKHcBlzrtFo/aolibFi+2rxQIJLOyxRtUu9UWa4CwHGs1He++GAhJNY319l2Dkhf4gWvwj35ycQhDqLxreZpggZqAtRLUWEMglYDRYMkBAk5aT6i3D9YU'
+    + N'yrgXrxEImFmp1Z7dUgEESL8anZoNNvlMUSQkOS5t+slAuMPddIyE/Vh3dc8RBAf+ASCEp4AQ6HFb29NdqJnRj+VB7HYS+UAAU+9q2K/KV3qI62FdVDrnrtX6LiBgEtagX5eEVQEEQMKkejbu8zzL+aOVuEDYbQxjU1NQcWNsjF2FspgdUvE2'
+    + N'txwnUuEEBk3QazMfaQElKJiieo6pHB3HAXnwlNzW0O4qgbB9285mCz4tIdRNvKsqpvW4jBOravMfvwcI4BCbzisG9YhJWFVAANZm1R37rOlEFiTTdpEcS0NUcICwWc2m09ljVTGEt5fZdDZdvO34voY2bCA3MRD2XmSbWC7PbIADoiSYAqwK'
+    + N'JhTuhp3j0zoVCBXex5hbqI5ZQUuUJTXl9R7HNTRAp+c3AQGSsJ4rxrTBs7Y6VUCo6bhbzJgjsKBMgZPFj5sgE8pAgHwvkC/DSUVZjB0RP4PR7OmV64YGtC7JfLwu3w8egM5RMUypmXchclQbdEbv8P7Xjs7XCI3B1UCoW6zijWdFPMJ6s10u'
+    + N'qgkrbra+Cwh10ZRgLmhXAqEu6mq1TE/kkSWMGToGSHiGjsmRCLtEVemN5ly/W6KQiP1lIU2eRii1wdRKVo7XF8sJbcdyPAxfPZ4syx5gGLNruXboWK+btBw0sRldBATIVxpVA4EkdVZTcobX1QEhPvrlAiCwVjSsfXpgHL2eXgICKYzRgmIR'
+    + N'qPU9VWwNgOAYvDkfCPEWEq+9T/f/eXdcFwLa3Sg+mCMIKxTFI9lWHECC2MP/WNO3NHYwrgZ9GRBiY+dlRbnJ4UrXCASsdHcREKBeUCvmG2qf5mKGfLD3FICA52XF5inQ+hY1/hYRR/fEj2KGIKXZE7zK17/ebch63E/Bdw9YOCTmw+PR9/0g'
+    + N'Jt/HP5OlCo6BfDAjZ2a//xUvO8ZikhT8vBAI+MouBQKp0/8nAYGcyCMm9WtyMQJQwaoIhKzuHDlSblNtxiyVXcyAcAeHTy3IKXkvq6ntziC5FeM44PAux+UbGeFoN8hx0vrD94VrT5cvBAdvv6ZjWunoe4Cg/aFAUGLjLUtFIMAXT+vO8Q5w'
+    + N'2mHcWEU1OTbTCUTqeLqGy29/vb+vdsYTYGEywqAecpab47iUHNuC/FdIeuxjBuweNMz31VuiFWF1m5ZwA8KnA4FTHp0DBKpQ4Js2ONx30iPn5pVAgEYa5LyBMeL1ZYWf99p4eoX3/AZlz8G2kYvxAghAZR64uN8aT+vXVSwONlvMeEvvdwPC'
+    + N'9wEB5v7xH+tKv0Y9EFDDgyzYxfPzK91lrp8MyH2KaWckZ1sbr/EPr2vDiJ+F7Xe/YJM/0JgaCTcgfCcQOkUlgUSNtRsBgdQ8gZJzUB6BnQNAgwF4gNcdE8oKoPU6t/1/nC0xK751oj7CzwdC/ycAgWOl3y1GND2ZB4TC/IBP574/gqoXu3LM'
+    + N'/5pSaWdvvIItZ1Cok4FA2FwChMlHgIAo+vKTYJsBoT+7CAgdumsoRBbDrmG02FQdA1w+27pQtT//sazLRya3SAml8Ryx8LxuULNr8zKfruIiSuVTqR93lwxdvPBs6Hg8cDb0y64c+co/e5dXgzf2oXOw+KvibOhG9o2LMvGeZ6NEyBZPWUM7'
+    + N'wiDHIvkK7rLYKyNfVc+YZ4d9ke3lr+KxaCUfHkzYQ384Xk7nS3BWPVeUodvtno1nqOI3e8QsI15ZtbY4vMAcS4DbWxqX5C+S8dyLo9I7fEsSI8vhImXIGbjN4p4WjyZTPArl7XwgwLcKDh3jwpoPZG2QXcbqDyZdXXgYTY1Nkvv5ZDznxojZ'
+    + N'a6DhpVdxakTman/6YmSJowswRfEqJCI4HqBW1ng5A5/ayxqq2qVPhG7413a1gGu78bBPzNcdToCxeIcp1s9nkTFHliDlZmqc2TMdDx5otjTKd+UBQRI1cNDk2z7CW2sLdx1mlmmaLVzAKVyfxdoTJIgP7xFai9V5Y8LM8oc7MfU5ga8hseqB'
+    + N'TdcieRnTGU3+nC0G4v3/sRHag0V6cT6bDR/YTxWGAR96mjg67lWEToptIigeYJ84Ghur+XTKPBEdnYvHCVTb7PdaVeU2Ey1hPJ2fRTFLYqsznM/m51IyHjClT6a8C7wYhhKL8Vlxwr3EzjJNsyV3HyzPGxS+BFHksHWy43TERPrKGBlA6WDB'
+    + N'YgFZq/1hKfmTmf1BlhrK7OtLV4f9ujPrwTkd89ABy1F/MBjSRw6HA0BAL4nIaXdadeEBUPj6HEKW8KmSwI7ijM5JiQ5twLsrP5bwIZtMdkKxpnnFhTNZG/bpsWPauR1zwdGyoIKd1wNykxNzim9eqPm7KPrbtX1Lcf+dTnVSiQgnLJ2Iqrsg'
+    + N'VDvG1d1lQd5i1WPFM1hsn7jQPputZDT3Fw8oi1BS0aKXRCiROtj3SdpWq8wWlExP6J5zVUyvip1Gsy22RXRtwr/jXiAq8K9mbwqe0T6DGJbarfaZxHTOP7Z+oHD1ns2Da2dqczt3QSxPYRO6b6cys31mxyLfUlfO/fdG/7tEgldv03CjG93o'
+    + N'Rje60Y2+SxeREzpfIaE95cv1oOTR0o8a940+l2TmkHFFub2PbyadknpuTyXt2r3kwQrzcLWQ3vUFpNFnazcMkLfhHA8Qowz/MoWz3ie6RI4xefr5bxFWA912kzscXNv8WiRAiDAdty0oNxwgECJa+uR8IFB/yPlAABxY+VhpR/9KJOBZpz71'
+    + N'8t+AQIAQQg50CP+6AAhhAD2D8HwgSBirDQXh8ckkaQJSujxdkm8S4Tslgh+XR7tEIsQl2c4HgoKHD4dMdbYAGHC+FghUFN2A8H1AUJISTAQHjmXZHkGC+XWvRBZMOyFTuPlzvgsIMi5IcbkFyPbG3YOD58Lcvs3v8WghdaVKIEgZlS0+kqxI'
+    + N'DBAkpWSXkXJUxFBSpzGAp6rdrgqgCrCusyBVs1C2COWvME8qXuL9IqsJKfwbV1q5qsfFaXPlYoAdOx8I8GYLi2r5m2clQu0jin8r9DRyOHc8tiRB6Db8EeQlS+EetS55SfkkYSJ3qwfBZUqqbXPNcQSoknVTW5DOBQKJjMna6FmEDGuOyYBQ'
+    + N'sMvgl6D0su49Bcs+MJpaUhQezh2XyG27knnwDgAoJXeP7kkWEmsUw69UuFRlPlK5BiUla6tJMROFXW/9vCTzqzDPv9blDtiEujxeSkdaVJkBgiKopuOxBGc9MrMCmz/47UDLKIQH+ItZ4IuPiEPusq+dBQL9VS0YNzn3sFiBEbNACFYX5Ddp'
+    + N'rKJ4oZeseEywR6j+hWEcrVyWmzFdtHKVmXKson4Ef+lZm/y8XRcOejb/MJYMCLnoWSaKNh0RsQIUKJvPXOmf7LqazlgKBCjIpPGdPtx7wFuUJUbLTQjCvDN+YyBkl7qlzWK3cvuIVi6vxsrFZyq/65AFzS7Mm3SNfi3yjv3YkhObd4MSEIgu'
+    + N'dyTVMZB8bAu1NSM79QwBENAck6GItctA6R94RLE7qAM9aidIgQAiwRLUTL8qsOlTNjMWhIyF1BJmJfH/xLgVAyG71E1rTsS/2JxfFKpnSHkrFxQHcRkrF9knxUwFlCmsbWQx0p8wHhxpmyMWGrKvcH8qyRrNngmrJELSxmfLZ8U1mNMR1UqE'
+    + N'uPRPUDzbAQxG3eTTYJK5+JbtEps+ZSGddHbf2/VoRlBIJcIxOUMg+/6TX2zOL0rRypU8L4BxpGsXMNXjMRUwTEEb1U0xnlQo/VL7SHOzgZ2NxSH2lKTubgYEMh+k1m5MbnY2Ax1RYo6hzoIja5chxiKYQ8+h3ZP+h3TC4LM5Jj/Cd8NBQpFN'
+    + N'Whs49NONBQuE7DyijwAhs3LBbVzbdnz4rx/pGU6KTAX0lORUbCj0tsiJQwZPCpdfm5qAQj8I03KJ/O2jpLphEEQ21aZVK4r7wEY/t6lU012DVvBe+AGurgmZXiwTYEK0xE4gSS49kDzAYmHKCTY1K5l0ECvpa3Oo18hy02PuPwKENA0d7mbh'
+    + N'ekWEfGgz6A0S40fMlJ0yRdtIaA9J2thkAkwYSHB9IiEdfhTgVq0LppxuEQgwYPhMQ6iy241Joo46kHOp7iRDT2b7CH/RhVboebDwgm0o6Q4fmh9E1HrULSgJ+CJLSCixKdByQiHCRsoBAdZgtE6FhKiOcAEQEH1hqrgg9whHGIlcYIrwUGAq'
+    + N'QXiXrnm4HSLzi52OgS10r25lCI/U+aryTczEQRtGpqSmgUSyy3FVV5iYUcBC61QHBAGTPiK0M33UYZDganl3U8rmMWFTkTUvM0UqOcbhvHJyVHV+13A+ELqZlctTieRTiYueDk6hLGdM6YmsCylT3YxxUybBNjI5Ncu5NnVRzuSpGZvQykCI'
+    + N'dwT0w0uGV5jYGiDAfB4PBzQ6p79IVpSiT2YULz/VUx01t8OSSmxmjIcpmykQiMA5JPQBIKS/JO8NGIehHNPBZZ8DZcpN2aRShZlNNfkFZtNVBOlqgSB0q5xOqYEufZNnAEGKDXNdbgxI9mWQ3kF2oKzAmmpZICQzLFUyTgzVZmbskzOt7lIg'
+    + N'2BTFWmblklIgBFym8kCA2uUaeZBUms0fBISyZnEGEGqDgRx2CYEVOENCtpTwgVDNOEpelb/nuBgIHN2OB4QSm+lMIThBkbhaP0MzIJBAbzCvJNoeKIJnAaHcnQcEXEPCtPJz7s45IEB3VqctM45LuqDKTGj95wFBymL1c0DgMKUI+WKpPtla'
+    + N'gJyTPhLv//0SQcp9E2dLhHx3kweEeOuQICHM6aE5iZB3kvIYt4Uvlgg6hym680g1H/gv7iCVHywRYo8ZFF9NKZmCxkCAvzQz65/Gx+a152yXiHv3Q2azl7Kv3S6wwGVc6n4lEEIuU0qpoDrYDzw4bkOSfzAQYAG3PZ5jqhkQFLAAcboXgSBl'
+    + N'SyqR8OldpHKFwewep5Wb3wwEPlNK5meh7hvkD9cH5ccCAWwB8B59QnnHVCMgKMQZGJS6F4GAXp7MnAC7NqUMBOq6il1BTLD1dwKBx1RqT0PnY7riHYkDU/mhQABPQpCMJfDPlwhxMbDY0pI7Nq4EBPiAVJdBQmrkrpYIwTVKBNaGjCELXpSy'
+    + N'H/jxGTw/EQgg3g7pzgzNNYEfngEExnNY6F4GQuJupkeU0MsMEEJ6ZkRAq8x9EAjWJwCBx5TCBCjpaPRm1ofrQ0IzIKTm39RSk7ZpAIScA84i3bnbx3QZSb14eB+poCxaepG0gq/hy4EA338VU5mmbTNC4YIEoGsAArzg1EnkaGdvH2GRTM4P'
+    + N'JzaVmu0j3TpQhx3cKFlOedvHM+Lwa4AQMDv+jxiUTuZxsWfm5Y0kPwYIrJdNI5YaVT4DCGmEMvEcgvcGupclghS7NYkzO3Nu0reU8zUwtiIFo8/lDwABQ+Oon7AJEOSMzRwQqpiKPY4KyfiHk/DCbM1TfiIQ7LyX7VynkxWmgalKtYmZ1SkS'
+    + N'zyJfIiifKBEyNeQzTMynkv7NMAnEiFz5+nUEieN9TDWC2Mt2ltOJnU+5ywcCdDWBeuTjlIRuaqmpBYIU92K8ws2BkDhAs/s1cTqlD5SqgZBrg6sgEnW/W1TTKWXuXA0QYIqkvCuVC4RMatQC4ajLJyRCPngdjctAcYCXJKiVQMhZDRWJ9CrG'
+    + N'IzSTCOQXiHyg+UtcIIQFNiUS6ZwgT2KcznVMwTh08hBF0WkMxdW5obtZYIoDyz+iFsJywqKOQNu4mLMDg9Y82ian9SiMhVWVGA8Cjdvp4c9wC7cgERQSs+BjL0i6k/VjtmuQC/EzMZuE4AvzD/7hPIkgkUdIJKoOjjdNjTtlIKTKTYhafhcP'
+    + N'aBdceGCmVVQzRY2iXYzlOAQYi4CXqJIcXl1gSvqWSAwRUdWcNPAulQhU2/OTNumuPg+E9HWRsEM23jCGDQnXQqLKILs0BBgBme5JkvlyZamCTUJxDFwaCd1MIijZI9hw4zIQMN4wZVxOdjuYkCmUmTLZvD9kKm1j4WG6VCXg7bqFK8l91byA'
+    + N'7g0tXYH8oKiY1yBh8Codsa3Lqp5ad4pAMDODganJpQhkjGBVFd2OiiZmXA0gvBCtFHD7LAaU3p1hE04p0OOcVA02ZGHW5gyJED+ChOMrUiUQyoxbh5B5IAlMTURGUMmUjimc0L0Ll5K5Df2DLlxbZEr28lASu4wtlA1nZ8K6j/k2OWjLzMxh'
+    + N'FlLqdzmkYINDQ49RUDIxx0Ynctmjge1HUKkkicsmIY+8gTSErgkQAKCkJ74bsPXaTCk9XhSzpCcWkJizA32JTKh6Wu2HYQqis3uUcamLyyA8jVzKAK4IV5nYEKQZGOHRK+U1xK8paxMdD2mbPBCIMTne+R3YPBEzCn2me+SGBSDAJ489Az/L'
+    + N'BDlGbEkuOc9m/HaCoCLBpQoImZcDn2SxSYj8BJc84z74xtnkFeIi4zGV7SJI6o6fKEl+4ndy1CusHQh5eDa6QuKj6I+QyWMH5GB6VHG6bIEjbpv8YhfnSJIjpA++zc5GQO3x4KIDYRF3Pwap0hRX4orPnCaPifJB7VB+gWUhzp0L2DxFAEKJ'
+    + N'8QwI8GuQ9cU34ppsPjYCIW5zCHKMHzPGffJAKXuJsMjY5NUXmGI/ePyI4Bb+kR7BE6F5VrrKEhlo/cyiv3WnkDAa+03ybexymzTj0yuXIlJy3Q+mmeaUssGrNltV7WDnvbUFNpO4dZO1YDoVTHES8g6uqebFM7+GEqzxTph/YD66WijHWbhm'
+    + N'wQef59uzZEG60mIpED1kx+c+Y1K3TQ+ANnPAVtM28IosXhuaA27F7ayc40mg3TEh3qTdLVb4Q0/aBvko7LAAjCmbCR+myrSR65iyXJftiHcvtFG4TOUYhwdqpQou9UzFT5dMizaxwdT0iTj4L3vzPVVjHJpJAAAAAElFTkSuQmCC'
+;
+
+UPDATE dbo.Setting SET Value = @Logo WHERE Name = 'LogoDataUri' AND ISNULL(Value, N'') = N'';
+GO
+
+INSERT dbo.InstallHistory (Version) VALUES ('2.4.0');   -- bump with every schema change: Molehill Manager offers the upgrade
+PRINT N'Molehill Admin 2.4.0 installed.';
 GO
