@@ -329,7 +329,8 @@ FROM (VALUES
     ('SqlCuBehindCritical',           N'3',     N'Critical when this many cumulative updates behind the latest CU.'),
     ('SqlSecurityUpdateSeverity',     N'Info',  N'Severity when on the latest CU but a newer "CU + GDR" security update exists: Info or Warning.'),
     ('WindowsPatchGraceDays',         N'14',    N'Days after Patch Tuesday before a missing Windows security update becomes a Warning (Critical once a second month is missed).'),
-    ('PatchReferenceMaxAgeDays',      N'40',    N'Warning when the patch reference data has not been refreshed for this many days.')
+    ('PatchReferenceMaxAgeDays',      N'40',    N'Warning when the patch reference data has not been refreshed for this many days.'),
+    ('TestAsManagedInstance',         N'0',     N'Testing only: 1 = report as if this were an Azure SQL Managed Instance. Leave at 0.')
 ) v (Name, Value, Description)
 WHERE NOT EXISTS (SELECT 1 FROM mw.Setting s WHERE s.Name = v.Name);
 
@@ -422,6 +423,17 @@ RETURNS bigint
 AS
 BEGIN
     RETURN ISNULL((SELECT TRY_CONVERT(bigint, Value) FROM mw.Setting WHERE Name = @Name), @Default);
+END
+GO
+
+-- Azure SQL Managed Instance (EngineEdition 8): Microsoft runs patching, automated backups and HA
+IF OBJECT_ID(N'mw.fn_IsManagedInstance') IS NULL EXEC (N'CREATE FUNCTION mw.fn_IsManagedInstance () RETURNS bit AS BEGIN RETURN 0; END');
+GO
+ALTER FUNCTION mw.fn_IsManagedInstance ()
+RETURNS bit
+AS
+BEGIN
+    RETURN CASE WHEN CONVERT(int, SERVERPROPERTY('EngineEdition')) = 8 OR mw.fn_SettingInt('TestAsManagedInstance', 0) = 1 THEN 1 ELSE 0 END;
 END
 GO
 IF OBJECT_ID(N'mw.fn_Html') IS NULL EXEC (N'CREATE FUNCTION mw.fn_Html (@s nvarchar(max)) RETURNS nvarchar(max) AS BEGIN RETURN NULL; END');
@@ -666,6 +678,7 @@ AS
 BEGIN
     SET NOCOUNT ON;
     IF ISNULL(CONVERT(int, SERVERPROPERTY('IsHadrEnabled')), 0) = 0 RETURN;
+    IF mw.fn_IsManagedInstance() = 1 RETURN;   -- the built-in HA replicas are Microsoft's, not client AGs
 
     DECLARE @now datetime = GETDATE();
     DECLARE @lag nvarchar(100) =
@@ -741,6 +754,17 @@ AS
 BEGIN
     SET NOCOUNT ON;
     DECLARE @now datetime = GETDATE();
+
+    -- Managed Instance: no volumes to see; record the instance's reserved storage instead, so the usual
+    -- free-space and days-to-full checks apply to it
+    IF mw.fn_IsManagedInstance() = 1 AND OBJECT_ID(N'master.sys.server_resource_stats') IS NOT NULL
+    BEGIN
+        EXEC sp_executesql N'
+            INSERT mw.DiskSnapshot (SnapshotTime, VolumeMountPoint, LogicalVolumeName, TotalMB, FreeMB)
+            SELECT TOP (1) @now, N''Managed Instance storage'', sku, reserved_storage_mb, reserved_storage_mb - storage_space_used_mb
+            FROM master.sys.server_resource_stats ORDER BY end_time DESC;', N'@now datetime', @now = @now;
+        RETURN;
+    END
     INSERT mw.DiskSnapshot (SnapshotTime, VolumeMountPoint, LogicalVolumeName, TotalMB, FreeMB)
     SELECT @now, vs.volume_mount_point, MAX(vs.logical_volume_name),
            MAX(vs.total_bytes) / 1048576, MAX(vs.available_bytes) / 1048576
@@ -824,6 +848,7 @@ ALTER PROCEDURE mw.usp_CollectPatchLevel
 AS
 BEGIN
     SET NOCOUNT ON;
+    IF mw.fn_IsManagedInstance() = 1 RETURN;   -- patched by Microsoft; no Windows host to read
     DECLARE @key nvarchar(200) = N'SOFTWARE\Microsoft\Windows NT\CurrentVersion';
     DECLARE @build nvarchar(50), @ubr int, @type nvarchar(50), @name nvarchar(200), @display nvarchar(50);
 
@@ -1090,12 +1115,21 @@ BEGIN
     DECLARE @ProductVersion nvarchar(50) = CONVERT(nvarchar(50), SERVERPROPERTY('ProductVersion'));
     DECLARE @Major int = CONVERT(int, PARSENAME(@ProductVersion, 4));
     DECLARE @EngineEdition int = CONVERT(int, SERVERPROPERTY('EngineEdition'));
+    DECLARE @IsMI bit = mw.fn_IsManagedInstance();
     DECLARE @Edition nvarchar(200) = CONVERT(nvarchar(200), SERVERPROPERTY('Edition'));
     DECLARE @Level nvarchar(100) = CONVERT(nvarchar(50), SERVERPROPERTY('ProductLevel')) + ISNULL(N' ' + CONVERT(nvarchar(50), SERVERPROPERTY('ProductUpdateLevel')), N'');
     DECLARE @SqlProduct nvarchar(100), @SqlMainEnd date, @SqlExtEnd date;
     SELECT TOP (1) @SqlProduct = ProductName, @SqlMainEnd = MainstreamEnd, @SqlExtEnd = ExtendedEnd
     FROM mw.ProductLifecycle WHERE Product = 'SQL Server' AND MajorVersion = @Major;
     SET @SqlProduct = ISNULL(@SqlProduct, N'SQL Server (version ' + CONVERT(nvarchar(10), @Major) + N')');
+    IF @IsMI = 1
+    BEGIN
+        -- evergreen: always the current engine (it reports version 12, which is not SQL Server 2014)
+        SELECT @SqlProduct = N'Azure SQL Managed Instance', @SqlMainEnd = NULL, @SqlExtEnd = NULL, @Level = N'';
+        IF OBJECT_ID(N'master.sys.server_resource_stats') IS NOT NULL
+            EXEC sp_executesql N'SELECT TOP (1) @e = sku + N'', '' + CONVERT(nvarchar(10), virtual_core_count) + N'' vCores, '' + hardware_generation
+                                 FROM master.sys.server_resource_stats ORDER BY end_time DESC;', N'@e nvarchar(200) OUTPUT', @e = @Edition OUTPUT;
+    END
 
     DECLARE @Ver nvarchar(4000) = @@VERSION, @OsName nvarchar(200);
     IF CHARINDEX(N' on ', @Ver) > 0
@@ -1109,6 +1143,7 @@ BEGIN
     WHERE Product = 'Windows Server'
       AND (@OsName LIKE N'%' + ProductName + N' %' OR @OsName LIKE N'%' + ProductName)
     ORDER BY LEN(ProductName) DESC;
+    IF @IsMI = 1 SELECT @OsName = N'Managed by Microsoft', @OsProduct = NULL, @OsMainEnd = NULL, @OsExtEnd = NULL;
 
     DECLARE @StartTime datetime, @Cpus int, @MemGB decimal(10,1);
     SELECT @StartTime = sqlserver_start_time, @Cpus = cpu_count, @MemGB = CAST(physical_memory_kb / 1048576.0 AS decimal(10,1)) FROM sys.dm_os_sys_info;
@@ -1131,6 +1166,7 @@ BEGIN
     IF EXISTS (SELECT 1 FROM msdb.dbo.log_shipping_monitor_primary) OR EXISTS (SELECT 1 FROM msdb.dbo.log_shipping_monitor_secondary)
         SET @HaDesc = @HaDesc + CASE WHEN @HaDesc <> N'' THEN N'; ' ELSE N'' END + N'Log shipping';
     IF @HaDesc = N'' SET @HaDesc = N'Standalone instance';
+    IF @IsMI = 1 SET @HaDesc = N'Built-in high availability, managed by Microsoft';
 
     IF @SqlExtEnd IS NOT NULL AND @SqlExtEnd < @Today
         INSERT #F VALUES ('Server', 'Critical', N'Unsupported SQL Server version',
@@ -1154,6 +1190,10 @@ BEGIN
         INSERT #F VALUES ('Server', 'Warning', N'Operating system approaching end of support',
             @OsProduct + N' leaves Microsoft extended support on ' + CONVERT(nvarchar(11), @OsExtEnd, 106) + N'.',
             N'Start planning an operating system upgrade or migration.');
+
+    IF @IsMI = 1
+        INSERT #F VALUES ('Server', 'Info', N'Azure SQL Managed Instance',
+            N'Patching, automated backups and high availability are run by Microsoft. This report covers the parts that remain the client''s responsibility: Agent jobs, the error log, performance, storage, integrity checks and configuration.', NULL);
 
     IF @StartTime > @Start
         INSERT #F VALUES ('Server', 'Info', N'SQL Server restarted during the period',
@@ -1201,6 +1241,14 @@ BEGIN
     FROM #bk bk;
 
     UPDATE #bk SET Evaluate = 1 WHERE StateDesc = N'ONLINE' AND NOT (IsAgDatabase = 1 AND IsPreferred = 0);
+    IF @IsMI = 1
+    BEGIN
+        -- automated backups are Microsoft's and are not recorded in msdb, so msdb cannot show them as missing
+        UPDATE #bk SET Evaluate = 0;
+        INSERT #F VALUES ('Backups', 'Info', N'Automated backups (Azure SQL Managed Instance)',
+            N'Full, differential and log backups are taken automatically by Azure and are not recorded in msdb, so the table below only shows backups the client takes themselves (COPY_ONLY to URL).',
+            N'Molehill Data Services checks the point-in-time retention period and any long-term retention (LTR) policy in the Azure portal each month. Tell us if restore requirements change.');
+    END
 
     DECLARE @FullMaxH bigint = mw.fn_SettingInt('BackupFullMaxAgeHours', 170),
             @DiffMaxH bigint = mw.fn_SettingInt('BackupFullOrDiffMaxAgeHours', 26),
@@ -1316,8 +1364,9 @@ BEGIN
     ORDER BY jf.LastFailure DESC;
 
     DECLARE @AgentStatus nvarchar(60), @AgentStartup nvarchar(60);
-    SELECT TOP (1) @AgentStatus = status_desc, @AgentStartup = startup_type_desc
-    FROM sys.dm_server_services WHERE servicename LIKE N'SQL Server Agent%';
+    IF @IsMI = 0 AND OBJECT_ID(N'sys.dm_server_services') IS NOT NULL
+        EXEC sp_executesql N'SELECT TOP (1) @s = status_desc, @t = startup_type_desc FROM sys.dm_server_services WHERE servicename LIKE N''SQL Server Agent%'';',
+                           N'@s nvarchar(60) OUTPUT, @t nvarchar(60) OUTPUT', @s = @AgentStatus OUTPUT, @t = @AgentStartup OUTPUT;
     IF @EngineEdition <> 4 AND @AgentStatus IS NOT NULL AND @AgentStatus <> N'Running'
         INSERT #F VALUES ('Agent jobs', 'Critical', N'SQL Server Agent is not running',
                           N'Agent service status: ' + @AgentStatus + N'. Scheduled jobs (including backups) will not run.',
@@ -1376,7 +1425,8 @@ BEGIN
     SELECT 'Capacity', CASE WHEN FreePct < @DiskCrit THEN 'Critical' ELSE 'Warning' END,
            N'Low disk space: ' + VolumeMountPoint,
            CONVERT(nvarchar(20), FreePct) + N'% free (' + FORMAT(FreeMB / 1024.0, 'N1') + N' GB of ' + FORMAT(TotalMB / 1024.0, 'N1') + N' GB).',
-           N'Free up space or extend the volume before it fills. A full volume can stop databases or backups.'
+           CASE WHEN @IsMI = 1 THEN N'Increase the Managed Instance storage size in the Azure portal (an online change, billed by Azure) or free up space. When instance storage is full, databases stop accepting writes.'
+                ELSE N'Free up space or extend the volume before it fills. A full volume can stop databases or backups.' END
     FROM #disk WHERE FreePct < @DiskWarn;
 
     INSERT #F (Section, Severity, Item, Detail, Recommendation)
@@ -1468,7 +1518,7 @@ BEGIN
     WHERE SampleTime >= @Start
     GROUP BY AgName, ReplicaServer, DatabaseName, ReplicaRole, AvailabilityMode, FailoverMode;
 
-    IF @IsHadr = 1 AND EXISTS (SELECT 1 FROM sys.availability_groups)
+    IF @IsHadr = 1 AND @IsMI = 0 AND EXISTS (SELECT 1 FROM sys.availability_groups)
     BEGIN
         IF @AgLatest IS NULL OR @AgLatest < DATEADD(hour, -1, @Now)
             INSERT #F VALUES ('Availability', 'Warning', N'Availability Group sampling is not running',
@@ -1581,13 +1631,18 @@ BEGIN
     CREATE TABLE #patch (SortOrder int, Component varchar(20), Installed nvarchar(100), InstalledUpdate nvarchar(100), Latest nvarchar(100),
                          LatestUpdate nvarchar(100), LatestReleased date, Status nvarchar(100), Severity varchar(10),
                          Detail nvarchar(1000), Recommendation nvarchar(1000), ReferenceLoaded datetime);
-    BEGIN TRY
-        EXEC mw.usp_CollectPatchLevel;
-        INSERT #patch EXEC mw.usp_PatchStatus;
-    END TRY
-    BEGIN CATCH
-        INSERT #F VALUES ('Patching', 'Info', N'Patch status could not be checked', LEFT(ERROR_MESSAGE(), 400), NULL);
-    END CATCH;
+    IF @IsMI = 1
+        INSERT #patch VALUES (1, 'SQL Server', @ProductVersion, NULL, NULL, NULL, NULL, N'Kept up to date by Microsoft', 'OK', NULL, NULL, NULL);
+    ELSE
+    BEGIN
+        BEGIN TRY
+            EXEC mw.usp_CollectPatchLevel;
+            INSERT #patch EXEC mw.usp_PatchStatus;
+        END TRY
+        BEGIN CATCH
+            INSERT #F VALUES ('Patching', 'Info', N'Patch status could not be checked', LEFT(ERROR_MESSAGE(), 400), NULL);
+        END CATCH;
+    END
 
     INSERT #F (Section, Severity, Item, Detail, Recommendation)
     SELECT 'Patching', Severity, Component + N': ' + Status, Detail, Recommendation
@@ -1650,7 +1705,7 @@ BEGIN
     IF @List IS NOT NULL
         INSERT #F VALUES ('Risks', 'Warning', N'Page verification not set to CHECKSUM', @List + N'.', N'Set PAGE_VERIFY CHECKSUM so storage corruption is detected.');
 
-    IF @MaxMem >= 2147483647
+    IF @MaxMem >= 2147483647 AND @IsMI = 0
         INSERT #F VALUES ('Risks', 'Warning', N'Max server memory not configured',
                           N'max server memory is at the default (unlimited) on a server with ' + CONVERT(nvarchar(20), @MemGB) + N' GB RAM.',
                           N'Set max server memory to leave headroom for the operating system and other services.');
@@ -1763,9 +1818,10 @@ td.key{font-weight:600;width:28%;background:#FAF9F9}
 
     -- Server
     SET @T = CAST((SELECT [td/@class] = 'key', td = k, '', td = v
-                   FROM (VALUES (1, N'Instance', ISNULL(@@SERVERNAME, N'') + N' (host ' + CONVERT(nvarchar(128), SERVERPROPERTY('ComputerNamePhysicalNetBIOS')) + N')'),
-                                (2, N'SQL Server', @SqlProduct + N' ' + @Edition + N' - ' + @ProductVersion + N' ' + @Level),
-                                (3, N'SQL Server support', CASE WHEN @SqlExtEnd IS NULL THEN N'See Microsoft lifecycle'
+                   FROM (VALUES (1, N'Instance', ISNULL(@@SERVERNAME, N'') + CASE WHEN @IsMI = 1 THEN N'' ELSE N' (host ' + CONVERT(nvarchar(128), SERVERPROPERTY('ComputerNamePhysicalNetBIOS')) + N')' END),
+                                (2, N'SQL Server', @SqlProduct + N' ' + ISNULL(@Edition, N'') + N' - ' + @ProductVersion + N' ' + @Level),
+                                (3, N'SQL Server support', CASE WHEN @IsMI = 1 THEN N'Evergreen - always the current version, updated by Microsoft'
+                                                                WHEN @SqlExtEnd IS NULL THEN N'See Microsoft lifecycle'
                                                                 WHEN @SqlExtEnd < @Today THEN N'UNSUPPORTED since ' + CONVERT(nvarchar(11), @SqlExtEnd, 106)
                                                                 WHEN @SqlMainEnd < @Today THEN N'Extended support until ' + CONVERT(nvarchar(11), @SqlExtEnd, 106)
                                                                 ELSE N'Mainstream support until ' + CONVERT(nvarchar(11), @SqlMainEnd, 106) END),
@@ -1774,7 +1830,7 @@ td.key{font-weight:600;width:28%;background:#FAF9F9}
                                                                       ELSE N' - supported until ' + CONVERT(nvarchar(11), @OsExtEnd, 106) END, N'')),
                                 (5, N'Running since', mw.fn_Date(@StartTime)),
                                 (6, N'CPU / memory', CONVERT(nvarchar(10), @Cpus) + N' logical CPUs, ' + CONVERT(nvarchar(20), @MemGB) + N' GB RAM, max server memory '
-                                                     + CASE WHEN @MaxMem >= 2147483647 THEN N'unlimited' ELSE FORMAT(@MaxMem, 'N0') + N' MB' END),
+                                                     + CASE WHEN @IsMI = 1 THEN N'set by the service tier' WHEN @MaxMem >= 2147483647 THEN N'unlimited' ELSE FORMAT(@MaxMem, 'N0') + N' MB' END),
                                 (7, N'High availability', @HaDesc),
                                 (8, N'Databases', CONVERT(nvarchar(10), (SELECT COUNT(*) FROM sys.databases WHERE database_id > 4)) + N' user databases')
                         ) x (o, k, v)
@@ -1793,8 +1849,9 @@ td.key{font-weight:600;width:28%;background:#FAF9F9}
                    FOR XML PATH('tr'), TYPE) AS nvarchar(max));
     DECLARE @PatchRef datetime = (SELECT MAX(LoadedAt) FROM mw.PatchReference);
     SET @H = @H + N'<h2>Patching</h2><table><tr><th>Component</th><th>Installed</th><th>Latest available</th><th>Released</th><th>Status</th></tr>' + ISNULL(@T, @Empty) + N'</table>'
-            + N'<p class="note">Windows: the monthly cumulative security update for the operating system (feature and optional preview updates are ignored; other software such as .NET or drivers is not covered). '
-            + N'SQL Server: the latest cumulative update on the servicing branch in use. Build data from Microsoft, last refreshed ' + ISNULL(mw.fn_Date(@PatchRef), N'never') + N'.</p>';
+            + CASE WHEN @IsMI = 1 THEN N'<p class="note">Azure SQL Managed Instance is patched by Microsoft during its maintenance window; there is nothing for the client to install.</p>'
+                   ELSE N'<p class="note">Windows: the monthly cumulative security update for the operating system (feature and optional preview updates are ignored; other software such as .NET or drivers is not covered). '
+                      + N'SQL Server: the latest cumulative update on the servicing branch in use. Build data from Microsoft, last refreshed ' + ISNULL(mw.fn_Date(@PatchRef), N'never') + N'.</p>' END;
 
     -- Backups
     SET @T = CAST((SELECT td = DatabaseName, '', td = RecoveryModel, '',
@@ -1826,7 +1883,7 @@ td.key{font-weight:600;width:28%;background:#FAF9F9}
                    OUTER APPLY (SELECT TOP (1) StepName, Message FROM mw.JobFailure f WHERE f.JobName = jf.JobName AND f.StepId > 0 AND f.RunDateTime >= @Start ORDER BY f.RunDateTime DESC) s
                    ORDER BY jf.LastFailure DESC
                    FOR XML PATH('tr'), TYPE) AS nvarchar(max));
-    SET @H = @H + N'<h2>3. SQL Agent jobs</h2><p>SQL Server Agent: ' + CASE WHEN @EngineEdition = 4 THEN N'not available (Express edition)' ELSE ISNULL(mw.fn_Html(@AgentStatus), N'unknown') END + N'.</p>'
+    SET @H = @H + N'<h2>3. SQL Agent jobs</h2><p>SQL Server Agent: ' + CASE WHEN @EngineEdition = 4 THEN N'not available (Express edition)' WHEN @IsMI = 1 THEN N'always running (managed by Microsoft)' ELSE ISNULL(mw.fn_Html(@AgentStatus), N'unknown') END + N'.</p>'
             + N'<table><tr><th>Failed job</th><th>Failures</th><th>Last failure</th><th>Failing step</th></tr>' + ISNULL(@T, N'<tr><td colspan="4" class="ok">No job failures this period.</td></tr>') + N'</table>';
 
     -- Queries (two variants: with and without query text)
@@ -2061,7 +2118,12 @@ BEGIN
 
     IF SUSER_ID(@LoginName) IS NULL
     BEGIN
-        IF @IsWindows = 1
+        IF @IsWindows = 1 AND CONVERT(int, SERVERPROPERTY('EngineEdition')) = 8
+        BEGIN
+            RAISERROR(N'Azure SQL Managed Instance has no Windows logins. Use a Microsoft Entra login (user@domain.com, or a group or app name) or a SQL login.', 16, 1);
+            RETURN;
+        END
+        ELSE IF @IsWindows = 1
         BEGIN
             SET @sql = N'CREATE LOGIN ' + @q + N' FROM WINDOWS WITH DEFAULT_DATABASE = [master];';
             EXEC (@sql);
@@ -2074,6 +2136,13 @@ BEGIN
                      + N', DEFAULT_DATABASE = [master], CHECK_POLICY = ON, CHECK_EXPIRATION = OFF;';
             EXEC (@sql);
             PRINT N'Created SQL login ' + @LoginName + N' (password policy on, expiry off' + CASE WHEN @Sid IS NOT NULL THEN N', SID matched to first instance' ELSE N'' END + N').';
+        END
+        ELSE IF CONVERT(int, SERVERPROPERTY('EngineEdition')) = 8
+        BEGIN
+            -- Managed Instance: a name with no password is a Microsoft Entra user, group or app
+            SET @sql = N'CREATE LOGIN ' + @q + N' FROM EXTERNAL PROVIDER;';
+            EXEC (@sql);
+            PRINT N'Created Microsoft Entra login ' + @LoginName;
         END
         ELSE
         BEGIN

@@ -117,7 +117,7 @@ function Invoke-SqlFile($Conn, [string]$Path) {
 }
 
 # Creates the default database if needed, or checks an existing one is suitable. Never changes an existing database.
-function Initialize-TargetDatabase($Conn) {
+function Initialize-TargetDatabase($Conn, [bool]$IsManagedInstance) {
     $info = Invoke-Sql $Conn @'
 SELECT d.name, d.state_desc, d.is_read_only, InAg = CASE WHEN d.replica_id IS NULL THEN 0 ELSE 1 END, d.recovery_model_desc,
        Collation = CONVERT(sysname, DATABASEPROPERTYEX(d.name, 'Collation')), ServerCollation = CONVERT(sysname, SERVERPROPERTY('Collation'))
@@ -128,14 +128,19 @@ FROM sys.databases d WHERE d.name = @Db;
         if ($Database -ne 'MolehillWatch') {
             throw "Database [$Database] does not exist on this instance. Give the name of an existing database, or leave out -Database to create the default MolehillWatch database."
         }
-        Invoke-Sql $Conn @'
+        # Azure SQL Managed Instance only supports FULL recovery (its log backups are automatic)
+        $recovery = if ($IsManagedInstance) { '' } else { 'ALTER DATABASE MolehillWatch SET RECOVERY SIMPLE;' }
+        Invoke-Sql $Conn @"
 CREATE DATABASE MolehillWatch;
-ALTER DATABASE MolehillWatch SET RECOVERY SIMPLE;
+$recovery
 ALTER DATABASE MolehillWatch SET AUTO_CLOSE OFF;
-DECLARE @owner nvarchar(300) = N'ALTER AUTHORIZATION ON DATABASE::MolehillWatch TO ' + QUOTENAME(SUSER_SNAME(0x01)) + N';';
-EXEC (@owner);
-'@
-        Write-Host '    Created database MolehillWatch (SIMPLE recovery)'
+IF SUSER_SNAME(0x01) IS NOT NULL
+BEGIN
+    DECLARE @owner nvarchar(300) = N'ALTER AUTHORIZATION ON DATABASE::MolehillWatch TO ' + QUOTENAME(SUSER_SNAME(0x01)) + N';';
+    EXEC (@owner);
+END
+"@
+        Write-Host "    Created database MolehillWatch ($(if ($IsManagedInstance) { 'FULL recovery, as Managed Instance requires' } else { 'SIMPLE recovery' }))"
         return
     }
 
@@ -151,7 +156,7 @@ EXEC (@owner);
     if ("$dbCollation" -ne "$($d.ServerCollation)") { throw "Database [$Database] uses collation $dbCollation but the server uses $($d.ServerCollation), which would cause collation conflicts. Use a database with the server collation (or the default MolehillWatch)." }
     if ($Database -ne 'MolehillWatch') {
         Write-Host "    Using existing database [$Database] ($($d.recovery_model_desc) recovery; its settings are left unchanged)"
-        if ($d.recovery_model_desc -ne 'SIMPLE') { Write-Host '    Note: not in SIMPLE recovery, so Molehill Watch history adds a little to its log backups.' -ForegroundColor DarkGray }
+        if ($d.recovery_model_desc -ne 'SIMPLE' -and -not $IsManagedInstance) { Write-Host '    Note: not in SIMPLE recovery, so Molehill Watch history adds a little to its log backups.' -ForegroundColor DarkGray }
     } else {
         Write-Host '    Database MolehillWatch already exists'
     }
@@ -207,13 +212,15 @@ foreach ($instance in $SqlInstance) {
         $conn = New-SqlConnection $instance
         $info = Invoke-Sql $conn "SELECT Version = CONVERT(varchar(30), SERVERPROPERTY('ProductVersion')), Edition = CONVERT(nvarchar(200), SERVERPROPERTY('Edition')), EngineEdition = CONVERT(int, SERVERPROPERTY('EngineEdition')), IsSysadmin = IS_SRVROLEMEMBER('sysadmin'), ServerName = @@SERVERNAME" -Table
         $row = $info.Rows[0]
-        Write-Host "    $($row.ServerName): SQL Server $($row.Version) $($row.Edition)"
+        $isManagedInstance = ($row.EngineEdition -eq 8)
+        if ($isManagedInstance) { Write-Host "    $($row.ServerName): Azure SQL Managed Instance (patching, backups and HA are Microsoft's)" }
+        else { Write-Host "    $($row.ServerName): SQL Server $($row.Version) $($row.Edition)" }
         if ([int]($row.Version.Split('.')[0]) -lt 11) { throw 'SQL Server 2012 or later is required.' }
         if ($row.IsSysadmin -ne 1) { throw 'The installing account must be a member of sysadmin.' }
         $isExpress = ($row.EngineEdition -eq 4)
 
         Write-Host "  2/7 Installing into database [$Database] (schema mw): procedures, report and jobs"
-        Initialize-TargetDatabase $conn
+        Initialize-TargetDatabase $conn $isManagedInstance
         $conn.ChangeDatabase($Database)
         Invoke-SqlFile $conn $installFile
 

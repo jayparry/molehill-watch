@@ -15,7 +15,12 @@ Please send or arrange the following. Onboarding and your first weekly report st
 - [ ] **Remote access** to each covered SQL Server, e.g. VPN, Azure Bastion or another agreed method
 - [ ] **SSMS access** to each covered instance. A jump box with SQL Server Management Studio is preferred; SSMS on each server with RDP access is also fine.
 - [ ] **An account for Molehill Data Services.** A Windows/AD account is preferred, e.g. `YOURDOMAIN\svc-molehill`. If your servers aren't joined to a domain or Entra ID, a SQL login is fine. The installer can create it for you (see section 3), but SQL Server must allow "SQL Server and Windows Authentication mode".
-- [ ] **A list of covered instances**, including every Availability Group replica, with the SQL Server version and edition of each
+- [ ] **A list of covered instances**, including every Availability Group replica, with the SQL Server version and edition of each. For Azure, list each **Managed Instance**, and each Azure SQL Database **logical server or elastic pool** with how many databases it holds.
+- [ ] **For Azure SQL**, a Microsoft Entra account for Molehill Data Services with:
+  * **Reader** on the resource groups concerned, so we can check retention, auditing, Defender and failover group settings
+  * a database user with `VIEW DATABASE STATE` in each covered Azure SQL Database
+  * access to the logical server's `master` database (the server-level `##MS_ServerStateReader##` role covers both)
+  * the jump box's IP address allowed through the server firewall, or a private endpoint
 - [ ] **Someone with sysadmin rights** for about 15 minutes to run the installer (or grant temporary rights for us to do it)
 - [ ] *(Optional)* a confidentiality agreement or Data Processing Agreement, if you would like one
 
@@ -47,6 +52,26 @@ The jobs only **read** server metadata: DMVs, msdb history, the error log and th
 
 **Express edition** has no SQL Agent. We use Windows Task Scheduler instead, which requires the local SYSTEM account to have sysadmin rights on that instance. We'll agree this with you first.
 
+**Azure SQL Managed Instance** gets the same installer, jobs and weekly report as SQL Server. The one difference is the database, which uses FULL recovery because that is all Managed Instance supports. Microsoft looks after patching, automated backups and high availability, and the report says so rather than flagging them. We still watch the parts that remain yours:
+
+* Agent jobs
+* errors and query performance
+* storage
+* integrity checks
+* configuration
+
+**Azure SQL Database** has nothing installed at all. Each week we run a read-only report from your jump box. It covers:
+
+* backup retention
+* DTU/vCore use, throttling and storage headroom
+* the slowest queries (from Query Store)
+* elastic job failures
+* geo-replication and failover groups
+* firewall rules, auditing and Microsoft Defender for SQL
+* cost and service tier suggestions
+
+It creates nothing in Azure and changes nothing. Auto-paused serverless databases are skipped, so running the report never wakes them up (and adds to your bill).
+
 ---
 
 ## 3. Permissions for the Molehill Data Services account
@@ -66,6 +91,8 @@ To carry out fixes you've approved, we may need higher rights temporarily, for e
 * It has the same SID on every server, so it keeps working after an Availability Group failover.
 * The password is typed in at install time and is never saved in any script or file. We keep it in our password manager.
 * If you'd rather create the login yourself, create it before we run the installer and we'll only grant the permissions above.
+
+**On an Azure SQL Managed Instance** there are no Windows logins, so we use a Microsoft Entra account (for example `molehill@yourcompany.com`) or a SQL login. It gets the same read-only permissions.
 
 ---
 
@@ -93,7 +120,7 @@ E-mail your agreed ticket channel with:
 
 A Critical issue raised outside business hours becomes top priority at the start of the next business day. Guaranteed out-of-hours emergency cover isn't part of this package, but can be arranged separately.
 
-**Planned out-of-hours work** (patching, maintenance windows, releases) can be booked in advance.
+**Planned out-of-hours work** (patching, maintenance windows, releases, and for Azure: service tier changes, migrations and failover tests) can be booked in advance.
 
 If a piece of work looks likely to take **more than 1 hour**, we'll send you an estimate before continuing, so your included hours aren't used up unexpectedly.
 

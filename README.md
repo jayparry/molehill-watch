@@ -8,8 +8,9 @@ It has two halves:
 
 | | Where it runs | What it does |
 |---|---|---|
-| **Client** (`Client\`) | Each covered client SQL Server (and every AG replica) | Objects in an `mw` schema, in the `MolehillWatch` database or the client's existing DBA database, plus Agent jobs. They collect health data and build the **weekly status report**. |
-| **Admin** (`Admin\`) | Your own SQL Server (Express is fine) | The `MolehillAdmin` database: clients, agreements, pricing, **tickets and SLA times**, time logging, **included hours**, billing cycles, **invoices**, notice periods and a daily **dashboard**. |
+| **Client** (`Client\`) | Each covered client SQL Server or **Azure SQL Managed Instance** (and every AG replica) | Objects in an `mw` schema, in the `MolehillWatch` database or the client's existing DBA database, plus Agent jobs. They collect health data and build the **weekly status report**. |
+| **Client, Azure SQL Database** (`Client\Get-AzureSqlDatabaseReport.ps1`) | The client's jump box. Nothing is installed in Azure. | A read-only weekly report per logical server or elastic pool. |
+| **Admin** (`Admin\`) | Your own SQL Server (Express is fine) | The `MolehillAdmin` database: clients, agreements, pricing (including Azure SQL), **tickets and SLA times**, time logging, **included hours**, billing cycles, **invoices**, notice periods and a daily **dashboard**. **Molehill Manager** (`Admin\MolehillManager`) is a terminal front end for all of it. |
 
 ---
 
@@ -25,6 +26,13 @@ cd Admin
 This creates the database and schedules a daily 07:00 run. Each run creates draft invoices when they're due and writes `Dashboard.html` plus the invoice HTML files to `Documents\Molehill Admin`.
 
 Then open `Admin\Example-NewClient.sql` in SSMS and press F5. It's a full worked example that rolls itself back.
+
+For everyday use, **Molehill Manager** is a terminal front end for clients, agreements, instances, onboarding, tickets, time and invoices. It calls the same stored procedures, so the rules are identical. See its [README](Admin/MolehillManager/README.md).
+
+```powershell
+cd Admin\MolehillManager
+dotnet run -- -s .\SQLEXPRESS -d MolehillAdmin     # F2 new, Enter to open or act, F6 run billing
+```
 
 ### 2. Per client: install Molehill Watch on each covered SQL Server
 
@@ -58,6 +66,14 @@ The SQL login is created with password policy on and expiry off. Every instance 
 
 That's the whole install. It creates the database, collectors, report builder and 4 Agent jobs. It grants read-only access to your login, runs a first collection and builds a baseline report. It is safe to re-run, and re-running upgrades an existing install in place.
 
+**Azure SQL Managed Instance?** Install the same way. The instance has no Windows logins, so give `-MolehillLogin` a Microsoft Entra user, group or app (`molehill@contoso.com`) or a SQL login. The report knows it's a Managed Instance:
+
+* Patching, automated backups and HA are shown as Microsoft's. There are no false "no backup" or "unsupported SQL Server 2014" alarms, because a Managed Instance reports version 12.
+* Storage is checked against the instance's reserved storage.
+* Everything else (Agent jobs, error log, queries, integrity, configuration) is the same as SQL Server.
+
+**Azure SQL Database?** There is nothing to install. See step 3.
+
 *Manual alternative:* open `MolehillWatch_Install.sql` in SSMS and select the target database in the drop-down. That's `MolehillWatch` (create it first; the commands are at the top of the script) or the client's DBA database. Press F5, then run the short CONFIGURE block at the bottom.
 
 ### 3. Every Monday: weekly reports
@@ -70,7 +86,28 @@ On the client jump box:
 
 This writes an `index.html` with the RAG status and live patch status of every server. Next to it are the full reports and an Availability Group job/login parity check. `-UpdatePatchReference` first refreshes Microsoft's latest SQL Server and Windows Server build data, and needs internet access.
 
-**If the jump box has no internet access:** on your own PC run `.\Update-PatchReference.ps1 -OutFile patch-reference.json`, copy the file across, then on the jump box run `.\Update-PatchReference.ps1 -InFile patch-reference.json -ServerList .\servers.txt`. Review them, send them to the client, then log each one:
+**If the jump box has no internet access:** on your own PC run `.\Update-PatchReference.ps1 -OutFile patch-reference.json`, copy the file across, then on the jump box run `.\Update-PatchReference.ps1 -InFile patch-reference.json -ServerList .\servers.txt`.
+
+**Azure SQL Database** (per logical server; elastic pools are reported within their server):
+
+```powershell
+az login        # or Connect-AzAccount, or -SqlCredential for SQL authentication
+.\Get-AzureSqlDatabaseReport.ps1 -Server contoso-sql -ClientName "Contoso Ltd" -AzurePlatformChecks
+```
+
+This covers the areas the agreement lists:
+
+* backup retention and the earliest restore point
+* DTU/vCore use, throttling and storage against the tier limit
+* the top queries from Query Store
+* elastic job failures (`-ElasticJobServer`/`-ElasticJobDatabase`)
+* geo-replication and failover groups
+* firewall rules, TDE, auditing and Defender for SQL
+* cost observations: over-provisioned databases, pooling candidates, serverless, and reserved capacity
+
+`-AzurePlatformChecks` reads the settings that live only in Azure (retention policies, auditing, Defender, failover groups) through the Azure CLI with Reader access. It also skips auto-paused serverless databases, so the report doesn't wake them up and start billing. The script is read-only.
+
+Review the reports, send them to the client, then log each one. Use Molehill Manager (agreement > Weekly reports, F2) or:
 
 ```sql
 EXEC MolehillAdmin.dbo.usp_WeeklyReport_Log @Client = N'Contoso Ltd', @InstanceName = N'SQL01', @OverallStatus = 'Amber';
@@ -91,13 +128,15 @@ MolehillWatch\
 │  ├─ MolehillWatch_Uninstall.sql           removes jobs + database
 │  ├─ Export-WeeklyReports.ps1              saves reports as HTML + AG parity check + patch status
 │  ├─ Update-PatchReference.ps1             loads Microsoft's latest SQL/Windows build data
+│  ├─ Get-AzureSqlDatabaseReport.ps1        weekly report for Azure SQL Database (read-only, run from the jump box)
 │  ├─ Invoke-MolehillCollect.ps1            collector for Express edition (Task Scheduler)
 │  └─ servers.example.txt
 ├─ Admin\                                   ← your machine only
 │  ├─ Install-MolehillAdmin.ps1
 │  ├─ MolehillAdmin_Install.sql
 │  ├─ Invoke-MolehillDaily.ps1              billing run + dashboard/invoice HTML
-│  └─ Example-NewClient.sql                 worked example / template
+│  ├─ Example-NewClient.sql                 worked example / template
+│  └─ MolehillManager\                      C# terminal front end: clients, tickets, billing
 ├─ Docs\
 │  ├─ Admin-Guide.md                        your day-to-day runbook
 │  └─ Client-Onboarding-Guide.md            send to the client
@@ -182,6 +221,11 @@ dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=
 | >1 hour work flagged with an estimate | `usp_Time_Log` warns; dashboard lists tickets needing an estimate |
 | £75 BH / £115 OOH, 1 hour minimum per ticket | Applied when invoicing arrears (see *Minimum charge* below) |
 | £450 / £375 from 3rd server / £225 secondaries, FCI per instance, non-prod by agreement | `fn_AgreementFees` |
+| Azure SQL Managed Instance priced as a production instance and counts towards the tiers | `usp_Instance_Add @Platform = 'AzureSqlManagedInstance'` |
+| Azure SQL Database: £300 per logical server or elastic pool up to 5 databases, £40 per extra database, geo-replicas included, outside the tiers | `usp_Instance_Add @Platform = 'AzureSqlDatabaseServer'` / `'AzureSqlDatabaseElasticPool'`, `@DatabaseCount`; `@Role = 'GeoReplica'` for failover group secondaries. Keep the count current with `usp_Instance_Update @DatabaseCount` (or Molehill Manager). |
+| Managed Instance: same weekly report and coverage as SQL Server | Molehill Watch detects EngineEdition 8. Microsoft-managed areas (patching, automated backups, HA, OS) are reported as such, and storage is checked against the instance's reserved storage. |
+| Azure SQL Database weekly report (retention, DTU/vCore, storage headroom, throttling, Query Store, elastic jobs, geo-replication, firewall, auditing, Defender, cost/tier) | `Client\Get-AzureSqlDatabaseReport.ps1` (read-only; `-AzurePlatformChecks` adds the Azure Resource Manager settings) |
+| Out-of-hours: Azure tier changes, migrations, failover tests | Open the ticket with `@WorkType = 'PlannedOutOfHours'` and log the time `OutOfHours` |
 | Invoiced monthly in advance from start date, arrears for extra time, 14 days, no VAT, no pro-rata | `usp_Billing_Run` creates draft invoices; `usp_Invoice_Html` renders them |
 | Late payment may pause support | Dashboard overdue alerts; `usp_Agreement_PauseSupport`; ticket warnings |
 | 3-month initial term, review, 1 full calendar month's notice to end of billing cycle | `fn_EndDateForNotice`, `usp_Notice_Give`, review reminder on the dashboard |
@@ -192,19 +236,29 @@ dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=
 ## Requirements
 
 * **Client side:** SQL Server 2012 or later on Windows. SQL Server Agent is used where available. **Express edition** has no Agent, so run the installer on the server with `-UseTaskScheduler`; this grants `NT AUTHORITY\SYSTEM` sysadmin so the scheduled tasks can collect, so agree that with the client first. The installer needs Windows PowerShell 5.1 or PowerShell 7 and no extra modules.
-* **Admin side:** SQL Server 2017 or later (Express/Developer fine) on a Windows machine you control.
+* **Azure SQL Managed Instance:** the same installer, from a machine that can reach the instance. SQL Agent is always available.
+* **Azure SQL Database:** Windows PowerShell 5.1 or PowerShell 7 on the jump box. Sign in with the Azure CLI (`az login`), Az PowerShell, or `-SqlCredential`. The account needs VIEW DATABASE STATE in each database and access to master. `-AzurePlatformChecks` also needs the Azure CLI with Reader on the resource group.
+* **Admin side:** SQL Server 2017 or later (Express/Developer fine) on a Windows machine you control. Molehill Manager needs the .NET 8 SDK to run from source, or nothing at all as a published single `.exe`.
 
 ## Decisions and assumptions to review
 
 1. **Minimum charge.** The contract says "minimum charge of 1 hour per ticket" but doesn't say how that interacts with included hours. The default (`MinimumChargeMode = Fair`) uses included hours at the actual time worked. Once a ticket spills into chargeable time, it's billed so its total is at least 1 hour. `Strict` applies the 1-hour minimum before included hours are deducted, so three 10-minute tickets would use all 3 included hours. Change it with `UPDATE MolehillAdmin.dbo.Setting SET Value = 'Strict' WHERE Name = 'MinimumChargeMode'`.
 2. **Critical tickets** raised in business hours are due by 17:30 the same day. Tickets raised outside hours are treated as received at 09:00 the next business day.
 3. **"1 full calendar month's notice"** runs to the end of the calendar month after the notice date. The agreement then ends at the close of the billing cycle current at that point, and never before the initial term ends.
-4. **New instances** are billed from the first cycle that starts after they're covered (no pro-rata). Instances with a bespoke `@AgreedMonthlyFee` don't count towards the multi-server tiers.
+4. **New instances** are billed from the first cycle that starts after they're covered (no pro-rata). The exception is instances added before the agreement's first invoice (onboarding): these are covered from the start date, so the first month is charged. Instances with a bespoke `@AgreedMonthlyFee` don't count towards the multi-server tiers. A cycle with nothing to charge produces no invoice, not a £0 one.
 5. **Bank holidays** are England & Wales, seeded to 2030. The dashboard reminds you to add more. Scotland/NI clients: edit `dbo.BankHoliday`.
 6. **Lifecycle dates** for SQL Server and Windows are seeded from Microsoft's published dates. SQL Server 2025 is left blank. Check them at learn.microsoft.com/lifecycle.
 7. **Patching checks** cover the monthly Windows OS security update only, not .NET, drivers or other software. Windows Server 2012/2012 R2 can't be checked automatically (their update level isn't in the registry in a comparable form), and neither can hotpatch-only months on Windows Server 2025 Azure Edition. The build data is refreshed by `Update-PatchReference.ps1`; the report warns if it is more than 40 days old. Thresholds are settings in `mw.Setting` (`SqlPatchGraceDays`, `SqlCuBehindCritical`, `SqlSecurityUpdateSeverity`, `WindowsPatchGraceDays`).
-8. **Testing:** everything was installed and exercised end-to-end on **SQL Server 2019 and SQL Server 2025** (LocalDB/Express), including 39 automated checks of the commercial rules on both. It has not been run on SQL 2012–2017, or on a live Availability Group or FCI. Those code paths are version-guarded, but do a first install on a non-critical instance.
+8. **Testing:** everything was installed and exercised end-to-end on **SQL Server 2019 and SQL Server 2025** (LocalDB/Express), including 59 automated checks of the commercial rules on both (fresh install and upgrade). Molehill Manager has a read-only self-test of every screen and form, and a scripted run that submits every form against a test database (60 checks). It has not been run on SQL 2012–2017, or on a live Availability Group or FCI. Those code paths are version-guarded, but do a first install on a non-critical instance.
 9. **Error log reading on LocalDB:** `xp_readerrorlog` returns nothing on SQL Server 2025 LocalDB (and ends .NET connections with a severity 20 error). Real instances are unaffected - the SQL Server 2025 instance used for testing reads its log normally. The weekly report raises a Monitoring warning when the error log cannot be read, so an empty error log section is never mistaken for a clean one, and error log collection runs last so nothing else is lost.
+10. **Azure pricing details the agreement doesn't spell out:**
+    * A Managed Instance geo-replica or failover-group secondary is charged at the £225 secondary rate. The agreement only says "included" for Azure SQL Database.
+    * An Azure SQL Database geo-replica is £0 and needs no database count.
+    * Very large or sprawling Azure SQL Database estates are "quoted on a bespoke basis". Use `@AgreedMonthlyFee` for those.
+11. **Azure was not available for testing.**
+    * **Managed Instance:** the handling was exercised on SQL Server 2025 LocalDB with the testing-only setting `TestAsManagedInstance = 1` (leave it at 0). The things only a real instance has, `sys.server_resource_stats` and Entra `FROM EXTERNAL PROVIDER` logins, have not been run.
+    * **Azure SQL Database report:** the connection, Query Store, findings and HTML code was run against LocalDB, and every Azure-only DMV (`sys.resource_stats`, `sys.dm_database_backups`, geo-replication, firewall) degrades to a "could not check" line rather than failing. The Azure queries and the `az` calls themselves have not been run against Azure.
+    * Do the first run of each with the client's DBA watching.
 
 ## Uninstall
 

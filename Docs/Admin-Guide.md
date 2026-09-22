@@ -4,6 +4,8 @@ All commands run in SSMS against **MolehillAdmin**. Wherever a procedure takes `
 
 Times are UK local time. Leave date/time parameters out to mean "now".
 
+**Prefer not to type SQL?** Every step below can also be done in **Molehill Manager** (`Admin\MolehillManager`, `dotnet run`). It has tabs for Dashboard, Clients, Tickets and Billing. Press Enter on an agreement for its instances, onboarding, contacts, tickets and weekly reports. F2 adds, and Enter on a row offers what you can do with it. It calls the same procedures shown here, and shows any warnings they print.
+
 ---
 
 ## Every morning (2 minutes)
@@ -47,11 +49,24 @@ Work through `Admin\Example-NewClient.sql`. It's the same steps with example val
    EXEC dbo.usp_Instance_Add @Client = N'Contoso Ltd', @InstanceName = N'SQL01', @SqlVersion = '2019';
    EXEC dbo.usp_Instance_Add @Client = N'Contoso Ltd', @InstanceName = N'SQL02', @Role = 'AGSecondary', @AvailabilityGroup = N'AG1', @PrimaryInstanceName = N'SQL01', @SqlVersion = '2019';
    ```
-   Roles: `Standalone`, `AGPrimary`, `AGSecondary`, `LogShippingSecondary`, `MirrorSecondary`, `FCI`.
+   Roles: `Standalone`, `AGPrimary`, `AGSecondary`, `LogShippingSecondary`, `MirrorSecondary`, `FCI`, `GeoReplica` (Azure only).
    * A busy readable secondary quoted as full: add `@PricedAsFullInstance = 1`.
-   * Non-production or bespoke pricing: add `@AgreedMonthlyFee = 150`.
+   * Non-production or bespoke pricing: add `@AgreedMonthlyFee = 150` (required for non-production).
+   * Instances added before the first invoice are covered from the agreement start. Instances added later are charged from the next cycle start. `@CoveredFrom` overrides both.
+
+   **Azure SQL.** A Managed Instance is priced like any other instance and counts towards the tiers. Azure SQL Database is priced per logical server or elastic pool: the unit covers 5 databases, and each extra database is charged separately. Give the number of databases:
+   ```sql
+   EXEC dbo.usp_Instance_Add @Client = N'Contoso Ltd', @InstanceName = N'contoso-mi', @Platform = 'AzureSqlManagedInstance';
+   EXEC dbo.usp_Instance_Add @Client = N'Contoso Ltd', @InstanceName = N'contoso-sql', @Platform = 'AzureSqlDatabaseServer', @DatabaseCount = 7;
+   EXEC dbo.usp_Instance_Add @Client = N'Contoso Ltd', @InstanceName = N'contoso-pool', @Platform = 'AzureSqlDatabaseElasticPool', @DatabaseCount = 12;
+   EXEC dbo.usp_Instance_Add @Client = N'Contoso Ltd', @InstanceName = N'contoso-sql-dr', @Platform = 'AzureSqlDatabaseServer', @Role = 'GeoReplica', @PrimaryInstanceName = N'contoso-sql';
+   ```
+   When databases are added or dropped, update the count. The fee changes from the next invoice.
+   ```sql
+   EXEC dbo.usp_Instance_Update @Client = N'Contoso Ltd', @InstanceName = N'contoso-sql', @DatabaseCount = 8;
+   ```
 4. **Send the client** `Docs\Client-Onboarding-Guide.md` (the access checklist).
-5. **Install Molehill Watch** on every covered instance and every AG replica, using `Client\Install-MolehillWatch.ps1`. Then record it:
+5. **Install Molehill Watch** on every covered instance, every AG replica and every Managed Instance, using `Client\Install-MolehillWatch.ps1`. A Managed Instance needs an Entra or SQL login for `-MolehillLogin`. Azure SQL Database has nothing to install; its weekly report runs from the jump box. Then record the install:
    ```sql
    EXEC dbo.usp_Instance_Update @Client = N'Contoso Ltd', @InstanceName = N'SQL01', @MonitoringInstalledDate = '2026-10-10';
    ```
@@ -82,7 +97,7 @@ Work through `Admin\Example-NewClient.sql`. It's the same steps with example val
 
 * **Severity.** `Critical` covers server down, backups failing or severe blocking, and is due by end of the same business day. `Standard` is due by end of the next full business day.
 * **Rate type.** It's chosen from `@WorkStart`: Mon–Fri 09:00–17:30 outside bank holidays is `BusinessHours`, anything else is `OutOfHours`. Override with `@RateType`.
-* **Planned out-of-hours work** (patching, releases): open the ticket with `@WorkType = 'PlannedOutOfHours'`.
+* **Planned out-of-hours work** (patching, releases, and for Azure: service tier changes, migrations and failover tests): open the ticket with `@WorkType = 'PlannedOutOfHours'`.
 * **Non-billable time** (e.g. your own mistake): `@IsBillable = 0`.
 * **Project work** (health checks, upgrades, migrations): open with `@WorkType = 'Project'`, then `EXEC dbo.usp_Quote_Add ...`. Project time is never billed through the support invoices.
 
@@ -97,9 +112,14 @@ The client's **Molehill Watch - Weekly Report** job builds the report at 06:30 e
    .\Export-WeeklyReports.ps1 -ServerList .\servers.txt -UpdatePatchReference
    ```
    `-UpdatePatchReference` refreshes Microsoft's latest SQL Server CU and Windows security update data (needs internet). With no internet on the jump box, create the file on your PC with `.\Update-PatchReference.ps1 -OutFile patch-reference.json`, then load it with `-InFile`.
+   For **Azure SQL Database**, run the report per logical server, signed in with `az login` or with `-SqlCredential`:
+   ```powershell
+   .\Get-AzureSqlDatabaseReport.ps1 -Server contoso-sql,contoso-sql-dr -ClientName 'Contoso Ltd' -AzurePlatformChecks
+   ```
+   Add `-ElasticJobServer`/`-ElasticJobDatabase` if the client uses elastic jobs. Once a month, check the retention (PITR/LTR) and Defender settings it reports against what the client needs.
 2. Open `index.html`. Review each report, check the **Patching** table, and check the **AG parity** page where there is one. Out-of-date patching is a natural prompt to offer planned out-of-hours patching work.
 3. Send the reports to the client. Raise tickets for anything that needs follow-up work.
-4. Log each report:
+4. Log each report. For Azure SQL Database, use the logical server or pool name as the instance.
    ```sql
    EXEC dbo.usp_WeeklyReport_Log @Client = N'Contoso Ltd', @InstanceName = N'SQL01', @OverallStatus = 'Amber', @CriticalCount = 0, @WarningCount = 2, @Notes = N'Recommended CHECKDB schedule';
    ```
@@ -119,7 +139,7 @@ The daily task runs `usp_Billing_Run`. On each client's cycle start date it crea
 * that cycle's monthly fees (in advance)
 * any chargeable support from earlier cycles (in arrears), with included hours and minimum charges applied
 
-Draft invoices are written to `Documents\Molehill Admin\Invoices\`. Open one in a browser and print it to PDF.
+Draft invoices are written to `Documents\Molehill Admin\Invoices\`. Open one in a browser and print it to PDF. A cycle with nothing covered and nothing owed gets no invoice, and the billing run tells you so. That usually means an instance's covered-from date is wrong.
 
 | Step | Command |
 |---|---|

@@ -37,9 +37,12 @@ EXEC dbo.usp_Agreement_Create
 DECLARE @Client nvarchar(200) = N'Example Widgets Ltd';   -- client name or agreement ref (e.g. MWA-0001) both work
 
 /* 3. Covered instances -------------------------------------------------------
-   Role: Standalone | AGPrimary | AGSecondary | LogShippingSecondary | MirrorSecondary | FCI
+   Role: Standalone | AGPrimary | AGSecondary | LogShippingSecondary | MirrorSecondary | FCI | GeoReplica (Azure)
+   Platform: SqlServer (default) | AzureSqlManagedInstance | AzureSqlDatabaseServer | AzureSqlDatabaseElasticPool
    Pricing is automatic: 1st/2nd production = 450, 3rd+ = 375, secondaries = 225,
-   FCI = one instance whatever the node count, non-production needs @AgreedMonthlyFee. */
+   FCI = one instance whatever the node count, non-production needs @AgreedMonthlyFee.
+   A Managed Instance is priced as an instance and counts towards the tiers. An Azure SQL Database
+   server or pool is 300 for up to 5 databases + 40 per extra database, outside the tiers; geo-replicas free. */
 EXEC dbo.usp_Instance_Add @Client = @Client, @InstanceName = N'EXSQL01',       @Role = 'AGPrimary',   @AvailabilityGroup = N'AG-ERP',
      @SqlVersion = '2022', @Edition = N'Standard', @OsVersion = N'Windows Server 2022';
 EXEC dbo.usp_Instance_Add @Client = @Client, @InstanceName = N'EXSQL02',       @Role = 'AGSecondary', @AvailabilityGroup = N'AG-ERP',
@@ -48,6 +51,10 @@ EXEC dbo.usp_Instance_Add @Client = @Client, @InstanceName = N'EXSQLFCI\FIN',  @
      @SqlVersion = '2019', @Edition = N'Enterprise';
 EXEC dbo.usp_Instance_Add @Client = @Client, @InstanceName = N'EXLEGACY',      @SqlVersion = '2014', @Edition = N'Standard',
      @OsVersion = N'Windows Server 2012 R2';                  -- unsupported: prints a warning
+EXEC dbo.usp_Instance_Add @Client = @Client, @InstanceName = N'example-mi',    @Platform = 'AzureSqlManagedInstance', @Edition = N'General Purpose';
+EXEC dbo.usp_Instance_Add @Client = @Client, @InstanceName = N'example-sql',   @Platform = 'AzureSqlDatabaseServer', @DatabaseCount = 7;
+EXEC dbo.usp_Instance_Add @Client = @Client, @InstanceName = N'example-sql-dr', @Platform = 'AzureSqlDatabaseServer', @Role = 'GeoReplica',
+     @PrimaryInstanceName = N'example-sql';                    -- failover group secondary: included
 
 /* 4. Onboarding ----------------------------------------------------------------*/
 EXEC dbo.usp_Instance_RecordRiskAcceptance @Client = @Client, @InstanceName = N'EXLEGACY', @AcceptedBy = N'Sam Example (IT Manager)';
