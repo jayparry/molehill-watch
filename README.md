@@ -35,7 +35,7 @@ dotnet publish -c Release -r win-x64 -o publish    # one self-contained Molehill
 .\publish\MolehillManager.exe                      # first run asks for the server and sign-in, saves them to MolehillManager.config.json
 ```
 
-Passwords are only saved if you ask, and then encrypted for your Windows account (DPAPI).
+Passwords are only saved if you ask, and then encrypted for your Windows account (DPAPI). If the database isn't there, Molehill Manager offers to create it and install MolehillAdmin itself, and it offers to upgrade an older one. You only need `Install-MolehillAdmin.ps1` to schedule the daily billing run.
 
 ### 2. Per client: install Molehill Watch on each covered SQL Server
 

@@ -119,17 +119,19 @@ public static class SetupDialog
         {
             var copy = Read(out var problem);
             if (copy == null) { MessageBox.ErrorQuery("Settings", problem!, "Ok"); return; }
-            var error = ConfigStore.Check(copy.BuildConnectionString());
-            if (error == null) MessageBox.Query("Settings", $"Connected to {copy.Describe()}.", "Ok");
-            else MessageBox.ErrorQuery("Could not connect", error, "Ok");
+            var check = AdminInstaller.Inspect(copy);
+            if (check.State == DbState.Ready) MessageBox.Query("Settings", $"Connected to {copy.Describe()}.", "Ok");
+            else if (check.CanInstall) MessageBox.Query("Settings", $"The server is reachable.\n\n{check.Message}\n\nPress Save and Molehill Manager will offer to do it.", "Ok");
+            else MessageBox.ErrorQuery("Could not connect", check.Message, "Ok");
         };
 
         save.Clicked += () =>
         {
             var copy = Read(out var problem);
             if (copy == null) { MessageBox.ErrorQuery("Settings", problem!, "Ok"); return; }
-            var error = ConfigStore.Check(copy.BuildConnectionString());
-            if (error != null && MessageBox.ErrorQuery("Could not connect", error + "\n\nSave these settings anyway?", "Keep editing", "Save anyway") != 1) return;
+            var check = AdminInstaller.Inspect(copy);
+            if (check.State != DbState.Ready && !check.CanInstall
+                && MessageBox.ErrorQuery("Could not connect", check.Message + "\n\nSave these settings anyway?", "Keep editing", "Save anyway") != 1) return;
             try
             {
                 Directory.CreateDirectory(copy.OutputFolder);
@@ -174,8 +176,8 @@ public static class SetupDialog
             var value = field.Text.ToString() ?? "";
             if (value == "") { MessageBox.ErrorQuery("Sign in", $"Type the {what.ToLowerInvariant()}.", "Ok"); return; }
             config.Secret = value;
-            var error = ConfigStore.Check(config.BuildConnectionString());
-            if (error != null) { config.Secret = null; MessageBox.ErrorQuery("Could not connect", error, "Ok"); return; }
+            var check = AdminInstaller.Inspect(config);
+            if (check.State == DbState.Error) { config.Secret = null; MessageBox.ErrorQuery("Could not connect", check.Message, "Ok"); return; }
             c.SavePassword = remember.Checked;
             try { ConfigStore.Save(path, config); } catch (Exception ex) { MessageBox.ErrorQuery("Settings", $"Could not write {path}:\n{ex.Message}", "Ok"); }
             secret = value;

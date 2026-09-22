@@ -275,9 +275,9 @@ public static class ConfigStore
             var db = new AdminDb(connectionString);
             var ok = db.Scalar("SELECT CASE WHEN OBJECT_ID(N'dbo.usp_Dashboard') IS NOT NULL AND OBJECT_ID(N'dbo.Agreement') IS NOT NULL THEN 1 ELSE 0 END");
             if (Convert.ToInt32(ok) != 1)
-                return "Connected, but this database has no MolehillAdmin objects. Install it with Admin\\Install-MolehillAdmin.ps1, or pick the right database.";
+                return "Connected, but this database has no MolehillAdmin objects. Start Molehill Manager normally and it will offer to install it.";
             if (db.Scalar("SELECT COL_LENGTH(N'dbo.Instance', N'Platform')") == null)
-                return "This MolehillAdmin is from before the Azure SQL update. Re-run Admin\\Install-MolehillAdmin.ps1 to upgrade it (your data is kept).";
+                return "This MolehillAdmin is from before the Azure SQL update. Start Molehill Manager normally and it will offer to upgrade it (your data is kept).";
             return null;
         }
         catch (Exception ex)

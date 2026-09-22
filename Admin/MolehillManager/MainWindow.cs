@@ -36,6 +36,7 @@ public sealed class MainWindow
             new MenuBarItem("_File", new[]
             {
                 new MenuItem("_Settings...", "", Reconnect),
+                new MenuItem("_Business and invoice details...", "", () => Ui.Try("Business details", () => Ui.Form(AdminForms.BusinessDetails(_db), RefreshAll))),
                 new MenuItem("Save dashboard _HTML...", "", () => Ui.Try("Dashboard", () => Ui.Saved("Dashboard", AdminForms.SaveDashboardHtml(_db, AdminForms.OutputFolder)))),
                 null!,
                 new MenuItem("_Quit", "", () => Application.RequestStop(), null, null, Key.CtrlMask | Key.Q)

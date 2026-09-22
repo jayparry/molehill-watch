@@ -28,6 +28,44 @@ public static class AdminForms
         return all;
     }
 
+    // ------------------------------------------------------------------ your business
+
+    private static readonly (string Name, string Label, bool Memo, string Help)[] BusinessSettings =
+    {
+        ("BusinessName", "Business name", false, ""),
+        ("BusinessEmail", "E-mail", false, ""),
+        ("BusinessWebsite", "Website", false, ""),
+        ("BusinessAddress", "Postal address", true, ""),
+        ("PaymentDetails", "Payment details", true, ""),
+        ("InvoicePrefix", "Invoice prefix", false, "MDS -> MDS-2026-0001"),
+        ("PaymentTermsDays", "Payment terms (days)", false, "")
+    };
+
+    /// <summary>The details printed on invoices and the dashboard (dbo.Setting).</summary>
+    public static FormSpec BusinessDetails(AdminDb db)
+    {
+        var current = db.Query("SELECT Name, Value FROM dbo.Setting;").Rows.Cast<DataRow>()
+                        .ToDictionary(r => (string)r["Name"], r => r["Value"] as string ?? "");
+        string Cur(string n) => current.TryGetValue(n, out var v) ? v : "";
+        return new FormSpec
+        {
+            Title = "Business and invoice details",
+            Intro = "Printed on every invoice and on the dashboard. Change them any time from File > Business and invoice details.",
+            Fields = BusinessSettings.Select(b => b.Name == "PaymentTermsDays"
+                        ? Field.Int(b.Name, b.Label, required: true, def: Cur(b.Name))
+                        : b.Memo ? Field.Memo(b.Name, b.Label, def: Cur(b.Name))
+                        : Field.Text(b.Name, b.Label, required: b.Name is "BusinessName" or "InvoicePrefix", def: Cur(b.Name), help: b.Help)).ToList(),
+            Submit = v =>
+            {
+                foreach (var b in BusinessSettings)
+                    db.Execute("UPDATE dbo.Setting SET Value = @v WHERE Name = @n;", ("@v", v[b.Name].Trim()), ("@n", b.Name));
+                var r = new ProcResult();
+                r.Messages.Add("Saved. New invoices use these details.");
+                return r;
+            }
+        };
+    }
+
     // ------------------------------------------------------------------ clients and agreements
 
     public static FormSpec NewClient(AdminDb db)

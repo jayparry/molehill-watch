@@ -13,6 +13,23 @@ cd Admin\MolehillManager
 dotnet publish -c Release -r win-x64 -o publish     # -> publish\MolehillManager.exe
 ```
 
+**No MolehillAdmin yet? It sets it up for you.** The install script is built into the exe, so you get the version the app was built for. Depending on what it finds on the configured server:
+
+| Found | It does |
+|---|---|
+| No database of that name | Offers to create it (under the name in the config file) and install MolehillAdmin, then asks for your business and invoice details |
+| An empty database, or one with other unrelated objects | Offers to install into it |
+| An older MolehillAdmin | Offers to upgrade it in place (data is kept) |
+| An install that stopped part way | Offers to finish it |
+| A database whose tables have MolehillAdmin's names but isn't MolehillAdmin | Leaves it alone and asks for another database name |
+| A database you have no access to | Explains, and doesn't try to create anything |
+
+Creating a database needs `CREATE ANY DATABASE` (the `dbcreator` role, or sysadmin); it warns you if the sign-in doesn't appear to have it.
+
+The app doesn't schedule the daily billing run and HTML export. Use **F6** in the app, or run `Install-MolehillAdmin.ps1` once on that machine to schedule it.
+
+`MolehillManager.exe --install` does the same create, install or upgrade without the screen, using the config file (for example after copying a new version of the exe into place).
+
 The first time it runs, it asks where MolehillAdmin is and how to sign in. It tests the connection, then saves the answers to its config file. After that it starts straight into the dashboard. If the file is missing something later (for example you delete a line, or change the sign-in to one that needs a user name), it asks only for that. **File > Settings** changes anything and reconnects.
 
 ### The config file: `MolehillManager.config.json`
@@ -132,4 +149,5 @@ MolehillManager.exe --selftest                      # read-only: every screen, a
 MolehillManager.exe --selftest-write --allow-writes # submits every form: a TEST copy of MolehillAdmin only
 MolehillManager.exe --selftest-config               # config file handling and encryption (no database)
 MolehillManager.exe --selftest-setup SQL01          # the first-run settings screen, driven headlessly
+MolehillManager.exe --selftest-install SQL01        # create / install / upgrade scratch MolehillAdmin_selftest_* databases, then drops them
 ```

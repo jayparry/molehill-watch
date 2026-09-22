@@ -210,6 +210,129 @@ public static class SelfTest
         return Finish();
     }
 
+    /// <summary>
+    /// Create / install / upgrade on a real server, through the start-up screens on a fake console. Uses (and then
+    /// drops) databases called MolehillAdmin_selftest_*; nothing else on the server is touched.
+    /// </summary>
+    public static int Install(string server)
+    {
+        var stamp = Guid.NewGuid().ToString("N")[..6];
+        string Db(string what) => $"MolehillAdmin_selftest_{stamp}_{what}";
+        var created = new List<string>();
+        var folder = Path.Combine(Path.GetTempPath(), "MolehillManager-installtest-" + stamp);
+        Directory.CreateDirectory(folder);
+        var path = Path.Combine(folder, ConfigStore.FileName);
+        var seen = new List<string>();
+
+        AppConfig Config(string db) => new() { OutputFolder = folder, Connection = { Server = server, Database = db, Authentication = "Windows" } };
+        var master = new AdminDb(new AppConfig { Connection = { Server = server, Database = "master" } }.BuildConnectionString());
+
+        Application.Init(new FakeDriver(), null);
+        View? handled = null;
+        Application.Iteration += () =>
+        {
+            var current = Application.Current;
+            if (current == null || current == handled || current is not Dialog d) return;
+            var title = d.Title.ToString() ?? "";
+            if (title.StartsWith("Installing")) return;                       // progress window: closes itself
+            handled = current;
+            seen.Add(title);
+            var buttons = All<Button>(d).ToList();
+            Button Press(params string[] names) => buttons.First(b => names.Any(n => b.Text.ToString()!.Contains(n)));
+            if (title is "Create MolehillAdmin" or "Install MolehillAdmin" or "Upgrade MolehillAdmin")
+                Press("Create and install", "Install", "Upgrade").OnClicked();
+            else if (title == "Business and invoice details" && All<TextField>(d).Any())
+            {
+                All<TextField>(d).First().Text = "Selftest Services Ltd";
+                Press("Save").OnClicked();
+            }
+            else if (title == "Molehill Manager settings") Press("Cancel").OnClicked();   // unexpected: fail the step
+            else Press("Close", "Ok").OnClicked();
+        };
+
+        try
+        {
+            // 1. no database at all
+            var a = Config(Db("new"));
+            created.Add(a.Connection.Database);
+            Check("missing database detected", AdminInstaller.Inspect(a).State == DbState.DatabaseMissing, AdminInstaller.Inspect(a).Message);
+            ConfigStore.Save(path, a);
+            var cs = Step("start-up creates and installs it", () => Startup.Connect(a, path, existed: true, forceSetup: false, loadFailed: false),
+                r => r != null ? null : "gave up; saw: " + string.Join(" | ", seen));
+            Check("asked first, then showed the result and business details",
+                seen.Take(3).SequenceEqual(new[] { "Create MolehillAdmin", "MolehillAdmin installed", "Business and invoice details" }), string.Join(" | ", seen));
+            Check("database is ready", AdminInstaller.Inspect(a).State == DbState.Ready);
+            var adb = new AdminDb(a.BuildConnectionString());
+            Check("business details saved", (adb.Scalar("SELECT Value FROM dbo.Setting WHERE Name = 'BusinessName'") as string) == "Selftest Services Ltd");
+            Check("install recorded", Convert.ToInt32(adb.Scalar("SELECT COUNT(*) FROM dbo.InstallHistory")) >= 1);
+            Check("standard price list seeded", Convert.ToInt32(adb.Scalar("SELECT COUNT(*) FROM dbo.PriceList")) >= 1);
+            Step("the app's screens work on it", () => { new MainWindow(adb).Build(new Toplevel()); return 0; });
+
+            // 2. an older MolehillAdmin (before the Azure SQL columns): upgrade keeps the data
+            adb.Proc("dbo.usp_Client_Add", ("@ClientName", "Kept Ltd"));
+            adb.Execute("""
+                ALTER TABLE dbo.Instance DROP CONSTRAINT CK_Instance_AzureDbCount;
+                ALTER TABLE dbo.Instance DROP CONSTRAINT CK_Instance_Platform;
+                ALTER TABLE dbo.Instance DROP CONSTRAINT DF_Instance_Platform;
+                ALTER TABLE dbo.Instance DROP COLUMN Platform;
+                """);
+            Check("older version detected", AdminInstaller.Inspect(a).State == DbState.NeedsUpgrade, AdminInstaller.Inspect(a).Message);
+            seen.Clear();
+            Step("start-up upgrades it", () => Startup.Connect(a, path, existed: true, forceSetup: false, loadFailed: false),
+                r => r != null ? null : "gave up; saw: " + string.Join(" | ", seen));
+            Check("upgrade asked for, no business details form", seen.FirstOrDefault() == "Upgrade MolehillAdmin" && !seen.Contains("Business and invoice details"), string.Join(" | ", seen));
+            Check("upgraded and ready", AdminInstaller.Inspect(a).State == DbState.Ready);
+            Check("data kept", Convert.ToInt32(adb.Scalar("SELECT COUNT(*) FROM dbo.Client WHERE ClientName = N'Kept Ltd'")) == 1);
+
+            // 3. an install that stopped part way is finished, not refused as a clash
+            adb.Execute("DROP PROCEDURE dbo.usp_Dashboard;");
+            var partial = AdminInstaller.Inspect(a);
+            Check("partial install offered to finish", partial.State == DbState.NotInstalled && partial.Message.Contains("partly"), partial.Message);
+            Step("finishing it", () => AdminInstaller.Install(a));
+            Check("finished and ready", AdminInstaller.Inspect(a).State == DbState.Ready);
+
+            // 4. an existing empty database, with a name that needs quoting
+            var b = Config(Db("empty [x]"));
+            created.Add(b.Connection.Database);
+            master.Execute("CREATE DATABASE [" + b.Connection.Database.Replace("]", "]]") + "];");
+            Check("empty database detected", AdminInstaller.Inspect(b).State == DbState.NotInstalled && AdminInstaller.Inspect(b).Message.Contains("empty"), AdminInstaller.Inspect(b).Message);
+            seen.Clear();
+            Step("start-up installs into it", () => Startup.Connect(b, path, existed: true, forceSetup: false, loadFailed: false),
+                r => r != null ? null : "gave up; saw: " + string.Join(" | ", seen));
+            Check("installed and ready", AdminInstaller.Inspect(b).State == DbState.Ready);
+
+            // 5. someone else's database with the same table names: left alone
+            var c = Config(Db("other"));
+            created.Add(c.Connection.Database);
+            master.Execute($"CREATE DATABASE [{c.Connection.Database}];");
+            new AdminDb(c.BuildConnectionString()).Execute("CREATE TABLE dbo.Client (Id int); CREATE TABLE dbo.Invoice (Id int);");
+            var clash = AdminInstaller.Inspect(c);
+            Check("clashing tables refused", clash.State == DbState.Clash && !clash.CanInstall && clash.Message.Contains("dbo.Client"), clash.Message);
+
+            // 6. a server that isn't there
+            var bad = Config(Db("x"));
+            bad.Connection.Server = "no-such-server-molehill-test"; bad.Connection.ConnectTimeoutSeconds = 3;
+            Check("unreachable server is an error, not an install offer", AdminInstaller.Inspect(bad).State == DbState.Error);
+        }
+        finally
+        {
+            Application.Shutdown();
+            SqlConnectionPools.Clear();
+            foreach (var db in created)
+            {
+                try { master.Execute($"IF DB_ID(@n) IS NOT NULL BEGIN DECLARE @q nvarchar(300) = QUOTENAME(@n); EXEC (N'ALTER DATABASE ' + @q + N' SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE ' + @q); END", ("@n", db)); }
+                catch (Exception ex) { Console.WriteLine($"(could not drop {db}: {ex.Message})"); }
+            }
+            try { Directory.Delete(folder, true); } catch { }
+        }
+        return Finish();
+    }
+
+    private static class SqlConnectionPools
+    {
+        public static void Clear() => Microsoft.Data.SqlClient.SqlConnection.ClearAllPools();
+    }
+
     private static IEnumerable<T> All<T>(View root) where T : View
     {
         foreach (var v in root.Subviews)

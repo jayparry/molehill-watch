@@ -39,6 +39,15 @@ public sealed class AdminDb
         return table;
     }
 
+    public int Execute(string sql, params (string Name, object? Value)[] parameters)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        foreach (var (name, value) in parameters) command.Parameters.AddWithValue(name, value ?? DBNull.Value);
+        return command.ExecuteNonQuery();
+    }
+
     public object? Scalar(string sql, params (string Name, object? Value)[] parameters)
     {
         using var connection = Open();

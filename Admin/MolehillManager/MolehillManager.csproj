@@ -21,6 +21,11 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- the app installs / upgrades MolehillAdmin itself when the configured database is missing or out of date -->
+    <EmbeddedResource Include="..\MolehillAdmin_Install.sql" LogicalName="MolehillAdmin_Install.sql" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.3" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.12" />
     <PackageReference Include="Terminal.Gui" Version="1.19.0" />
