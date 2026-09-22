@@ -28,6 +28,7 @@ public static class SelfTest
         catch (Exception ex)
         {
             Check(name, false, (ex is FormatException ? ex.Message : AdminDb.Describe(ex)).Replace("\n", " | "));
+            if (Environment.GetEnvironmentVariable("MM_TRACE") == "1") Console.WriteLine(ex);
             return default;
         }
     }
@@ -199,6 +200,14 @@ public static class SelfTest
             Check("output folder written and created", saved.OutputFolder == Path.Combine(folder, "out") && Directory.Exists(saved.OutputFolder), saved.OutputFolder);
             Check("saved config is complete", saved.Missing().Count == 0 && !saved.NeedsSecretPrompt, string.Join(", ", saved.Missing()));
             Check("the file connects", ConfigStore.Check(saved.BuildConnectionString()) == null);
+            // exactly what Program does next, after the start-up dialogs have run: build the main screen and run it
+            Step("main window builds after the start-up dialogs (as the app does)", () =>
+            {
+                var top = new MainWindow(new AdminDb(cs!), path, () => null, () => 0).CreateTop();
+                Check("main screen has the menu, tabs and status bar", top.Subviews.Count >= 3, top.Subviews.Count.ToString());
+                Application.Run(top);                          // the test's handler closes it again
+                return 0;
+            });
             Console.WriteLine();
             Console.WriteLine(File.ReadAllText(path));
         }
@@ -266,7 +275,7 @@ public static class SelfTest
             Check("business details saved", (adb.Scalar("SELECT Value FROM dbo.Setting WHERE Name = 'BusinessName'") as string) == "Selftest Services Ltd");
             Check("install recorded", Convert.ToInt32(adb.Scalar("SELECT COUNT(*) FROM dbo.InstallHistory")) >= 1);
             Check("standard price list seeded", Convert.ToInt32(adb.Scalar("SELECT COUNT(*) FROM dbo.PriceList")) >= 1);
-            Step("the app's screens work on it", () => { new MainWindow(adb).Build(new Toplevel()); return 0; });
+            Step("the app's screens work on it (after the install dialogs, as the app does)", () => { new MainWindow(adb, path, () => null, () => 0).CreateTop(); return 0; });
 
             // 2. an older MolehillAdmin (before the Azure SQL columns): upgrade keeps the data
             adb.Proc("dbo.usp_Client_Add", ("@ClientName", "Kept Ltd"));
@@ -359,7 +368,7 @@ public static class SelfTest
 
     private static void RunUi(AdminDb db)
     {
-        Step("main window builds and loads every tab", () => { new MainWindow(db).Build(Application.Top); return 0; });
+        Step("main window builds and loads every tab", () => { new MainWindow(db).CreateTop(); return 0; });
         Step("dashboard returns its 4 result sets", () => db.Proc("dbo.usp_Dashboard"), r => r.Tables.Count == 4 ? null : $"{r.Tables.Count} sets");
 
         var agreements = Queries.Agreements(db, includeEnded: true);
@@ -601,7 +610,7 @@ public static class SelfTest
         Application.Init(new FakeDriver(), null);
         try
         {
-            Step("main window over the test data", () => { new MainWindow(db).Build(Application.Top); return 0; });
+            Step("main window over the test data", () => { new MainWindow(db).CreateTop(); return 0; });
             Step("agreement window over the test data", () => new AgreementWindow(db, reference).Build());
         }
         finally

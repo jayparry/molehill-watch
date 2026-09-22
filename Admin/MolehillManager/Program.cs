@@ -157,8 +157,7 @@ try
         AdminForms.OutputFolder = config.OutputFolder;
         return new AdminDb(cs);
     }, () => config.AutoRefreshMinutes);
-    main.Build(Application.Top);
-    Application.Run();
+    Application.Run(main.CreateTop());
 }
 finally
 {

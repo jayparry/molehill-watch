@@ -29,6 +29,17 @@ public sealed class MainWindow
         _autoRefreshMinutes = autoRefreshMinutes;
     }
 
+    /// <summary>
+    /// A new full-screen top level with the main window on it, for Application.Run. Application.Top can't be used:
+    /// Terminal.Gui disposes it when a dialog (settings, password, install) runs before the main loop starts.
+    /// </summary>
+    public Toplevel CreateTop()
+    {
+        var top = Toplevel.Create();
+        Build(top);
+        return top;
+    }
+
     public void Build(Toplevel top)
     {
         var menu = new MenuBar(new[]
