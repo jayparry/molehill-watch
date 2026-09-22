@@ -1,7 +1,7 @@
 /*
 ===============================================================================
  Molehill Watch - SQL Server Support Package
- Molehill Admin: clients, engagements, tickets, time and billing  Version 2.2.0
+ Molehill Admin: clients, engagements, tickets, time and billing  Version 2.3.0
  Molehill Data Services  -  jay@jayparry.co.uk  -  molehilldataservices.com
 -------------------------------------------------------------------------------
  Runs on YOUR OWN SQL Server (Express is fine), not on client servers.
@@ -459,6 +459,22 @@ BEGIN
         CHECK (LineType IN ('MonthlyFee', 'BusinessHours', 'OutOfHours', 'Project', 'Adjustment', 'Info', 'PrepaidPurchase', 'PrepaidDrawn', 'Consultancy', 'FixedFee', 'Other'));
 END
 
+-- 2.3.0: how a pre-paid package is billed, and each engagement's own billing rhythm
+IF COL_LENGTH(N'dbo.PrepaidPackage', N'BillingMethod') IS NULL
+BEGIN
+    ALTER TABLE dbo.PrepaidPackage ADD BillingMethod varchar(20) NOT NULL
+        CONSTRAINT DF_PrepaidPackage_BillingMethod DEFAULT 'NextCycle'
+        CONSTRAINT CK_PrepaidPackage_BillingMethod CHECK (BillingMethod IN ('NextCycle', 'OwnInvoice', 'NotBilled'));
+    -- packages already on an invoice were billed on their own; the rest are waiting to go on a cycle invoice
+    EXEC (N'UPDATE dbo.PrepaidPackage SET BillingMethod = CASE WHEN InvoiceId IS NOT NULL THEN ''OwnInvoice''
+                                                               WHEN Status = ''Cancelled'' THEN ''NotBilled''
+                                                               ELSE ''NextCycle'' END;');
+END
+
+IF COL_LENGTH(N'dbo.Engagement', N'BillingEveryDays') IS NULL
+    ALTER TABLE dbo.Engagement ADD BillingEveryDays int NULL
+        CONSTRAINT CK_Engagement_BillingEveryDays CHECK (BillingEveryDays IS NULL OR BillingEveryDays BETWEEN 1 AND 365);
+
 /*---------------------------------------------------------------------------
   2.0.0: engagements. Databases from 1.x hang everything off the agreement;
   from here an agreement is one kind of engagement and invoices, time and
@@ -763,20 +779,29 @@ BEGIN
 END
 GO
 
-CREATE OR ALTER FUNCTION dbo.fn_ConsultancyPeriod (@StartDate date, @WorkDate date)
+-- how often this engagement is invoiced: its own setting, else the house default
+CREATE OR ALTER FUNCTION dbo.fn_EngagementBillingDays (@EngagementId int)
 RETURNS int
 AS
 BEGIN
-    RETURN CASE WHEN @WorkDate <= @StartDate THEN 0
-                ELSE DATEDIFF(day, @StartDate, @WorkDate) / dbo.fn_ConsultancyBillingDays() END;
+    RETURN ISNULL((SELECT BillingEveryDays FROM dbo.Engagement WHERE EngagementId = @EngagementId), dbo.fn_ConsultancyBillingDays());
 END
 GO
 
-CREATE OR ALTER FUNCTION dbo.fn_ConsultancyPeriodStart (@StartDate date, @Period int)
+CREATE OR ALTER FUNCTION dbo.fn_ConsultancyPeriod (@StartDate date, @WorkDate date, @Days int)
+RETURNS int
+AS
+BEGIN
+    SET @Days = ISNULL(NULLIF(@Days, 0), dbo.fn_ConsultancyBillingDays());
+    RETURN CASE WHEN @WorkDate <= @StartDate THEN 0 ELSE DATEDIFF(day, @StartDate, @WorkDate) / @Days END;
+END
+GO
+
+CREATE OR ALTER FUNCTION dbo.fn_ConsultancyPeriodStart (@StartDate date, @Period int, @Days int)
 RETURNS date
 AS
 BEGIN
-    RETURN DATEADD(day, @Period * dbo.fn_ConsultancyBillingDays(), @StartDate);
+    RETURN DATEADD(day, @Period * ISNULL(NULLIF(@Days, 0), dbo.fn_ConsultancyBillingDays()), @StartDate);
 END
 GO
 
@@ -1411,6 +1436,7 @@ CREATE OR ALTER PROCEDURE dbo.usp_Engagement_Add
     @EndDate        date          = NULL,
     @PurchaseOrder  nvarchar(100) = NULL,        -- the client's PO number, printed on invoices
     @DayRounding    varchar(10)   = NULL,        -- HalfDay (default) | WholeDay | Exact
+    @BillingEveryDays int         = NULL,        -- how often it is invoiced; blank = the house default (14)
     @Notes          nvarchar(max) = NULL,
     @EngagementRef  varchar(30)   = NULL         -- default CON-0001 style
 AS
@@ -1428,6 +1454,8 @@ BEGIN
     IF @BillingMode = 'FixedPrice' AND ISNULL(@FixedPrice, 0) <= 0 BEGIN RAISERROR(N'A fixed-price engagement needs @FixedPrice.', 16, 1); RETURN; END
     IF @DayRounding IS NOT NULL AND @DayRounding NOT IN ('HalfDay', 'WholeDay', 'Exact')
     BEGIN RAISERROR(N'@DayRounding must be HalfDay, WholeDay or Exact.', 16, 1); RETURN; END
+    IF @BillingEveryDays IS NOT NULL AND @BillingEveryDays NOT BETWEEN 1 AND 365
+    BEGIN RAISERROR(N'@BillingEveryDays must be between 1 and 365 (7 = weekly, 14 = fortnightly, 28 = four-weekly).', 16, 1); RETURN; END
 
     DECLARE @Prefix varchar(10) = ISNULL(NULLIF(dbo.fn_Setting('ConsultancyRefPrefix'), N''), 'CON');
     IF @EngagementRef IS NULL
@@ -1439,12 +1467,13 @@ BEGIN
     BEGIN RAISERROR(N'Engagement %s already exists.', 16, 1, @EngagementRef); RETURN; END
 
     INSERT dbo.Engagement (EngagementRef, ClientId, EngagementType, Name, BillingMode, DayRate, HourlyRate, OutOfHoursRate,
-                           FixedPrice, DayRounding, PurchaseOrder, Status, StartDate, EndDate, Notes)
+                           FixedPrice, DayRounding, BillingEveryDays, PurchaseOrder, Status, StartDate, EndDate, Notes)
     VALUES (@EngagementRef, @ClientId, 'Consultancy', @Name, @BillingMode, @DayRate, @HourlyRate, @OutOfHoursRate,
-            @FixedPrice, @DayRounding, @PurchaseOrder, 'Active', ISNULL(@StartDate, CAST(dbo.fn_UkNow() AS date)), @EndDate, @Notes);
+            @FixedPrice, @DayRounding, @BillingEveryDays, @PurchaseOrder, 'Active', ISNULL(@StartDate, CAST(dbo.fn_UkNow() AS date)), @EndDate, @Notes);
 
     PRINT N'Engagement ' + @EngagementRef + N' created. Log work with usp_Work_Log, then usp_Billing_Run invoices it '
-        + CASE WHEN @BillingMode = 'FixedPrice' THEN N'when you mark it complete (usp_Engagement_Complete).' ELSE N'at the end of each month.' END;
+        + CASE WHEN @BillingMode = 'FixedPrice' THEN N'when you mark it complete (usp_Engagement_Complete).'
+               ELSE N'every ' + CONVERT(nvarchar(10), ISNULL(@BillingEveryDays, dbo.fn_ConsultancyBillingDays())) + N' days from the start date.' END;
 
     SELECT e.EngagementRef, c.ClientName, e.Name, e.BillingMode,
            Rate = CASE e.BillingMode WHEN 'DayRate' THEN NCHAR(163) + FORMAT(e.DayRate, 'N2') + N'/day'
@@ -1466,6 +1495,7 @@ CREATE OR ALTER PROCEDURE dbo.usp_Engagement_Update       -- NULL = leave as it 
     @EndDate        date          = NULL,
     @PurchaseOrder  nvarchar(100) = NULL,
     @DayRounding    varchar(10)   = NULL,
+    @BillingEveryDays int         = NULL,
     @Notes          nvarchar(max) = NULL,
     @Status         varchar(15)   = NULL         -- Active | OnHold
 AS
@@ -1479,6 +1509,8 @@ BEGIN
     BEGIN RAISERROR(N'@Status must be Active or OnHold (use usp_Engagement_Complete or usp_Engagement_Cancel to finish it).', 16, 1); RETURN; END
     IF @DayRounding IS NOT NULL AND @DayRounding NOT IN ('HalfDay', 'WholeDay', 'Exact')
     BEGIN RAISERROR(N'@DayRounding must be HalfDay, WholeDay or Exact.', 16, 1); RETURN; END
+    IF @BillingEveryDays IS NOT NULL AND @BillingEveryDays NOT BETWEEN 1 AND 365
+    BEGIN RAISERROR(N'@BillingEveryDays must be between 1 and 365.', 16, 1); RETURN; END
 
     UPDATE dbo.Engagement
     SET Name = ISNULL(NULLIF(LTRIM(RTRIM(@Name)), N''), Name),
@@ -1486,6 +1518,7 @@ BEGIN
         OutOfHoursRate = ISNULL(@OutOfHoursRate, OutOfHoursRate), FixedPrice = ISNULL(@FixedPrice, FixedPrice),
         StartDate = ISNULL(@StartDate, StartDate), EndDate = ISNULL(@EndDate, EndDate),
         PurchaseOrder = ISNULL(@PurchaseOrder, PurchaseOrder), DayRounding = ISNULL(@DayRounding, DayRounding),
+        BillingEveryDays = ISNULL(@BillingEveryDays, BillingEveryDays),
         Notes = ISNULL(@Notes, Notes), Status = ISNULL(@Status, Status)
     WHERE EngagementId = @Id;
 
@@ -1550,12 +1583,14 @@ BEGIN
            OutOfHours = CASE WHEN e.OutOfHoursRate IS NULL THEN N'at the day rate' ELSE NCHAR(163) + FORMAT(e.OutOfHoursRate, 'N2') + N'/hour' END,
            e.Status, e.StartDate, e.EndDate, e.CompletedOn, e.PurchaseOrder,
            DayRounding = ISNULL(e.DayRounding, dbo.fn_Setting('DayRateRounding')),
-           BillingPeriod = CASE WHEN e.BillingMode = 'FixedPrice' THEN N'on completion'
-                                ELSE N'every ' + CONVERT(nvarchar(10), dbo.fn_ConsultancyBillingDays()) + N' days from '
+           BillingPeriod = CASE WHEN e.BillingMode = 'AgreementCycle' THEN N'with the monthly Molehill Watch cycle'
+                                WHEN e.BillingMode = 'FixedPrice' THEN N'on completion'
+                                ELSE N'every ' + CONVERT(nvarchar(10), dbo.fn_EngagementBillingDays(e.EngagementId)) + N' days from '
                                      + CONVERT(nvarchar(11), e.StartDate, 106) END,
-           NextInvoiceOn = CASE WHEN e.BillingMode <> 'FixedPrice' AND e.Status IN ('Active', 'OnHold')
+           NextInvoiceOn = CASE WHEN e.BillingMode NOT IN ('FixedPrice', 'AgreementCycle') AND e.Status IN ('Active', 'OnHold')
                                 THEN DATEADD(day, -1, dbo.fn_ConsultancyPeriodStart(e.StartDate,
-                                     dbo.fn_ConsultancyPeriod(e.StartDate, CAST(dbo.fn_UkNow() AS date)) + 1)) END,
+                                     dbo.fn_ConsultancyPeriod(e.StartDate, CAST(dbo.fn_UkNow() AS date), dbo.fn_EngagementBillingDays(e.EngagementId)) + 1,
+                                     dbo.fn_EngagementBillingDays(e.EngagementId))) END,
            e.Notes
     FROM dbo.Engagement e JOIN dbo.Client c ON c.ClientId = e.ClientId WHERE e.EngagementId = @Id;
 
@@ -1592,6 +1627,9 @@ BEGIN
                                      WHEN 'Hourly'  THEN NCHAR(163) + FORMAT(e.HourlyRate, 'N0') + N'/hour'
                                      WHEN 'FixedPrice' THEN NCHAR(163) + FORMAT(e.FixedPrice, 'N0') + N' fixed'
                                      ELSE N'agreement' END,
+           Invoiced_Every = CASE WHEN e.EngagementType = 'Monitoring' THEN N'monthly cycle'
+                                 WHEN e.BillingMode = 'FixedPrice' THEN N'on completion'
+                                 ELSE CONVERT(nvarchar(10), dbo.fn_EngagementBillingDays(e.EngagementId)) + N' days' END,
            UnbilledDays  = ISNULL(u.Days, 0),
            UnbilledValue = ISNULL(u.Value, 0),
            LastWorked    = u.LastWorked,
@@ -2062,9 +2100,10 @@ BEGIN
     IF @Status = 'Completed' PRINT N'Note: this engagement is marked complete. The next billing run will invoice this time too.';
     IF @Status <> 'Completed' AND @Mode IN ('DayRate', 'Hourly')
     BEGIN
-        DECLARE @PerEnd date = DATEADD(day, -1, dbo.fn_ConsultancyPeriodStart(@Start, dbo.fn_ConsultancyPeriod(@Start, @WorkDate) + 1));
+        DECLARE @LogDays int = dbo.fn_EngagementBillingDays(@Id);
+        DECLARE @PerEnd date = DATEADD(day, -1, dbo.fn_ConsultancyPeriodStart(@Start, dbo.fn_ConsultancyPeriod(@Start, @WorkDate, @LogDays) + 1, @LogDays));
         PRINT N'Invoiced after ' + CONVERT(nvarchar(11), @PerEnd, 106) + N' (every '
-            + CONVERT(nvarchar(10), dbo.fn_ConsultancyBillingDays()) + N' days from ' + CONVERT(nvarchar(11), @Start, 106) + N').';
+            + CONVERT(nvarchar(10), @LogDays) + N' days from ' + CONVERT(nvarchar(11), @Start, 106) + N').';
     END
     IF @WorkDate < @Start PRINT N'Note: that date is before the engagement started (' + CONVERT(nvarchar(11), @Start, 106) + N').';
     IF @End IS NOT NULL AND @WorkDate > @End PRINT N'Note: that date is after the engagement''s end date (' + CONVERT(nvarchar(11), @End, 106) + N').';
@@ -2092,7 +2131,7 @@ RETURNS TABLE
 AS
 RETURN
     SELECT p.PackageId, p.PackageRef, p.AgreementId, p.PurchasedOn, p.Hours, p.HourlyRate, p.Price, p.StartsOn, p.ExpiresOn,
-           p.InvoiceId, p.Status, p.Notes,
+           p.InvoiceId, p.Status, p.Notes, p.BillingMethod,
            Used      = CAST(ISNULL(u.Used, 0) AS decimal(9,2)),
            Remaining = CAST(p.Hours - ISNULL(u.Used, 0) AS decimal(9,2)),
            LastUsed  = u.LastUsed,
@@ -2165,6 +2204,19 @@ GO
   minimum charge applied) is taken from it before anything is billed at the
   standard rates. Soonest-expiring package first.
 -----------------------------------------------------------------------------*/
+-- how a package reads on an invoice
+CREATE OR ALTER FUNCTION dbo.fn_PrepaidLine (@PackageId int)
+RETURNS nvarchar(500)
+AS
+BEGIN
+    RETURN (SELECT N'Pre-paid support hours (' + PackageRef + N'): ' + FORMAT(Hours, 'N2') + N' h at GBP ' + FORMAT(HourlyRate, 'N2') + N'/h, usable '
+                 + CASE WHEN ExpiresOn IS NULL THEN N'from ' + CONVERT(nvarchar(11), StartsOn, 106) + N' (no expiry)'
+                        ELSE CONVERT(nvarchar(11), StartsOn, 106) + N' - ' + CONVERT(nvarchar(11), ExpiresOn, 106) END
+                 + N', for business-hours support'
+            FROM dbo.PrepaidPackage WHERE PackageId = @PackageId);
+END
+GO
+
 CREATE OR ALTER PROCEDURE dbo.usp_Prepaid_Add
     @Client          nvarchar(200),              -- agreement ref or client name
     @Hours           decimal(7,2),
@@ -2174,7 +2226,8 @@ CREATE OR ALTER PROCEDURE dbo.usp_Prepaid_Add
     @ExpiresOn       date          = NULL,       -- last day the hours can be used (or use @ValidMonths); NULL = no expiry
     @ValidMonths     int           = NULL,
     @Notes           nvarchar(1000) = NULL,
-    @Invoice         bit           = 1           -- 1 = draft invoice for the package now
+    @BillWith        varchar(20)   = NULL,       -- NextCycle (default) | OwnInvoice | NotBilled
+    @Invoice         bit           = NULL        -- older scripts: 1 = OwnInvoice, 0 = NotBilled
 AS
 BEGIN
     SET NOCOUNT, XACT_ABORT ON;
@@ -2190,22 +2243,21 @@ BEGIN
     DECLARE @End date = (SELECT EndDate FROM dbo.Agreement WHERE AgreementId = @AgreementId);
     IF @End < @StartsOn BEGIN RAISERROR(N'The agreement ends before these hours could be used.', 16, 1); RETURN; END
 
+    SET @BillWith = ISNULL(@BillWith, CASE @Invoice WHEN 1 THEN 'OwnInvoice' WHEN 0 THEN 'NotBilled' ELSE 'NextCycle' END);
+    IF @BillWith NOT IN ('NextCycle', 'OwnInvoice', 'NotBilled')
+    BEGIN RAISERROR(N'@BillWith must be NextCycle (on the next Molehill Watch invoice), OwnInvoice (its own draft now) or NotBilled (already paid for).', 16, 1); RETURN; END
+
     DECLARE @PackageId int, @InvoiceId int;
     BEGIN TRAN;
-    INSERT dbo.PrepaidPackage (AgreementId, PurchasedOn, Hours, HourlyRate, StartsOn, ExpiresOn, Notes)
-    VALUES (@AgreementId, @PurchasedOn, @Hours, @HourlyRate, @StartsOn, @ExpiresOn, NULLIF(LTRIM(RTRIM(@Notes)), N''));
+    INSERT dbo.PrepaidPackage (AgreementId, PurchasedOn, Hours, HourlyRate, StartsOn, ExpiresOn, Notes, BillingMethod)
+    VALUES (@AgreementId, @PurchasedOn, @Hours, @HourlyRate, @StartsOn, @ExpiresOn, NULLIF(LTRIM(RTRIM(@Notes)), N''), @BillWith);
     SET @PackageId = SCOPE_IDENTITY();
-    IF @Invoice = 1
+    IF @BillWith = 'OwnInvoice'
     BEGIN
         DECLARE @PkgEngagementId int = (SELECT EngagementId FROM dbo.Agreement WHERE AgreementId = @AgreementId);
         EXEC dbo.usp_Invoice_New @EngagementId = @PkgEngagementId, @InvoiceDate = @PurchasedOn, @InvoiceId = @InvoiceId OUTPUT;
         INSERT dbo.InvoiceLine (InvoiceId, LineType, Description, Quantity, UnitPrice, Amount)
-        SELECT @InvoiceId, 'PrepaidPurchase',
-               N'Pre-paid support hours (' + PackageRef + N'): ' + FORMAT(Hours, 'N2') + N' h, usable '
-               + CASE WHEN ExpiresOn IS NULL THEN N'from ' + CONVERT(nvarchar(11), StartsOn, 106) + N' (no expiry)'
-                      ELSE CONVERT(nvarchar(11), StartsOn, 106) + N' - ' + CONVERT(nvarchar(11), ExpiresOn, 106) END
-               + N', for business-hours support',
-               Hours, HourlyRate, Price
+        SELECT @InvoiceId, 'PrepaidPurchase', dbo.fn_PrepaidLine(@PackageId), Hours, HourlyRate, Price
         FROM dbo.PrepaidPackage WHERE PackageId = @PackageId;
         EXEC dbo.usp_Invoice_Recalculate @InvoiceId = @InvoiceId;
         UPDATE dbo.PrepaidPackage SET InvoiceId = @InvoiceId WHERE PackageId = @PackageId;
@@ -2219,10 +2271,21 @@ BEGIN
                WHEN @Std IS NOT NULL THEN N'. Note: not below the standard business-hours rate of GBP ' + FORMAT(@Std, 'N2') + N'/h.' ELSE N'.' END;
     IF @InvoiceId IS NOT NULL EXEC dbo.usp_Invoice_Renumber @Year = NULL, @Quiet = 1;   -- keep the numbering in date order
     DECLARE @InvNo varchar(30) = (SELECT InvoiceNo FROM dbo.Invoice WHERE InvoiceId = @InvoiceId);
-    IF @Invoice = 1 PRINT N'Draft invoice ' + @InvNo + N' created for the package.';
-    ELSE PRINT N'No invoice created (@Invoice = 0): bill it yourself, e.g. with usp_Invoice_Adjust.';
+    IF @BillWith = 'OwnInvoice' PRINT N'Draft invoice ' + @InvNo + N' created for the package.';
+    ELSE IF @BillWith = 'NotBilled' PRINT N'Not being invoiced (already paid for). Change that with usp_Prepaid_Update @BillWith = ''NextCycle''.';
+    ELSE
+    BEGIN
+        DECLARE @NextCycle date = dbo.fn_CycleStart((SELECT StartDate FROM dbo.Agreement WHERE AgreementId = @AgreementId),
+                                  dbo.fn_CycleNumberForDate((SELECT StartDate FROM dbo.Agreement WHERE AgreementId = @AgreementId), @PurchasedOn) + 1);
+        PRINT N'It goes on the next Molehill Watch invoice for this agreement (the cycle starting '
+            + CONVERT(nvarchar(11), @NextCycle, 106) + N'), as a ' + FORMAT(@Hours * @HourlyRate, 'C', 'en-GB') + N' line. Run billing to raise it.';
+    END
 
-    SELECT p.PackageRef, p.Hours, p.HourlyRate, p.Price, p.StartsOn, p.ExpiresOn, InvoiceNo = i.InvoiceNo
+    SELECT p.PackageRef, p.Hours, p.HourlyRate, p.Price, p.StartsOn, p.ExpiresOn,
+           Billing = CASE p.BillingMethod WHEN 'NextCycle' THEN N'on the next Molehill Watch invoice'
+                                          WHEN 'OwnInvoice' THEN N'on its own invoice'
+                                          ELSE N'not invoiced (already paid for)' END,
+           InvoiceNo = i.InvoiceNo
     FROM dbo.PrepaidPackage p LEFT JOIN dbo.Invoice i ON i.InvoiceId = p.InvoiceId WHERE p.PackageId = @PackageId;
 END
 GO
@@ -2232,20 +2295,36 @@ CREATE OR ALTER PROCEDURE dbo.usp_Prepaid_Update
     @PackageRef        varchar(10),
     @ExpiresOn         date         = NULL,
     @NoExpiry          bit          = 0,       -- 1 = remove the expiry date
-    @Notes             nvarchar(1000) = NULL
+    @Notes             nvarchar(1000) = NULL,
+    @BillWith          varchar(20)  = NULL     -- NextCycle | OwnInvoice | NotBilled (only while it has no invoice)
 AS
 BEGIN
     SET NOCOUNT ON;
-    DECLARE @PackageId int, @StartsOn date, @Status varchar(10);
-    SELECT @PackageId = PackageId, @StartsOn = StartsOn, @Status = Status FROM dbo.PrepaidPackage WHERE PackageRef = @PackageRef;
+    DECLARE @PackageId int, @StartsOn date, @Status varchar(10), @InvoiceId int, @Method varchar(20);
+    SELECT @PackageId = PackageId, @StartsOn = StartsOn, @Status = Status, @InvoiceId = InvoiceId, @Method = BillingMethod
+    FROM dbo.PrepaidPackage WHERE PackageRef = @PackageRef;
     IF @PackageId IS NULL BEGIN RAISERROR(N'Pre-paid package %s not found.', 16, 1, @PackageRef); RETURN; END
     IF @Status = 'Cancelled' BEGIN RAISERROR(N'%s is cancelled.', 16, 1, @PackageRef); RETURN; END
     IF @ExpiresOn < @StartsOn BEGIN RAISERROR(N'The expiry date is before the hours can be used.', 16, 1); RETURN; END
+    IF @BillWith IS NOT NULL AND @BillWith NOT IN ('NextCycle', 'OwnInvoice', 'NotBilled')
+    BEGIN RAISERROR(N'@BillWith must be NextCycle, OwnInvoice or NotBilled.', 16, 1); RETURN; END
+    -- only an actual change is a problem once it has been invoiced
+    IF @BillWith = @Method SET @BillWith = NULL;
+    IF @BillWith IS NOT NULL AND @InvoiceId IS NOT NULL
+    BEGIN
+        DECLARE @OnNo varchar(30) = (SELECT InvoiceNo FROM dbo.Invoice WHERE InvoiceId = @InvoiceId);
+        RAISERROR(N'%s is already on invoice %s. Void that invoice first if it should be billed differently.', 16, 1, @PackageRef, @OnNo);
+        RETURN;
+    END
+
     UPDATE dbo.PrepaidPackage
     SET ExpiresOn = CASE WHEN @NoExpiry = 1 THEN NULL ELSE ISNULL(@ExpiresOn, ExpiresOn) END,
-        Notes = ISNULL(NULLIF(LTRIM(RTRIM(@Notes)), N''), Notes)
+        Notes = ISNULL(NULLIF(LTRIM(RTRIM(@Notes)), N''), Notes),
+        BillingMethod = ISNULL(@BillWith, BillingMethod)
     WHERE PackageId = @PackageId;
     PRINT N'Updated ' + @PackageRef + N'. Changes apply to support billed from now on; hours already taken are unchanged.';
+    IF @BillWith = 'NextCycle' PRINT N'It will go on the next Molehill Watch invoice for this agreement. Run billing to raise it.';
+    IF @BillWith = 'OwnInvoice' PRINT N'Raise its invoice now with usp_Prepaid_Invoice @Package = ''' + @PackageRef + N'''.';
     SELECT PackageRef, Hours, Used, Remaining, StartsOn, ExpiresOn, State
     FROM dbo.fn_PrepaidPackages((SELECT AgreementId FROM dbo.PrepaidPackage WHERE PackageId = @PackageId), CAST(dbo.fn_UkNow() AS date))
     WHERE PackageId = @PackageId;
@@ -2253,6 +2332,46 @@ END
 GO
 
 -- Cancel a package that hasn't been used. Its invoice is voided if not yet paid.
+/*-----------------------------------------------------------------------------
+  Invoice a package that has not been billed yet, on an invoice of its own -
+  for when it should not wait for the next Molehill Watch cycle.
+-----------------------------------------------------------------------------*/
+CREATE OR ALTER PROCEDURE dbo.usp_Prepaid_Invoice
+    @Package     varchar(10),
+    @InvoiceDate date = NULL       -- default: the day it was bought
+AS
+BEGIN
+    SET NOCOUNT, XACT_ABORT ON;
+    DECLARE @PackageId int, @AgreementId int, @Status varchar(10), @InvoiceId int, @PurchasedOn date;
+    SELECT @PackageId = PackageId, @AgreementId = AgreementId, @Status = Status, @InvoiceId = InvoiceId, @PurchasedOn = PurchasedOn
+    FROM dbo.PrepaidPackage WHERE PackageRef = @Package;
+    IF @PackageId IS NULL BEGIN RAISERROR(N'Pre-paid package %s not found.', 16, 1, @Package); RETURN; END
+    IF @Status = 'Cancelled' BEGIN RAISERROR(N'%s is cancelled.', 16, 1, @Package); RETURN; END
+    IF @InvoiceId IS NOT NULL
+    BEGIN
+        DECLARE @Already varchar(30) = (SELECT InvoiceNo FROM dbo.Invoice WHERE InvoiceId = @InvoiceId);
+        RAISERROR(N'%s is already on invoice %s.', 16, 1, @Package, @Already);
+        RETURN;
+    END
+
+    SET @InvoiceDate = ISNULL(@InvoiceDate, @PurchasedOn);
+    DECLARE @EngagementId int = (SELECT EngagementId FROM dbo.Agreement WHERE AgreementId = @AgreementId);
+    BEGIN TRAN;
+    EXEC dbo.usp_Invoice_New @EngagementId = @EngagementId, @InvoiceDate = @InvoiceDate, @InvoiceId = @InvoiceId OUTPUT;
+    INSERT dbo.InvoiceLine (InvoiceId, LineType, Description, Quantity, UnitPrice, Amount)
+    SELECT @InvoiceId, 'PrepaidPurchase', dbo.fn_PrepaidLine(@PackageId), Hours, HourlyRate, Price
+    FROM dbo.PrepaidPackage WHERE PackageId = @PackageId;
+    EXEC dbo.usp_Invoice_Recalculate @InvoiceId = @InvoiceId;
+    UPDATE dbo.PrepaidPackage SET InvoiceId = @InvoiceId, BillingMethod = 'OwnInvoice' WHERE PackageId = @PackageId;
+    COMMIT;
+
+    EXEC dbo.usp_Invoice_Renumber @Year = NULL, @Quiet = 1;
+    DECLARE @No varchar(30) = (SELECT InvoiceNo FROM dbo.Invoice WHERE InvoiceId = @InvoiceId);
+    PRINT N'Draft invoice ' + @No + N' raised for ' + @Package + N'.';
+    SELECT InvoiceNo, InvoiceDate, DueDate, Total, Status FROM dbo.Invoice WHERE InvoiceId = @InvoiceId;
+END
+GO
+
 CREATE OR ALTER PROCEDURE dbo.usp_Prepaid_Cancel
     @PackageRef varchar(10),
     @Reason     nvarchar(400) = NULL
@@ -2287,7 +2406,12 @@ BEGIN
     IF @AgreementId IS NULL BEGIN RAISERROR(N'Agreement or client "%s" not found.', 16, 1, @Client); RETURN; END
     DECLARE @Today date = CAST(dbo.fn_UkNow() AS date);
     SELECT p.PackageRef, p.PurchasedOn, p.Hours, p.HourlyRate, p.Price, p.Used, p.Remaining, p.StartsOn, p.ExpiresOn,
-           p.State, Invoice = i.InvoiceNo, InvoiceStatus = i.Status, p.Notes
+           p.State,
+           Billing = CASE WHEN i.InvoiceNo IS NOT NULL THEN N'invoiced'
+                          WHEN p.BillingMethod = 'NextCycle' THEN N'waiting for the next Molehill Watch invoice'
+                          WHEN p.BillingMethod = 'OwnInvoice' THEN N'to be invoiced on its own'
+                          ELSE N'not invoiced (already paid for)' END,
+           Invoice = i.InvoiceNo, InvoiceStatus = i.Status, p.Notes
     FROM dbo.fn_PrepaidPackages(@AgreementId, @Today) p LEFT JOIN dbo.Invoice i ON i.InvoiceId = p.InvoiceId
     ORDER BY p.PurchasedOn, p.PackageId;
 
@@ -2543,6 +2667,18 @@ BEGIN
         FROM dbo.fn_AgreementFees(@AgreementId, @cs) f
         ORDER BY f.MonthlyFee DESC, f.InstanceName;
 
+        -- pre-paid hours bought since the last invoice go on this one
+        INSERT dbo.InvoiceLine (InvoiceId, LineType, Description, Quantity, UnitPrice, Amount)
+        SELECT @InvoiceId, 'PrepaidPurchase', dbo.fn_PrepaidLine(p.PackageId), p.Hours, p.HourlyRate, p.Price
+        FROM dbo.PrepaidPackage p
+        WHERE p.AgreementId = @AgreementId AND p.InvoiceId IS NULL AND p.Status = 'Active'
+          AND p.BillingMethod = 'NextCycle' AND p.PurchasedOn <= @cs
+        ORDER BY p.PackageId;
+
+        UPDATE dbo.PrepaidPackage SET InvoiceId = @InvoiceId
+        WHERE AgreementId = @AgreementId AND InvoiceId IS NULL AND Status = 'Active'
+          AND BillingMethod = 'NextCycle' AND PurchasedOn <= @cs;
+
         DECLARE prev CURSOR LOCAL FAST_FORWARD FOR
             SELECT BillingCycleId FROM dbo.BillingCycle bc
             WHERE bc.AgreementId = @AgreementId AND bc.CycleNumber < @CycleNo
@@ -2631,15 +2767,16 @@ BEGIN
     BEGIN
         IF @Mode IN ('DayRate', 'Hourly') AND @EStart IS NOT NULL
         BEGIN
+            DECLARE @EDays int = dbo.fn_EngagementBillingDays(@Eid);
             DECLARE per CURSOR LOCAL FAST_FORWARD FOR
-                SELECT DISTINCT dbo.fn_ConsultancyPeriod(@EStart, CAST(te.WorkStart AS date)) FROM dbo.TimeEntry te
+                SELECT DISTINCT dbo.fn_ConsultancyPeriod(@EStart, CAST(te.WorkStart AS date), @EDays) FROM dbo.TimeEntry te
                 WHERE te.EngagementId = @Eid AND te.IsBillable = 1 AND te.InvoiceId IS NULL ORDER BY 1;
             OPEN per;
             FETCH NEXT FROM per INTO @Period;
             WHILE @@FETCH_STATUS = 0
             BEGIN
-                SET @PStart = dbo.fn_ConsultancyPeriodStart(@EStart, @Period);
-                SET @PEnd = DATEADD(day, -1, dbo.fn_ConsultancyPeriodStart(@EStart, @Period + 1));
+                SET @PStart = dbo.fn_ConsultancyPeriodStart(@EStart, @Period, @EDays);
+                SET @PEnd = DATEADD(day, -1, dbo.fn_ConsultancyPeriodStart(@EStart, @Period + 1, @EDays));
                 IF @PEnd <= @AsOfDate OR @EStatus = 'Completed'
                 BEGIN
                     SET @IDate = CASE WHEN @PEnd <= @AsOfDate THEN @PEnd ELSE ISNULL(@EComp, @AsOfDate) END;
@@ -2652,7 +2789,7 @@ BEGIN
                            + CASE WHEN w.RateType = 'OutOfHours' THEN N' (out of hours)' ELSE N'' END,
                            w.Quantity, w.UnitPrice, CAST(w.Quantity * w.UnitPrice AS decimal(10,2))
                     FROM dbo.fn_ConsultancyWork(@Eid, 1) w
-                    WHERE dbo.fn_ConsultancyPeriod(@EStart, w.WorkDate) = @Period
+                    WHERE dbo.fn_ConsultancyPeriod(@EStart, w.WorkDate, @EDays) = @Period
                     ORDER BY w.WorkDate, w.RateType;
 
                     INSERT dbo.InvoiceLine (InvoiceId, LineType, EngagementId, Description, Quantity, UnitPrice, Amount)
@@ -2661,7 +2798,7 @@ BEGIN
 
                     UPDATE dbo.TimeEntry SET InvoiceId = @InvoiceId
                     WHERE EngagementId = @Eid AND IsBillable = 1 AND InvoiceId IS NULL
-                      AND dbo.fn_ConsultancyPeriod(@EStart, CAST(WorkStart AS date)) = @Period;
+                      AND dbo.fn_ConsultancyPeriod(@EStart, CAST(WorkStart AS date), @EDays) = @Period;
 
                     EXEC dbo.usp_Invoice_Recalculate @InvoiceId = @InvoiceId;
                     COMMIT;
@@ -3108,12 +3245,25 @@ BEGIN
     FROM dbo.vw_Invoice i JOIN dbo.Client c ON c.ClientId = i.ClientId
     WHERE i.Status = 'Sent' AND i.DueDate < @Today;
 
+    -- Pre-paid hours sold but still not on an invoice after a cycle has gone by
+    INSERT #A
+    SELECT 2, 'Billing', c.ClientName, N'Pre-paid hours not invoiced: ' + p.PackageRef,
+           NCHAR(163) + FORMAT(p.Price, 'N2') + N' bought ' + CONVERT(nvarchar(11), p.PurchasedOn, 106)
+           + N' and still not on an invoice. The next billing run puts it on the cycle invoice; if it should not be billed at all, '
+           + N'set it with usp_Prepaid_Update @BillWith = ''NotBilled''.', NULL
+    FROM dbo.PrepaidPackage p
+    JOIN dbo.Agreement a ON a.AgreementId = p.AgreementId
+    JOIN dbo.Client c ON c.ClientId = a.ClientId
+    WHERE p.InvoiceId IS NULL AND p.Status = 'Active' AND p.BillingMethod <> 'NotBilled'
+      AND p.PurchasedOn < DATEADD(day, -35, @Today);
+
     -- Consultancy: work waiting to be invoiced, and jobs that look finished
     INSERT #A
     SELECT 3, 'Consultancy', c.ClientName, N'Unbilled work: ' + e.EngagementRef + N' ' + e.Name,
            FORMAT(u.Days, 'N2') + N' days (' + NCHAR(163) + FORMAT(u.Value, 'N2') + N') logged up to ' + CONVERT(nvarchar(11), u.LastWorked, 106)
            + N'. The billing run invoices it after ' + CONVERT(nvarchar(11), DATEADD(day, -1,
-               dbo.fn_ConsultancyPeriodStart(e.StartDate, dbo.fn_ConsultancyPeriod(e.StartDate, @Today) + 1)), 106) + N'.', NULL
+               dbo.fn_ConsultancyPeriodStart(e.StartDate, dbo.fn_ConsultancyPeriod(e.StartDate, @Today, dbo.fn_EngagementBillingDays(e.EngagementId)) + 1,
+               dbo.fn_EngagementBillingDays(e.EngagementId))), 106) + N'.', NULL
     FROM dbo.Engagement e JOIN dbo.Client c ON c.ClientId = e.ClientId
     CROSS APPLY (SELECT Days = SUM(w.Days), Value = SUM(w.Quantity * w.UnitPrice), LastWorked = MAX(w.WorkDate)
                  FROM dbo.fn_ConsultancyWork(e.EngagementId, 1) w) u
@@ -3351,6 +3501,6 @@ BEGIN
 END
 GO
 
-INSERT dbo.InstallHistory (Version) VALUES ('2.2.0');   -- bump with every schema change: Molehill Manager offers the upgrade
-PRINT N'Molehill Admin 2.2.0 installed.';
+INSERT dbo.InstallHistory (Version) VALUES ('2.3.0');   -- bump with every schema change: Molehill Manager offers the upgrade
+PRINT N'Molehill Admin 2.3.0 installed.';
 GO

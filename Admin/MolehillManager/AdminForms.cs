@@ -190,6 +190,16 @@ public static class AdminForms
 
     // ------------------------------------------------------------------ pre-paid hours
 
+    // where the price of a package of hours goes
+    public static readonly (string Label, string Value)[] PrepaidBilling =
+    {
+        ("On the next Molehill Watch invoice", "NextCycle"),
+        ("On an invoice of its own, now", "OwnInvoice"),
+        ("Not at all - already paid for", "NotBilled")
+    };
+    public static string PrepaidBillingLabel(string? value) =>
+        PrepaidBilling.FirstOrDefault(b => b.Value == value).Label ?? value ?? "";
+
     /// <summary>Sell a package of support hours in advance at a negotiated rate.</summary>
     public static FormSpec SellPrepaid(AdminDb db, string agreementRef)
     {
@@ -204,22 +214,23 @@ public static class AdminForms
             Title = $"Sell pre-paid hours - {agreementRef}",
             Intro = "Business-hours support bought in advance at a reduced rate. Each month's included hours are used first; after that, " +
                     "chargeable business-hours time comes out of these hours (soonest-expiring package first). Out-of-hours work is never " +
-                    "taken from them: it is always billed at the out-of-hours rate.",
+                    "taken from them: it is always billed at the out-of-hours rate. " +
+                    "The price (hours x rate) goes on the client's next monthly Molehill Watch invoice unless you say otherwise below.",
             Fields =
             {
                 Field.Decimal("Hours", "Hours", required: true),
                 Field.Decimal("HourlyRate", "Rate per hour (£)", required: true, help: rateHelp),
                 Field.Int("ValidMonths", "Use within (months)", help: "blank = no expiry"),
                 Field.Date("ExpiresOn", "Or use by", help: "instead of months"),
-                Field.Date("PurchasedOn", "Bought on", help: "blank = today; also the invoice date"),
+                Field.Date("PurchasedOn", "Bought on", help: "blank = today"),
                 Field.Date("StartsOn", "Usable from", help: "blank = the day bought"),
-                Field.Bool("Invoice", "Invoice it now", def: true, help: "a draft invoice for hours x rate"),
+                Field.Choice("BillWith", "Charge it", PrepaidBilling.Select(b => b.Label).ToArray()),
                 Field.Text("Notes", "Notes")
             },
             Submit = v => db.Proc("dbo.usp_Prepaid_Add", ("@Client", agreementRef), ("@Hours", v.Dec("Hours")), ("@HourlyRate", v.Dec("HourlyRate")),
                 ("@PurchasedOn", v.Date("PurchasedOn")), ("@StartsOn", v.Date("StartsOn")), ("@ExpiresOn", v.Date("ExpiresOn")),
                 ("@ValidMonths", v.Int("ValidMonths")), ("@Notes", v.Str("Notes")),
-                ("@Invoice", v.Bool("Invoice")))
+                ("@BillWith", PrepaidBilling.First(b => b.Label == v["BillWith"]).Value))
         };
     }
 
@@ -230,19 +241,31 @@ public static class AdminForms
         string Cur(string col) => row == null || row[col] is DBNull ? "" : row[col] is DateTime dt ? dt.ToString("yyyy-MM-dd") : row[col] is decimal m ? m.ToString("0.##") : row[col].ToString() ?? "";
         return new FormSpec
         {
-            Title = $"Change expiry - {packageRef}",
+            Title = $"Change - {packageRef}",
             Intro = "Applies to support billed from now on; hours already taken are not changed. The hours and rate can't be changed once sold: " +
-                    "cancel an unused package and sell a new one instead.",
+                    "cancel an unused package and sell a new one instead. 'Charge it' can only be changed while the package has no invoice.",
             Fields =
             {
                 Field.Date("ExpiresOn", "Use by", def: Cur("ExpiresOn")),
                 Field.Bool("NoExpiry", "No expiry"),
+                Field.Choice("BillWith", "Charge it", PrepaidBilling.Select(b => b.Label).ToArray(),
+                             def: PrepaidBillingLabel(Cur("BillingMethod"))),
                 Field.Text("Notes", "Notes", def: Cur("Notes"))
             },
             Submit = v => db.Proc("dbo.usp_Prepaid_Update", ("@PackageRef", packageRef), ("@ExpiresOn", v.Date("ExpiresOn")), ("@NoExpiry", v.Bool("NoExpiry")),
+                ("@BillWith", PrepaidBilling.First(b => b.Label == v["BillWith"]).Value),
                 ("@Notes", v.Str("Notes")))
         };
     }
+
+    /// <summary>Raise a package's own invoice now, rather than waiting for the next monthly one.</summary>
+    public static FormSpec InvoicePrepaid(AdminDb db, string packageRef) => new()
+    {
+        Title = $"Invoice {packageRef} on its own",
+        Intro = "Raises a draft invoice for this package now. Use it when the hours should not wait for the client's next Molehill Watch invoice.",
+        Fields = { Field.Date("InvoiceDate", "Invoice date", help: "blank = the day it was bought") },
+        Submit = v => db.Proc("dbo.usp_Prepaid_Invoice", ("@Package", packageRef), ("@InvoiceDate", v.Date("InvoiceDate")))
+    };
 
     public static FormSpec CancelPrepaid(AdminDb db, string packageRef) => new()
     {
@@ -684,6 +707,7 @@ public static class AdminForms
                 Field.Decimal("FixedPrice", "Fixed price (£)", help: "fixed-price work"),
                 Field.Decimal("OutOfHoursRate", "Out-of-hours rate (£/h)", help: "blank = out-of-hours work is billed at the day rate"),
                 Field.Choice("DayRounding", "Rounding", Roundings.Select(r => r.Label).ToArray()),
+                Field.Int("BillingEveryDays", "Invoiced every (days)", help: "blank = 14 (a fortnight); 7 weekly, 28 four-weekly"),
                 Field.Date("StartDate", "Starts", def: DateTime.Today.ToString("yyyy-MM-dd")),
                 Field.Date("EndDate", "Expected to end", help: "blank = open ended"),
                 Field.Text("PurchaseOrder", "Client PO", help: "printed on the invoice"),
@@ -697,6 +721,7 @@ public static class AdminForms
                 ("@DayRate", v.Dec("DayRate")), ("@HourlyRate", v.Dec("HourlyRate")), ("@FixedPrice", v.Dec("FixedPrice")),
                 ("@OutOfHoursRate", v.Dec("OutOfHoursRate")),
                 ("@DayRounding", Roundings.First(r => r.Label == v["DayRounding"]).Value),
+                ("@BillingEveryDays", v.Int("BillingEveryDays")),
                 ("@StartDate", v.Date("StartDate")), ("@EndDate", v.Date("EndDate")),
                 ("@PurchaseOrder", v.Str("PurchaseOrder")), ("@EngagementRef", v.Str("EngagementRef")), ("@Notes", v.Str("Notes")))
         };
@@ -717,6 +742,7 @@ public static class AdminForms
                 Field.Decimal("HourlyRate", "Hourly rate (£)", def: Now("HourlyRate")),
                 Field.Decimal("FixedPrice", "Fixed price (£)", def: Now("FixedPrice")),
                 Field.Decimal("OutOfHoursRate", "Out-of-hours rate (£/h)", def: Now("OutOfHoursRate")),
+                Field.Int("BillingEveryDays", "Invoiced every (days)", def: Now("BillingEveryDays"), help: "blank = leave as it is"),
                 Field.Date("StartDate", "Starts", def: Now("StartDate")),
                 Field.Date("EndDate", "Expected to end", def: Now("EndDate")),
                 Field.Text("PurchaseOrder", "Client PO", def: Now("PurchaseOrder")),
@@ -725,7 +751,8 @@ public static class AdminForms
             },
             Submit = v => db.Proc("dbo.usp_Engagement_Update", ("@Engagement", engagementRef), ("@Name", v.Str("Name")),
                 ("@DayRate", v.Dec("DayRate")), ("@HourlyRate", v.Dec("HourlyRate")), ("@FixedPrice", v.Dec("FixedPrice")),
-                ("@OutOfHoursRate", v.Dec("OutOfHoursRate")), ("@StartDate", v.Date("StartDate")), ("@EndDate", v.Date("EndDate")),
+                ("@OutOfHoursRate", v.Dec("OutOfHoursRate")), ("@BillingEveryDays", v.Int("BillingEveryDays")),
+                ("@StartDate", v.Date("StartDate")), ("@EndDate", v.Date("EndDate")),
                 ("@PurchaseOrder", v.Str("PurchaseOrder")), ("@Status", v.Str("Status")), ("@Notes", v.Str("Notes")))
         };
     }

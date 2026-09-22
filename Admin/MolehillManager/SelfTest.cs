@@ -700,13 +700,16 @@ public static class SelfTest
         var extraRef = tuning?.First?.Rows[0]["TicketRef"] as string ?? "MW-?";
         Step("log 150 minutes (with the earlier 90, one hour past the included three)", () => Submit(AdminForms.LogTime(db, extraRef), ("Minutes", "150"),
             ("Description", "Tuning"), ("WorkStart", more.ToString("yyyy-MM-dd HH:mm"))));
-        Step("sell pre-paid hours", () => Submit(AdminForms.SellPrepaid(db, reference), ("Hours", "5"), ("HourlyRate", "60"), ("ValidMonths", "12"),
-            ("PurchasedOn", D(start))),
-            r => r.First is { Rows.Count: 1 } t && (decimal)t.Rows[0]["Price"] == 300m && t.Rows[0]["InvoiceNo"] is string ? null : "no package / invoice");
+        Step("sell pre-paid hours (charged on the next monthly invoice)", () => Submit(AdminForms.SellPrepaid(db, reference),
+                ("Hours", "5"), ("HourlyRate", "60"), ("ValidMonths", "12"), ("PurchasedOn", D(start))),
+            r => r.First is { Rows.Count: 1 } t && (decimal)t.Rows[0]["Price"] == 300m && t.Rows[0]["InvoiceNo"] is DBNull ? null : "package or invoice wrong");
         var package = (string)Queries.Prepaid(db, reference).Rows[0]["Ref"];
+        Step("it says where it will be charged", () => Queries.Prepaid(db, reference),
+            t => (string)t.Rows[0]["Charging"] == "on the next monthly invoice" ? null : (string)t.Rows[0]["Charging"]);
         ExpectError("sell pre-paid hours: expiry and months together refused", () => Submit(AdminForms.SellPrepaid(db, reference), ("Hours", "5"), ("HourlyRate", "60"),
             ("ValidMonths", "12"), ("ExpiresOn", D(DateTime.Today.AddMonths(6)))), "not both");
-        Step("sell a second package, not invoiced", () => Submit(AdminForms.SellPrepaid(db, reference), ("Hours", "2"), ("HourlyRate", "55"), ("Invoice", "0")));
+        Step("sell a second package the client has already paid for", () => Submit(AdminForms.SellPrepaid(db, reference),
+            ("Hours", "2"), ("HourlyRate", "55"), ("BillWith", "Not at all - already paid for")));
         var spare = Queries.Prepaid(db, reference).Rows.Cast<DataRow>().Select(r => (string)r["Ref"]).First(r => r != package);
         Step("cancel the unused package", () => Submit(AdminForms.CancelPrepaid(db, spare), ("Reason", "Self-test")));
         Step("cancelled", () => Queries.Prepaid(db, reference), t => t.Rows.Cast<DataRow>().Any(r => (string)r["Ref"] == spare && (string)r["State"] == "Cancelled") ? null : "not cancelled");
@@ -731,6 +734,12 @@ public static class SelfTest
                 """, ("@r", reference)),
             t => t.Rows.Count == 1 && (decimal)t.Rows[0]["Quantity"] == 1m && (decimal)t.Rows[0]["UnitPrice"] == 115m ? null : $"{t.Rows.Count} OOH lines");
         Step("extend the expiry", () => Submit(AdminForms.UpdatePrepaid(db, package), ("ExpiresOn", D(DateTime.Today.AddYears(2)))));
+        Step("the package was charged on the monthly invoice, not one of its own", () => Queries.InvoiceLines(db, invoice),
+            t => t.Rows.Cast<DataRow>().Any(r => (string)r["Type"] == "PrepaidPurchase" && (decimal)r["Amount"] == 300m) ? null : "no package line on the cycle invoice");
+        Step("and the package now points at that invoice", () => Queries.Prepaid(db, reference),
+            t => t.Rows.Cast<DataRow>().Any(r => (string)r["Ref"] == package && (string)r["Invoice"] == invoice) ? null : "not linked");
+        ExpectError("changing how an invoiced package is charged is refused",
+            () => Submit(AdminForms.UpdatePrepaid(db, package), ("BillWith", "Not at all - already paid for")), "already on invoice");
         ExpectError("cancel a package in use refused", () => Submit(AdminForms.CancelPrepaid(db, package)), "already been used");
         Step("summary shows pre-paid hours left", () => AgreementWindow.Summary(db, reference, false), s => s.Contains("pre-paid hours left: 4") ? null : "not shown");
         Step("billing again creates nothing", () => Submit(AdminForms.RunBilling(db),
@@ -791,7 +800,8 @@ public static class SelfTest
             r => (decimal)r["UnbilledValue"] == 650m ? null : $"£{r["UnbilledValue"]}");
         var periodEnd = (DateTime)db.Scalar("""
             SELECT DATEADD(day, -1, dbo.fn_ConsultancyPeriodStart(e.StartDate,
-                   dbo.fn_ConsultancyPeriod(e.StartDate, CAST(dbo.fn_UkNow() AS date)) + 1))
+                   dbo.fn_ConsultancyPeriod(e.StartDate, CAST(dbo.fn_UkNow() AS date), dbo.fn_EngagementBillingDays(e.EngagementId)) + 1,
+                   dbo.fn_EngagementBillingDays(e.EngagementId)))
             FROM dbo.Engagement e WHERE e.EngagementRef = @r;
             """, ("@r", conRef))!;
         Step($"the period running now (to {periodEnd:dd MMM}) is only invoiced once it ends", () => Submit(AdminForms.RunBilling(db), ("Client", conChoice)),

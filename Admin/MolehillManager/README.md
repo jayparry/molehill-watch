@@ -102,6 +102,7 @@ Invoice numbers follow the invoice date: after every billing run the drafts are 
 
 - It has tabs for Instances, Onboarding, Contacts, Tickets, Weekly reports and **Pre-paid hours**.
   - On the Pre-paid hours tab, F2 sells a package of business-hours support (hours and rate negotiated, optional expiry). Out-of-hours work is never taken from it.
+  - **Charge it** decides where the price goes: the client's next monthly invoice (the default), an invoice of its own now, or nowhere if they have already paid. The grid's **Charging** column shows which, and F4 can change it or raise the invoice on demand while the package has none.
   - Enter on a package shows where its hours went, changes its expiry or cancels it.
   - Hours come off a package at the billing run (F6), not when time is logged. The agreement summary shows hours left and time logged but not yet billed.
 - F2 adds to whichever tab is showing.
@@ -116,6 +117,7 @@ Invoice numbers follow the invoice date: after every billing run the drafts are 
 
 - Tabs for **Days worked**, **Everything logged**, **Invoices** and **Contacts**.
 - F2 logs work: give days (1, 0.5) or hours, and what you did. Everything logged on one date is billed as that day's work, rounded up to the nearest half day.
+- **Invoiced every (days)** on the engagement sets its own billing rhythm (blank = the house default of 14). The summary line says when the current period ends.
 - Days worked shows what each day will be charged, or what it was invoiced at if it has already been billed.
 - Everything logged is the raw entries, including non-billable ones; Enter on one corrects or removes it (once invoiced, void the invoice first).
 - F4 also offers: change the rate, PO, dates or put it on hold; mark it finished (which invoices what's left); cancel it; raise an invoice by hand; run billing for it.

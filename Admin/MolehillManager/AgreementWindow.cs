@@ -74,7 +74,8 @@ public sealed class AgreementWindow
         _weeklyTab = new TabView.Tab("Weekly reports", _weekly);
         _prepaid = Table(RowActions);
         var prepaidView = new View { Width = Dim.Fill(), Height = Dim.Fill() };
-        prepaidView.Add(new Label("Hours come off a package when billing runs (F6), not when time is logged.") { X = 1, Y = 0, ColorScheme = Colors.Menu });
+        prepaidView.Add(new Label("A package is charged on the client's next monthly invoice unless you said otherwise. Hours come off it when billing runs (F6), not when time is logged.")
+            { X = 1, Y = 0, ColorScheme = Colors.Menu });
         _prepaid.Y = 1;
         _prepaid.Height = Dim.Fill();
         prepaidView.Add(_prepaid);
@@ -323,7 +324,9 @@ public sealed class AgreementWindow
         };
         if (state != "Cancelled")
         {
-            list.Add(("Change expiry", () => Ui.Form(AdminForms.UpdatePrepaid(_db, reference), Refresh)));
+            list.Add(("Change expiry, how it is charged, notes", () => Ui.Form(AdminForms.UpdatePrepaid(_db, reference), Refresh)));
+            if (Grid.Selected(_prepaid, "Invoice") == null)
+                list.Add(("Invoice it now, on its own", () => Ui.Form(AdminForms.InvoicePrepaid(_db, reference), Refresh)));
             if (Grid.Selected(_prepaid, "Used") is "0" or null) list.Add(("Cancel (unused only)", () => Ui.Form(AdminForms.CancelPrepaid(_db, reference), Refresh)));
         }
         list.Add(sell);

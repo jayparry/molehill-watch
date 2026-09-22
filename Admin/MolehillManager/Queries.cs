@@ -84,8 +84,12 @@ public static class Queries
     public static DataTable Prepaid(AdminDb db, string agreementRef) => db.Query("""
         DECLARE @Today date = CAST(dbo.fn_UkNow() AS date);
         SELECT p.PackageRef AS Ref, p.PurchasedOn AS Bought, p.Hours, p.HourlyRate AS Rate, p.Price, p.Used, p.Remaining AS [Left],
-               p.StartsOn AS [From], p.ExpiresOn AS [Use by],
-               p.State, i.InvoiceNo AS Invoice, i.Status AS [Invoice status], p.Notes
+               p.StartsOn AS [From], p.ExpiresOn AS [Use by], p.State,
+               CASE WHEN i.InvoiceNo IS NOT NULL THEN 'invoiced'
+                    WHEN p.BillingMethod = 'NextCycle' THEN 'on the next monthly invoice'
+                    WHEN p.BillingMethod = 'OwnInvoice' THEN 'to be invoiced on its own'
+                    ELSE 'not invoiced' END AS Charging,
+               i.InvoiceNo AS Invoice, i.Status AS [Invoice status], p.Notes
         FROM dbo.fn_PrepaidPackages((SELECT AgreementId FROM dbo.Agreement WHERE AgreementRef = @Ref), @Today) p
         LEFT JOIN dbo.Invoice i ON i.InvoiceId = p.InvoiceId
         ORDER BY p.PurchasedOn DESC, p.PackageId DESC;
@@ -276,8 +280,9 @@ public static class Queries
                    ISNULL(u.Days, 0) AS UnbilledDays, ISNULL(u.Value, 0) AS UnbilledValue, u.LastWorked,
                    CASE WHEN e.BillingMode = 'FixedPrice' THEN NULL
                         ELSE DATEADD(day, -1, dbo.fn_ConsultancyPeriodStart(e.StartDate,
-                             dbo.fn_ConsultancyPeriod(e.StartDate, CAST(dbo.fn_UkNow() AS date)) + 1)) END AS PeriodEndsOn,
-                   dbo.fn_ConsultancyBillingDays() AS BillingEveryDays,
+                             dbo.fn_ConsultancyPeriod(e.StartDate, CAST(dbo.fn_UkNow() AS date), dbo.fn_EngagementBillingDays(e.EngagementId)) + 1,
+                             dbo.fn_EngagementBillingDays(e.EngagementId))) END AS PeriodEndsOn,
+                   dbo.fn_EngagementBillingDays(e.EngagementId) AS BillingEveryDays,
                    ISNULL(w.Days, 0) AS TotalDays,
                    ISNULL((SELECT SUM(i.Total) FROM dbo.Invoice i WHERE i.EngagementId = e.EngagementId AND i.Status <> 'Void'), 0) AS Invoiced
             FROM dbo.Engagement e JOIN dbo.Client c ON c.ClientId = e.ClientId

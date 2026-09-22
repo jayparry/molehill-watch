@@ -196,7 +196,9 @@ Work that isn't Molehill Watch support - a migration, a review, a few days of ad
 
 **When it's invoiced.** Each engagement is billed in fortnights from its own start date: an engagement that started on Monday 6 July has periods 6-19 July, 20 July - 2 August, and so on. A period is invoiced once it has ended, dated its last day, and a period with no work in it raises nothing. Marking the engagement finished invoices the part period straight away, dated the day it finished.
 
-Change `ConsultancyBillingDays` in `dbo.Setting` if you want a different rhythm - `7` for weekly, `28` for four-weekly. It applies to every consultancy engagement, and to periods that have not been invoiced yet.
+`ConsultancyBillingDays` in `dbo.Setting` sets the house rhythm - `7` for weekly, `14` (the default) for fortnightly, `28` for four-weekly. An engagement can differ: `@BillingEveryDays = 7` on `usp_Engagement_Add` or `usp_Engagement_Update`, or **Invoiced every (days)** on the form. Either way it applies to periods that have not been invoiced yet.
+
+Molehill Watch support is not affected: it always bills on the agreement's own monthly cycle.
 
 Nothing is invoiced twice, and voiding a consultancy invoice puts its days back.
 
@@ -246,9 +248,15 @@ A client can buy a block of business-hours support in advance at a reduced rate.
 
 Pre-paid hours only ever cover business-hours work. Out-of-hours work is never taken from them and is always billed at the out-of-hours rate.
 
+**Where the price goes.** By default the package is charged on the client's **next monthly Molehill Watch invoice** - the first cycle invoice raised on or after the day it was bought - as a line alongside the fees. Sell one mid-cycle and it goes on the following month's invoice. The other two choices are an invoice of its own (`OwnInvoice`) and no invoice at all (`NotBilled`, for hours bought outside the system). Nothing is ever billed twice, and the dashboard chases a package that has been sitting uninvoiced for more than a cycle.
+
 | Step | Command |
 |---|---|
-| Sell a package (a draft invoice for hours × rate is created) | `EXEC dbo.usp_Prepaid_Add @Client = N'Contoso Ltd', @Hours = 20, @HourlyRate = 62.50, @ValidMonths = 12;` |
+| Sell a package (charged on their next monthly invoice) | `EXEC dbo.usp_Prepaid_Add @Client = N'Contoso Ltd', @Hours = 20, @HourlyRate = 62.50, @ValidMonths = 12;` |
+| Sell one that needs invoicing straight away | `... @BillWith = 'OwnInvoice';` |
+| Sell one they have already paid for | `... @BillWith = 'NotBilled';` |
+| Change your mind before it is invoiced | `EXEC dbo.usp_Prepaid_Update @PackageRef = 'PH-0001', @BillWith = 'NextCycle';` |
+| Invoice one on its own now | `EXEC dbo.usp_Prepaid_Invoice @Package = 'PH-0001';` |
 | Packages, what's left, and where the hours went | `EXEC dbo.usp_Prepaid_Show @Client = N'Contoso Ltd';` |
 | Extend or remove the expiry | `EXEC dbo.usp_Prepaid_Update @PackageRef = 'PH-0001', @ExpiresOn = '2027-12-31';` (or `@NoExpiry = 1`) |
 | Cancel an unused package (voids its invoice if it hasn't been paid) | `EXEC dbo.usp_Prepaid_Cancel @PackageRef = 'PH-0001', @Reason = N'...';` |
