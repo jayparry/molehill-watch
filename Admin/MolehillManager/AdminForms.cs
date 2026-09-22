@@ -169,6 +169,72 @@ public static class AdminForms
 
     private static string Cur(DataRow? row, string col) => row == null || row[col] is DBNull ? "" : row[col].ToString() ?? "";
 
+    // ------------------------------------------------------------------ pre-paid hours
+
+    /// <summary>Sell a package of support hours in advance at a negotiated rate.</summary>
+    public static FormSpec SellPrepaid(AdminDb db, string agreementRef)
+    {
+        var standard = db.Scalar("""
+            SELECT p.BusinessHoursRate FROM dbo.Agreement a
+            JOIN dbo.PriceList p ON p.PriceListId = dbo.fn_PriceListIdOn(a.AgreementId, CAST(dbo.fn_UkNow() AS date))
+            WHERE a.AgreementRef = @Ref;
+            """, ("@Ref", agreementRef));
+        var rateHelp = standard is decimal d ? $"negotiated; standard is £{d:0.00}/h" : "negotiated";
+        return new FormSpec
+        {
+            Title = $"Sell pre-paid hours - {agreementRef}",
+            Intro = "Hours bought in advance. Each month's included hours are used first; after that, chargeable support comes out of " +
+                    "these hours (soonest-expiring package first) before anything is billed at the standard rates.",
+            Fields =
+            {
+                Field.Decimal("Hours", "Hours", required: true),
+                Field.Decimal("HourlyRate", "Rate per hour (£)", required: true, help: rateHelp),
+                Field.Int("ValidMonths", "Use within (months)", help: "blank = no expiry"),
+                Field.Date("ExpiresOn", "Or use by", help: "instead of months"),
+                Field.Decimal("OutOfHoursRatio", "Out-of-hours cover", help: "blank = none; 1 = hour for hour; 1.5 = 1.5 h each"),
+                Field.Date("PurchasedOn", "Bought on", help: "blank = today; also the invoice date"),
+                Field.Date("StartsOn", "Usable from", help: "blank = the day bought"),
+                Field.Bool("Invoice", "Invoice it now", def: true, help: "a draft invoice for hours x rate"),
+                Field.Text("Notes", "Notes")
+            },
+            Submit = v => db.Proc("dbo.usp_Prepaid_Add", ("@Client", agreementRef), ("@Hours", v.Dec("Hours")), ("@HourlyRate", v.Dec("HourlyRate")),
+                ("@PurchasedOn", v.Date("PurchasedOn")), ("@StartsOn", v.Date("StartsOn")), ("@ExpiresOn", v.Date("ExpiresOn")),
+                ("@ValidMonths", v.Int("ValidMonths")), ("@OutOfHoursRatio", v.Dec("OutOfHoursRatio")), ("@Notes", v.Str("Notes")),
+                ("@Invoice", v.Bool("Invoice")))
+        };
+    }
+
+    /// <summary>What can be renegotiated after purchase: the expiry and out-of-hours cover.</summary>
+    public static FormSpec UpdatePrepaid(AdminDb db, string packageRef)
+    {
+        var row = Queries.PrepaidPackage(db, packageRef);
+        string Cur(string col) => row == null || row[col] is DBNull ? "" : row[col] is DateTime dt ? dt.ToString("yyyy-MM-dd") : row[col] is decimal m ? m.ToString("0.##") : row[col].ToString() ?? "";
+        return new FormSpec
+        {
+            Title = $"Change pre-paid hours - {packageRef}",
+            Intro = "Applies to support billed from now on; hours already taken are not changed. The hours and rate can't be changed once sold: " +
+                    "cancel an unused package and sell a new one instead.",
+            Fields =
+            {
+                Field.Date("ExpiresOn", "Use by", def: Cur("ExpiresOn")),
+                Field.Bool("NoExpiry", "No expiry"),
+                Field.Decimal("OutOfHoursRatio", "Out-of-hours cover", def: Cur("OutOfHoursRatio"), help: "pre-paid h per out-of-hours hour"),
+                Field.Bool("BusinessHoursOnly", "Business hours only", help: "stop covering out of hours"),
+                Field.Text("Notes", "Notes", def: Cur("Notes"))
+            },
+            Submit = v => db.Proc("dbo.usp_Prepaid_Update", ("@PackageRef", packageRef), ("@ExpiresOn", v.Date("ExpiresOn")), ("@NoExpiry", v.Bool("NoExpiry")),
+                ("@OutOfHoursRatio", v.Dec("OutOfHoursRatio")), ("@BusinessHoursOnly", v.Bool("BusinessHoursOnly")), ("@Notes", v.Str("Notes")))
+        };
+    }
+
+    public static FormSpec CancelPrepaid(AdminDb db, string packageRef) => new()
+    {
+        Title = $"Cancel pre-paid hours - {packageRef}",
+        Intro = "Only a package none of whose hours have been used can be cancelled. Its invoice is voided if it hasn't been paid.",
+        Fields = { Field.Text("Reason", "Reason") },
+        Submit = v => db.Proc("dbo.usp_Prepaid_Cancel", ("@PackageRef", packageRef), ("@Reason", v.Str("Reason")))
+    };
+
     /// <summary>Correct a contact's details. Clearing the e-mail or phone removes it.</summary>
     public static FormSpec EditContact(AdminDb db, int contactId)
     {

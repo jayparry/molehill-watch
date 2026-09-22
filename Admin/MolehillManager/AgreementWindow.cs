@@ -14,7 +14,8 @@ public sealed class AgreementWindow
     private Dialog _dialog = null!;
     private TextView _summary = null!;
     private TabView _tabs = null!;
-    private TabView.Tab _instTab = null!, _onbTab = null!, _contactTab = null!, _ticketTab = null!, _weeklyTab = null!;
+    private TabView.Tab _instTab = null!, _onbTab = null!, _contactTab = null!, _ticketTab = null!, _weeklyTab = null!, _prepaidTab = null!;
+    private TableView _prepaid = null!;
     private TableView _instances = null!, _onboarding = null!, _contacts = null!, _tickets = null!, _weekly = null!;
     private CheckBox _showRemoved = null!;
     private Label _removedNote = null!;
@@ -71,13 +72,16 @@ public sealed class AgreementWindow
         _contactTab = new TabView.Tab("Contacts", contactView);
         _ticketTab = new TabView.Tab("Tickets", _tickets);
         _weeklyTab = new TabView.Tab("Weekly reports", _weekly);
+        _prepaid = Table(PrepaidActions);
+        _prepaidTab = new TabView.Tab("Pre-paid hours", _prepaid);
         _tabs.AddTab(_instTab, true);
         _tabs.AddTab(_onbTab, false);
         _tabs.AddTab(_contactTab, false);
         _tabs.AddTab(_ticketTab, false);
         _tabs.AddTab(_weeklyTab, false);
+        _tabs.AddTab(_prepaidTab, false);
 
-        var hint = new Label("Enter on a row: actions for it (contacts: edit, remove, add back).  F2 adds.  F4: all agreement actions.")
+        var hint = new Label("Enter on a row: actions for it.  F2 adds (instance, contact, ticket, weekly report, pre-paid hours).  F4: all actions.")
             { X = 0, Y = Pos.AnchorEnd(2), Width = Dim.Fill(), ColorScheme = Colors.Menu };
         _dialog.Add(_summary, _tabs, hint);
 
@@ -110,6 +114,7 @@ public sealed class AgreementWindow
             RefreshContacts();
             Grid.Bind(_tickets, Queries.Tickets(_db, openOnly: false, _ref));
             Grid.Bind(_weekly, Queries.WeeklyReports(_db, _ref));
+            Grid.Bind(_prepaid, Queries.Prepaid(_db, _ref));
         });
     }
 
@@ -164,7 +169,8 @@ public sealed class AgreementWindow
             var r = u.Rows[0];
             sb.AppendLine($"This cycle ({Output.Format(r["CycleStart"])} - {Output.Format(r["CycleEnd"])}): " +
                           $"{Output.Format(r["BusinessHoursLogged"])} of {Output.Format(r["IncludedHours"])} included hours used, " +
-                          $"{Output.Format(r["IncludedHoursRemaining"])} left; {Output.Format(r["OutOfHoursLogged"])} h out of hours");
+                          $"{Output.Format(r["IncludedHoursRemaining"])} left; {Output.Format(r["OutOfHoursLogged"])} h out of hours"
+                          + (r.Table.Columns.Contains("PrepaidHoursLeft") && r["PrepaidHoursLeft"] is decimal left ? $"; pre-paid hours left: {Output.Format(left)}" : ""));
         }
         else sb.AppendLine(usage.Messages.FirstOrDefault() ?? "");
 
@@ -191,6 +197,7 @@ public sealed class AgreementWindow
         if (tab == _contactTab) Ui.Form(AdminForms.AddContact(_db, _clientName), Refresh);
         else if (tab == _ticketTab) Ui.Form(AdminForms.OpenTicket(_db, _ref), Refresh);
         else if (tab == _weeklyTab) LogWeekly();
+        else if (tab == _prepaidTab) Ui.Form(AdminForms.SellPrepaid(_db, _ref), Refresh);
         else if (tab == _onbTab) CompleteOnboarding();
         else Ui.Form(AdminForms.AddInstance(_db, _ref), Refresh);
     }
@@ -235,6 +242,28 @@ public sealed class AgreementWindow
         Picker.Actions(name, actions.ToArray());
     }
 
+    private void PrepaidActions()
+    {
+        var reference = Grid.Selected(_prepaid, "Ref");
+        if (reference == null) { Ui.Form(AdminForms.SellPrepaid(_db, _ref), Refresh); return; }
+        var state = Grid.Selected(_prepaid, "State");
+        var actions = new List<(string, Action)>
+        {
+            ("Where the hours went", () => Ui.Try("Pre-paid hours", () =>
+            {
+                var used = Queries.PrepaidUsage(_db, reference);
+                Output.Text($"{reference} - hours used", used.Rows.Count == 0 ? "None of these hours have been used yet." : Output.TextTable(used));
+            }))
+        };
+        if (state != "Cancelled")
+        {
+            actions.Add(("Change expiry or out-of-hours cover", () => Ui.Form(AdminForms.UpdatePrepaid(_db, reference), Refresh)));
+            if (Grid.Selected(_prepaid, "Used") is "0" or null) actions.Add(("Cancel (unused only)", () => Ui.Form(AdminForms.CancelPrepaid(_db, reference), Refresh)));
+        }
+        actions.Add(("Sell more pre-paid hours", () => Ui.Form(AdminForms.SellPrepaid(_db, _ref), Refresh)));
+        Picker.Actions(reference, actions.ToArray());
+    }
+
     private void CompleteOnboarding()
     {
         var code = Grid.Selected(_onboarding, "Code");
@@ -273,6 +302,7 @@ public sealed class AgreementWindow
             ("Included hours used this cycle", () => Ui.Try("Usage", () => Output.Show("Usage", _db.Proc("dbo.usp_Agreement_Usage", ("@Client", _ref))))),
             ("Onboarding checklist and version status", () => Ui.Try("Onboarding", () => Output.Show("Onboarding", _db.Proc("dbo.usp_Onboarding_Show", ("@Client", _ref))))),
             ("Project quote", () => Ui.Form(AdminForms.AddQuote(_db, _ref), Refresh)),
+            ("Sell pre-paid hours", () => Ui.Form(AdminForms.SellPrepaid(_db, _ref), Refresh)),
             ("Notice: preview or record the end date", () => Ui.Form(AdminForms.GiveNotice(_db, _ref), Refresh)),
             (paused ? "Resume support" : "Pause support (late payment)", () => Ui.Form(AdminForms.PauseSupport(_db, _ref, !paused), Refresh)),
             ("Run billing for this agreement", () => Ui.Try("Billing", () =>

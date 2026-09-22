@@ -19,7 +19,8 @@ public static class Queries
                (SELECT COUNT(*) FROM dbo.Instance i WHERE i.AgreementId = a.AgreementId AND i.CoveredTo IS NULL) AS Instances,
                (SELECT SUM(MonthlyFee) FROM dbo.fn_AgreementFees(a.AgreementId, CASE WHEN a.StartDate > @Today THEN a.StartDate ELSE @Today END)) AS MonthlyFee,
                (SELECT COUNT(*) FROM dbo.Ticket t WHERE t.AgreementId = a.AgreementId AND t.Status NOT IN ('Resolved', 'Closed')) AS OpenTickets,
-               (SELECT COUNT(*) FROM dbo.OnboardingItem o WHERE o.AgreementId = a.AgreementId AND o.IsRequired = 1 AND o.CompletedDate IS NULL) AS OnboardingLeft
+               (SELECT COUNT(*) FROM dbo.OnboardingItem o WHERE o.AgreementId = a.AgreementId AND o.IsRequired = 1 AND o.CompletedDate IS NULL) AS OnboardingLeft,
+               (SELECT SUM(p.Remaining) FROM dbo.fn_PrepaidPackages(a.AgreementId, @Today) p WHERE p.State IN ('Active', 'Not started')) AS PrepaidLeft
         FROM dbo.Agreement a JOIN dbo.Client c ON c.ClientId = a.ClientId
         WHERE @IncludeEnded = 1 OR a.EndDate IS NULL OR a.EndDate >= @Today
         ORDER BY c.ClientName, a.StartDate;
@@ -78,6 +79,32 @@ public static class Queries
         WHERE a.AgreementRef = @Ref AND (@IncludeRemoved = 1 OR ct.IsActive = 1)
         ORDER BY ct.IsActive DESC, ct.IsNamedContact DESC, ct.FullName;
         """, ("@Ref", agreementRef), ("@IncludeRemoved", includeRemoved));
+
+    /// <summary>The agreement's pre-paid hours packages, newest first.</summary>
+    public static DataTable Prepaid(AdminDb db, string agreementRef) => db.Query("""
+        DECLARE @Today date = CAST(dbo.fn_UkNow() AS date);
+        SELECT p.PackageRef AS Ref, p.PurchasedOn AS Bought, p.Hours, p.HourlyRate AS Rate, p.Price, p.Used, p.Remaining AS [Left],
+               p.StartsOn AS [From], p.ExpiresOn AS [Use by],
+               CASE WHEN p.OutOfHoursRatio IS NULL THEN 'No' ELSE FORMAT(p.OutOfHoursRatio, '0.##') + ' h/h' END AS OOH,
+               p.State, i.InvoiceNo AS Invoice, i.Status AS [Invoice status], p.Notes
+        FROM dbo.fn_PrepaidPackages((SELECT AgreementId FROM dbo.Agreement WHERE AgreementRef = @Ref), @Today) p
+        LEFT JOIN dbo.Invoice i ON i.InvoiceId = p.InvoiceId
+        ORDER BY p.PurchasedOn DESC, p.PackageId DESC;
+        """, ("@Ref", agreementRef));
+
+    public static DataTable PrepaidUsage(AdminDb db, string packageRef) => db.Query("""
+        SELECT u.CreatedAt AS Recorded, t.TicketRef AS Ticket, t.Title, u.RateType AS Rate, u.WorkedHours AS [Support h], u.HoursUsed AS [Pre-paid h],
+               i.InvoiceNo AS Invoice
+        FROM dbo.PrepaidUsage u JOIN dbo.PrepaidPackage p ON p.PackageId = u.PackageId
+        JOIN dbo.Invoice i ON i.InvoiceId = u.InvoiceId LEFT JOIN dbo.Ticket t ON t.TicketId = u.TicketId
+        WHERE p.PackageRef = @Ref ORDER BY u.UsageId;
+        """, ("@Ref", packageRef));
+
+    public static DataRow? PrepaidPackage(AdminDb db, string packageRef)
+    {
+        var t = db.Query("SELECT * FROM dbo.PrepaidPackage WHERE PackageRef = @Ref;", ("@Ref", packageRef));
+        return t.Rows.Count == 0 ? null : t.Rows[0];
+    }
 
     public static DataRow? Contact(AdminDb db, int contactId)
     {

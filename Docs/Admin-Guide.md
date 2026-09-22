@@ -177,6 +177,35 @@ Draft invoices are written to `Documents\Molehill Admin\Invoices\`. Open one in 
 | Void, so the next billing run rebuilds it | `EXEC dbo.usp_Invoice_SetStatus @InvoiceNo = 'MDS-2026-0004', @Status = 'Void';` |
 | Pause support for late payment | `EXEC dbo.usp_Agreement_PauseSupport @Client = N'Contoso Ltd';` (lifted automatically once paid) |
 
+### Pre-paid hours (add-on)
+
+A client can buy a block of support hours in advance. You agree the number of hours and their rate, and you can also agree:
+
+* an expiry date (by default, the hours never expire)
+* cover for out-of-hours work, at a ratio. For example, `1.5` means each out-of-hours hour uses 1.5 pre-paid hours. By default the hours cover business-hours work only.
+
+| Step | Command |
+|---|---|
+| Sell a package (a draft invoice for hours × rate is created) | `EXEC dbo.usp_Prepaid_Add @Client = N'Contoso Ltd', @Hours = 20, @HourlyRate = 62.50, @ValidMonths = 12;` |
+| …covering out of hours too | add `@OutOfHoursRatio = 1.5` (or `1` for hour for hour) |
+| Packages, what's left, and where the hours went | `EXEC dbo.usp_Prepaid_Show @Client = N'Contoso Ltd';` |
+| Extend the expiry or change the out-of-hours cover | `EXEC dbo.usp_Prepaid_Update @PackageRef = 'PH-0001', @ExpiresOn = '2027-12-31';` (`@NoExpiry = 1`, `@BusinessHoursOnly = 1`) |
+| Cancel an unused package (voids its invoice if it hasn't been paid) | `EXEC dbo.usp_Prepaid_Cancel @PackageRef = 'PH-0001', @Reason = N'...';` |
+
+How the hours are used at each arrears billing:
+
+1. The month's included hours are used first. They're free and don't roll over.
+2. Chargeable time, with the 1-hour minimum per ticket applied, comes out of pre-paid hours. The package that expires soonest is used first, and a package is only used for work done between its start and expiry dates.
+3. Anything left over is billed at the standard rates.
+
+On the invoice:
+
+* Time covered by pre-paid hours appears as £0 lines, and a note shows what's left.
+* Voiding an arrears invoice gives its pre-paid hours back.
+* A package's own invoice can't be voided once any of its hours have been used; credit the client with an adjustment instead.
+
+The dashboard flags packages that are running low (20% or less left), used up (so you can offer a top-up), or have unused hours expiring within 30 days. In **Molehill Manager**, use the agreement's **Pre-paid hours** tab: F2 sells a package, and Enter on one shows its usage or changes or cancels it.
+
 **Time logged late.** If you log time for a cycle that has already been invoiced, it goes on a small separate invoice at the next billing run.
 
 ---

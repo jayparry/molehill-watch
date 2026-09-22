@@ -228,6 +228,7 @@ dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=
 | Azure SQL Database: £300 per logical server or elastic pool up to 5 databases, £40 per extra database, geo-replicas included, outside the tiers | `usp_Instance_Add @Platform = 'AzureSqlDatabaseServer'` / `'AzureSqlDatabaseElasticPool'`, `@DatabaseCount`; `@Role = 'GeoReplica'` for failover group secondaries. Keep the count current with `usp_Instance_Update @DatabaseCount` (or Molehill Manager). |
 | Managed Instance: same weekly report and coverage as SQL Server | Molehill Watch detects EngineEdition 8. Microsoft-managed areas (patching, automated backups, HA, OS) are reported as such, and storage is checked against the instance's reserved storage. |
 | Azure SQL Database weekly report (retention, DTU/vCore, storage headroom, throttling, Query Store, elastic jobs, geo-replication, firewall, auditing, Defender, cost/tier) | `Client\Get-AzureSqlDatabaseReport.ps1` (read-only; `-AzurePlatformChecks` adds the Azure Resource Manager settings) |
+| Pre-paid support hours as an add-on (hours and rate negotiable) | `usp_Prepaid_Add` / `_Show` / `_Update` / `_Cancel`. Invoiced up front; arrears billing uses them after included hours and before the standard rates (soonest-expiring first). Optional expiry and out-of-hours cover at an agreed ratio; dashboard alerts for low, used up and expiring. |
 | Out-of-hours: Azure tier changes, migrations, failover tests | Open the ticket with `@WorkType = 'PlannedOutOfHours'` and log the time `OutOfHours` |
 | Invoiced monthly in advance from start date, arrears for extra time, 14 days, no VAT, no pro-rata | `usp_Billing_Run` creates draft invoices; `usp_Invoice_Html` renders them |
 | Late payment may pause support | Dashboard overdue alerts; `usp_Agreement_PauseSupport`; ticket warnings |
@@ -262,6 +263,11 @@ dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=
     * **Managed Instance:** the handling was exercised on SQL Server 2025 LocalDB with the testing-only setting `TestAsManagedInstance = 1` (leave it at 0). The things only a real instance has, `sys.server_resource_stats` and Entra `FROM EXTERNAL PROVIDER` logins, have not been run.
     * **Azure SQL Database report:** the connection, Query Store, findings and HTML code was run against LocalDB, and every Azure-only DMV (`sys.resource_stats`, `sys.dm_database_backups`, geo-replication, firewall) degrades to a "could not check" line rather than failing. The Azure queries and the `az` calls themselves have not been run against Azure.
     * Do the first run of each with the client's DBA watching.
+12. **Pre-paid hours:**
+    * The 1-hour minimum per ticket still applies. A ticket with 15 minutes of chargeable time uses 1 pre-paid hour, just as it would be billed 1 hour.
+    * Out-of-hours work only uses pre-paid hours when the package says so, at the agreed ratio.
+    * Unused hours are simply lost at expiry; the dashboard warns 30 days before.
+    * Change any of this per package with `usp_Prepaid_Update`, or by how you sell it.
 
 ## Uninstall
 
