@@ -398,6 +398,7 @@ public static class SelfTest
         // every form builds as a dialog, using real data where the form needs a selection
         var agreements = engagements.Rows.Cast<DataRow>().Where(r => (string)r["Type"] != "Consultancy").ToList();
         var consultancy = engagements.Rows.Cast<DataRow>().FirstOrDefault(r => (string)r["Type"] == "Consultancy");
+        var consultancyForms = Array.Empty<FormSpec>();
         var anyRef = agreements.Count > 0 ? (string)agreements[0]["Ref"] : "MWA-0000";
         var anyClient = agreements.Count > 0 ? (string)agreements[0]["Client"] : "Client";
         var anyInstance = agreements.Count > 0 ? Queries.InstanceNames(db, anyRef).FirstOrDefault() ?? "SQL01" : "SQL01";
@@ -412,6 +413,7 @@ public static class SelfTest
         if (consultancy != null)
         {
             var conRef = (string)consultancy["Ref"];
+            consultancyForms = new[] { AdminForms.LogWork(db, conRef), AdminForms.CompleteEngagement(db, conRef), AdminForms.EditEngagement(db, conRef) };
             foreach (var spec in new[] { AdminForms.LogWork(db, conRef), AdminForms.EditEngagement(db, conRef),
                                          AdminForms.CompleteEngagement(db, conRef), AdminForms.CancelEngagement(db, conRef), AdminForms.NewInvoice(db, conRef) })
                 Step($"form '{spec.Title}' builds", () => { using var d = FormDialog.Create(spec, out _); return 0; });
@@ -422,7 +424,8 @@ public static class SelfTest
 
         // MM_SCREENS=<file>: render the screens into the fake console and write them out as text, for checking layout
         var dump = Environment.GetEnvironmentVariable("MM_SCREENS");
-        if (!string.IsNullOrEmpty(dump)) DumpScreens(db, dump, anyRef, AllForms(db, anyRef, anyClient, anyInstance, anyTicket, anyInvoice));
+        if (!string.IsNullOrEmpty(dump))
+            DumpScreens(db, dump, anyRef, AllForms(db, anyRef, anyClient, anyInstance, anyTicket, anyInvoice).Concat(consultancyForms));
     }
 
     private static string Screen()
@@ -784,6 +787,18 @@ public static class SelfTest
             r => (decimal)r["UnbilledValue"] == 650m ? null : $"£{r["UnbilledValue"]}");
         Step("this month is not invoiced until the month has ended", () => Submit(AdminForms.RunBilling(db), ("Client", conChoice)),
             r => r.First is { Rows.Count: 0 } ? null : "invoiced too early");
+
+        // finishing: the form starts on the engagement's end date, and so does the procedure
+        var conEnd = DateTime.Today.AddDays(-3);
+        Step("give the engagement an end date", () => Submit(AdminForms.EditEngagement(db, conRef), ("EndDate", D(conEnd))));
+        Step("the finish form starts on that date", () => AdminForms.CompleteEngagement(db, conRef),
+            f => f.Fields.First(x => x.Name == "CompletedOn").Default == D(conEnd) ? null
+                 : $"starts on '{f.Fields.First(x => x.Name == "CompletedOn").Default}'");
+        Step("finishing with no date given uses it", () => Submit(AdminForms.CompleteEngagement(db, conRef)));
+        Step("finished on the end date", () => Queries.Engagement(db, conRef)!,
+            r => r["CompletedOn"] is DateTime c && c.Date == conEnd ? null : $"finished {r["CompletedOn"]}");
+        Step("the last days go out on an invoice dated then", () => Submit(AdminForms.RunBilling(db), ("Client", conChoice)),
+            r => r.First is { Rows.Count: 1 } t && (DateTime)t.Rows[0]["InvoiceDate"] == conEnd ? null : $"{r.First?.Rows.Count} invoice(s)");
 
         // an invoice typed by hand
         var typed = Step("new invoice typed by hand", () => Submit(AdminForms.NewInvoice(db), ("ClientName", name)),

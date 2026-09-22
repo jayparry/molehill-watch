@@ -730,13 +730,20 @@ public static class AdminForms
         };
     }
 
-    public static FormSpec CompleteEngagement(AdminDb db, string engagementRef) => new()
+    public static FormSpec CompleteEngagement(AdminDb db, string engagementRef)
     {
-        Title = $"Finish {engagementRef}",
-        Intro = "Marks the work finished. The next billing run invoices whatever is left - and, for fixed-price work, the agreed price.",
-        Fields = { Field.Date("CompletedOn", "Finished on", help: "blank = today") },
-        Submit = v => db.Proc("dbo.usp_Engagement_Complete", ("@Engagement", engagementRef), ("@CompletedOn", v.Date("CompletedOn")))
-    };
+        // an engagement with an end date almost always finished on it, so start there
+        var expectedEnd = Cur(Queries.Engagement(db, engagementRef), "EndDate");
+        return new FormSpec
+        {
+            Title = $"Finish {engagementRef}",
+            Intro = "Marks the work finished. The next billing run invoices whatever is left - and, for fixed-price work, the agreed price. "
+                    + "The invoice is dated the day you give here.",
+            Fields = { Field.Date("CompletedOn", "Finished on", def: expectedEnd,
+                                  help: expectedEnd == "" ? "blank = today" : "the end date on the engagement; change it if it really finished another day") },
+            Submit = v => db.Proc("dbo.usp_Engagement_Complete", ("@Engagement", engagementRef), ("@CompletedOn", v.Date("CompletedOn")))
+        };
+    }
 
     public static FormSpec CancelEngagement(AdminDb db, string engagementRef) => new()
     {

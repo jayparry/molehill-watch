@@ -1,7 +1,7 @@
 /*
 ===============================================================================
  Molehill Watch - SQL Server Support Package
- Molehill Admin: clients, engagements, tickets, time and billing  Version 2.0.0
+ Molehill Admin: clients, engagements, tickets, time and billing  Version 2.0.1
  Molehill Data Services  -  jay@jayparry.co.uk  -  molehilldataservices.com
 -------------------------------------------------------------------------------
  Runs on YOUR OWN SQL Server (Express is fine), not on client servers.
@@ -1470,15 +1470,20 @@ GO
 
 CREATE OR ALTER PROCEDURE dbo.usp_Engagement_Complete
     @Engagement  nvarchar(200),
-    @CompletedOn date = NULL
+    @CompletedOn date = NULL        -- default: the engagement's end date, or today if it has none
 AS
 BEGIN
     SET NOCOUNT ON;
     DECLARE @Id int = dbo.fn_EngagementId(@Engagement);
     IF @Id IS NULL BEGIN RAISERROR(N'Engagement "%s" not found.', 16, 1, @Engagement); RETURN; END
-    IF (SELECT EngagementType FROM dbo.Engagement WHERE EngagementId = @Id) = 'Monitoring'
+    DECLARE @Type varchar(20), @End date;
+    SELECT @Type = EngagementType, @End = EndDate FROM dbo.Engagement WHERE EngagementId = @Id;
+    IF @Type = 'Monitoring'
     BEGIN RAISERROR(N'A Molehill Watch agreement ends by giving notice (usp_Notice_Give).', 16, 1); RETURN; END
-    SET @CompletedOn = ISNULL(@CompletedOn, CAST(dbo.fn_UkNow() AS date));
+    DECLARE @Today date = CAST(dbo.fn_UkNow() AS date);
+    SET @CompletedOn = COALESCE(@CompletedOn, @End, @Today);
+    IF @CompletedOn > @Today
+        PRINT N'Note: finished on ' + CONVERT(nvarchar(11), @CompletedOn, 106) + N' (the end date on the engagement), which is in the future - its invoice will be dated then too.';
     UPDATE dbo.Engagement SET Status = 'Completed', CompletedOn = @CompletedOn, EndDate = ISNULL(EndDate, @CompletedOn) WHERE EngagementId = @Id;
     PRINT N'Engagement marked complete. The next billing run invoices whatever is outstanding.';
     EXEC dbo.usp_Engagement_Show @Engagement = @Engagement;
@@ -3223,6 +3228,6 @@ BEGIN
 END
 GO
 
-INSERT dbo.InstallHistory (Version) VALUES ('2.0.0');   -- bump with every schema change: Molehill Manager offers the upgrade
-PRINT N'Molehill Admin 2.0.0 installed.';
+INSERT dbo.InstallHistory (Version) VALUES ('2.0.1');   -- bump with every schema change: Molehill Manager offers the upgrade
+PRINT N'Molehill Admin 2.0.1 installed.';
 GO

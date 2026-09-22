@@ -117,6 +117,7 @@ Running from source (`dotnet run`) needs the .NET 8 SDK and keeps its config nex
 - Days worked shows what each day will be charged, or what it was invoiced at if it has already been billed.
 - Everything logged is the raw entries, including non-billable ones; Enter on one corrects or removes it (once invoiced, void the invoice first).
 - F4 also offers: change the rate, PO, dates or put it on hold; mark it finished (which invoices what's left); cancel it; raise an invoice by hand; run billing for it.
+- **Finished - invoice what is left** starts on the engagement's end date if it has one (change it if the work really stopped another day), otherwise blank = today. The final invoice is dated whatever you give it, so the part-month goes out without waiting for month end.
 
 ## Keys
 

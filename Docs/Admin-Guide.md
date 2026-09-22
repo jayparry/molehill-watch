@@ -187,7 +187,7 @@ Work that isn't Molehill Watch support - a migration, a review, a few days of ad
 | Everything on the go | `EXEC dbo.usp_Engagement_List;` |
 | Change the rate, PO, dates or name | `EXEC dbo.usp_Engagement_Update @Engagement = 'CON-0001', @DayRate = 700;` |
 | Put it on hold | `EXEC dbo.usp_Engagement_Update @Engagement = 'CON-0001', @Status = 'OnHold';` |
-| Finish it (invoices what's left) | `EXEC dbo.usp_Engagement_Complete @Engagement = 'CON-0001';` |
+| Finish it (invoices what's left) | `EXEC dbo.usp_Engagement_Complete @Engagement = 'CON-0001';` - with no date it finishes on the engagement's end date, or today if it hasn't got one |
 | Cancel one that never happened | `EXEC dbo.usp_Engagement_Cancel @Engagement = 'CON-0002', @Reason = N'Client pulled the project';` |
 
 **How days are worked out.** A day is 7.5 hours (`DayHours`) and each day worked rounds up to the nearest half day (`DayRateRounding`: `HalfDay`, `WholeDay` or `Exact`; an engagement can override it). Everything logged on the same date counts together, so 2 hours in the morning and 3 in the afternoon is one day, not two half days. Each day worked becomes one invoice line, with what you did on it.
