@@ -1,7 +1,7 @@
 /*
 ===============================================================================
  Molehill Watch - SQL Server Support Package
- Molehill Admin: contract, ticket, time and billing database     Version 1.4.1
+ Molehill Admin: contract, ticket, time and billing database     Version 1.5.0
  Molehill Data Services  -  jay@jayparry.co.uk  -  molehilldataservices.com
 -------------------------------------------------------------------------------
  Runs on YOUR OWN SQL Server (Express is fine), not on client servers.
@@ -398,6 +398,16 @@ CREATE TABLE dbo.PrepaidUsage (
     WorkedHours    decimal(9,2) NOT NULL,        -- chargeable support time covered
     HoursUsed      decimal(9,2) NOT NULL,        -- pre-paid hours taken (the same)
     CreatedAt      datetime2(0) NOT NULL CONSTRAINT DF_PrepaidUsage_CreatedAt DEFAULT SYSDATETIME());
+
+-- 1.5.0: each ticket has a rate. Time logged on it is charged at that rate unless the time entry says otherwise.
+-- BusinessHours | OutOfHours | ByTimeOfWork (each time entry rated by when the work was done)
+IF COL_LENGTH(N'dbo.Ticket', N'RateType') IS NULL
+BEGIN
+    ALTER TABLE dbo.Ticket ADD RateType varchar(20) NOT NULL CONSTRAINT DF_Ticket_RateType DEFAULT 'BusinessHours'
+        CONSTRAINT CK_Ticket_RateType CHECK (RateType IN ('BusinessHours', 'OutOfHours', 'ByTimeOfWork'));
+    -- tickets from before keep the old behaviour: rated by the time of work (planned out-of-hours work: out of hours)
+    EXEC (N'UPDATE dbo.Ticket SET RateType = CASE WHEN WorkType = ''PlannedOutOfHours'' THEN ''OutOfHours'' ELSE ''ByTimeOfWork'' END;');
+END
 
 IF EXISTS (SELECT 1 FROM sys.check_constraints WHERE name = N'CK_InvoiceLine_Type' AND definition NOT LIKE N'%PrepaidDrawn%')
 BEGIN
@@ -1222,7 +1232,9 @@ CREATE OR ALTER PROCEDURE dbo.usp_Ticket_Open
     @Description  nvarchar(max) = NULL,
     @RaisedAt     datetime2(0)  = NULL,     -- UK time; default now
     @Channel      nvarchar(50)  = N'E-mail',
-    @WorkType     varchar(20)   = 'Support' -- Support | PlannedOutOfHours | Project
+    @WorkType     varchar(20)   = 'Support', -- Support | PlannedOutOfHours | Project
+    @RateType     varchar(20)   = NULL       -- BusinessHours | OutOfHours | ByTimeOfWork; default: out of hours for planned
+                                             -- out-of-hours work, otherwise business hours
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -1257,9 +1269,15 @@ BEGIN
     IF @a_Start > CAST(@RaisedAt AS date) PRINT N'WARNING: this agreement does not start until ' + CONVERT(nvarchar(11), @a_Start, 106) + N'.';
     IF @a_Paused IS NOT NULL PRINT N'WARNING: support is paused for late payment (since ' + CONVERT(nvarchar(11), @a_Paused, 106) + N').';
 
-    INSERT dbo.Ticket (AgreementId, InstanceId, ContactId, Severity, WorkType, Title, Description, Channel, RaisedAt, ResponseDueAt, Status)
+    SET @RateType = ISNULL(@RateType, CASE WHEN @WorkType = 'PlannedOutOfHours' THEN 'OutOfHours' ELSE 'BusinessHours' END);
+    IF @RateType NOT IN ('BusinessHours', 'OutOfHours', 'ByTimeOfWork')
+    BEGIN RAISERROR(N'@RateType must be BusinessHours, OutOfHours or ByTimeOfWork.', 16, 1); RETURN; END
+
+    INSERT dbo.Ticket (AgreementId, InstanceId, ContactId, Severity, WorkType, Title, Description, Channel, RaisedAt, ResponseDueAt, Status, RateType)
     VALUES (@AgreementId, @InstanceId, @ContactId, @Severity, @WorkType, @Title, @Description, @Channel, @RaisedAt,
-            dbo.fn_ResponseDue(@RaisedAt, @Severity), 'Open');
+            dbo.fn_ResponseDue(@RaisedAt, @Severity), 'Open', @RateType);
+    IF @RateType = 'OutOfHours' PRINT N'Time on this ticket is charged at the out-of-hours rate.';
+    ELSE IF @RateType = 'ByTimeOfWork' PRINT N'Time on this ticket is charged by when the work is done (out of hours outside Mon-Fri 09:00-17:30).';
     DECLARE @TicketId int = SCOPE_IDENTITY();
 
     IF dbo.fn_IsBusinessHours(@RaisedAt) = 0 AND @Severity = 'Critical'
@@ -1320,13 +1338,17 @@ CREATE OR ALTER PROCEDURE dbo.usp_Time_Log
 AS
 BEGIN
     SET NOCOUNT ON;
-    DECLARE @TicketId int, @AgreementId int, @WorkType varchar(20), @EstApproved datetime2(0), @EstHours decimal(6,2);
-    SELECT @TicketId = TicketId, @AgreementId = AgreementId, @WorkType = WorkType, @EstApproved = EstimateApprovedAt, @EstHours = EstimateHours
+    DECLARE @TicketId int, @AgreementId int, @WorkType varchar(20), @EstApproved datetime2(0), @EstHours decimal(6,2), @TicketRate varchar(20);
+    SELECT @TicketId = TicketId, @AgreementId = AgreementId, @WorkType = WorkType, @EstApproved = EstimateApprovedAt, @EstHours = EstimateHours, @TicketRate = RateType
     FROM dbo.Ticket WHERE TicketRef = @TicketRef;
     IF @TicketId IS NULL BEGIN RAISERROR(N'Ticket %s not found.', 16, 1, @TicketRef); RETURN; END
 
     SET @WorkStart = ISNULL(@WorkStart, DATEADD(minute, -@Minutes, dbo.fn_UkNow()));
-    SET @RateType = ISNULL(@RateType, CASE WHEN @WorkType = 'PlannedOutOfHours' OR dbo.fn_IsBusinessHours(@WorkStart) = 0 THEN 'OutOfHours' ELSE 'BusinessHours' END);
+    -- the entry's own rate if given, else the ticket's; "by time of work" decides from when the work was done
+    SET @RateType = ISNULL(@RateType, CASE WHEN @TicketRate <> 'ByTimeOfWork' THEN @TicketRate
+                                           WHEN @WorkType = 'PlannedOutOfHours' OR dbo.fn_IsBusinessHours(@WorkStart) = 0 THEN 'OutOfHours'
+                                           ELSE 'BusinessHours' END);
+    IF @RateType NOT IN ('BusinessHours', 'OutOfHours') BEGIN RAISERROR(N'@RateType must be BusinessHours or OutOfHours.', 16, 1); RETURN; END
 
     INSERT dbo.TimeEntry (TicketId, WorkStart, Minutes, RateType, Description, IsBillable)
     VALUES (@TicketId, @WorkStart, @Minutes, @RateType, @Description, @IsBillable);
@@ -1343,10 +1365,43 @@ BEGIN
     IF @RateType = 'OutOfHours' AND @WorkType <> 'PlannedOutOfHours'
     BEGIN
         DECLARE @OohRate nvarchar(20) = (SELECT CONVERT(nvarchar(20), OutOfHoursRate) FROM dbo.PriceList WHERE PriceListId = dbo.fn_PriceListIdOn(@AgreementId, CAST(@WorkStart AS date)));
-        PRINT N'Logged as OUT OF HOURS (GBP ' + ISNULL(@OohRate, N'?') + N'/h). Pass @RateType = ''BusinessHours'' if that is wrong.';
+        PRINT N'Logged as OUT OF HOURS (GBP ' + ISNULL(@OohRate, N'?') + N'/h). Pass @RateType = ''BusinessHours'' if that is wrong, or change the ticket''s rate (usp_Ticket_SetRate).';
     END
 
     EXEC dbo.usp_Agreement_Usage @Client = NULL, @AgreementId = @AgreementId, @AsOfDate = @WorkStart;
+END
+GO
+
+-- Change a ticket's rate; by default its time not yet invoiced is re-rated too.
+CREATE OR ALTER PROCEDURE dbo.usp_Ticket_SetRate
+    @TicketRef       varchar(20),
+    @RateType        varchar(20),               -- BusinessHours | OutOfHours | ByTimeOfWork
+    @ApplyToUnbilled bit = 1
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @TicketId int, @WorkType varchar(20);
+    SELECT @TicketId = TicketId, @WorkType = WorkType FROM dbo.Ticket WHERE TicketRef = @TicketRef;
+    IF @TicketId IS NULL BEGIN RAISERROR(N'Ticket %s not found.', 16, 1, @TicketRef); RETURN; END
+    IF @RateType NOT IN ('BusinessHours', 'OutOfHours', 'ByTimeOfWork')
+    BEGIN RAISERROR(N'@RateType must be BusinessHours, OutOfHours or ByTimeOfWork.', 16, 1); RETURN; END
+
+    UPDATE dbo.Ticket SET RateType = @RateType WHERE TicketId = @TicketId;
+    DECLARE @Changed int = 0, @Invoiced int;
+    IF @ApplyToUnbilled = 1
+    BEGIN
+        UPDATE dbo.TimeEntry
+        SET RateType = CASE WHEN @RateType <> 'ByTimeOfWork' THEN @RateType
+                            WHEN @WorkType = 'PlannedOutOfHours' OR dbo.fn_IsBusinessHours(WorkStart) = 0 THEN 'OutOfHours' ELSE 'BusinessHours' END
+        WHERE TicketId = @TicketId AND InvoiceId IS NULL;
+        SET @Changed = @@ROWCOUNT;
+    END
+    SET @Invoiced = (SELECT COUNT(*) FROM dbo.TimeEntry WHERE TicketId = @TicketId AND InvoiceId IS NOT NULL);
+    PRINT @TicketRef + N' is now charged ' + CASE @RateType WHEN 'BusinessHours' THEN N'at the business-hours rate'
+                                                             WHEN 'OutOfHours' THEN N'at the out-of-hours rate'
+                                                             ELSE N'by when the work is done' END + N'.'
+        + CASE WHEN @ApplyToUnbilled = 1 THEN N' ' + CONVERT(nvarchar(10), @Changed) + N' time entr' + CASE WHEN @Changed = 1 THEN N'y' ELSE N'ies' END + N' not yet invoiced re-rated.' ELSE N'' END
+        + CASE WHEN @Invoiced > 0 THEN N' ' + CONVERT(nvarchar(10), @Invoiced) + N' already invoiced unchanged (void the invoice to re-bill them).' ELSE N'' END;
 END
 GO
 
@@ -2347,6 +2402,6 @@ BEGIN
 END
 GO
 
-INSERT dbo.InstallHistory (Version) VALUES ('1.4.1');   -- bump with every schema change: Molehill Manager offers the upgrade
-PRINT N'Molehill Admin 1.4.1 installed.';
+INSERT dbo.InstallHistory (Version) VALUES ('1.5.0');   -- bump with every schema change: Molehill Manager offers the upgrade
+PRINT N'Molehill Admin 1.5.0 installed.';
 GO

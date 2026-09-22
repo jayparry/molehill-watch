@@ -53,10 +53,10 @@ public sealed class AgreementWindow
             t.CellActivated += _ => onEnter();
             return t;
         }
-        _instances = Table(InstanceActions);
-        _onboarding = Table(CompleteOnboarding);
-        _contacts = Table(ContactActions);
-        _tickets = Table(TicketAction);
+        _instances = Table(RowActions);
+        _onboarding = Table(RowActions);
+        _contacts = Table(RowActions);
+        _tickets = Table(RowActions);
         _weekly = Table(LogWeekly);
 
         _instTab = new TabView.Tab("Instances", _instances);
@@ -72,7 +72,7 @@ public sealed class AgreementWindow
         _contactTab = new TabView.Tab("Contacts", contactView);
         _ticketTab = new TabView.Tab("Tickets", _tickets);
         _weeklyTab = new TabView.Tab("Weekly reports", _weekly);
-        _prepaid = Table(PrepaidActions);
+        _prepaid = Table(RowActions);
         _prepaidTab = new TabView.Tab("Pre-paid hours", _prepaid);
         _tabs.AddTab(_instTab, true);
         _tabs.AddTab(_onbTab, false);
@@ -81,11 +81,11 @@ public sealed class AgreementWindow
         _tabs.AddTab(_weeklyTab, false);
         _tabs.AddTab(_prepaidTab, false);
 
-        var hint = new Label("Enter on a row: actions for it.  F2 adds (instance, contact, ticket, weekly report, pre-paid hours).  F4: all actions.")
+        var hint = new Label("Enter or F4: actions for the selected row (F4 also has the agreement actions).  F2 adds to this tab.  F5 refreshes.")
             { X = 0, Y = Pos.AnchorEnd(2), Width = Dim.Fill(), ColorScheme = Colors.Menu };
         _dialog.Add(_summary, _tabs, hint);
 
-        actions.Clicked += AllActions;
+        actions.Clicked += ShowActions;
         add.Clicked += Add;
         close.Clicked += () => Application.RequestStop();
         _dialog.KeyPress += e =>
@@ -93,7 +93,7 @@ public sealed class AgreementWindow
             switch (e.KeyEvent.Key)
             {
                 case Key.F2: Add(); e.Handled = true; break;
-                case Key.F4: AllActions(); e.Handled = true; break;
+                case Key.F4: ShowActions(); e.Handled = true; break;
                 case Key.F5: Refresh(); e.Handled = true; break;
             }
         };
@@ -202,52 +202,111 @@ public sealed class AgreementWindow
         else Ui.Form(AdminForms.AddInstance(_db, _ref), Refresh);
     }
 
-    private void InstanceActions()
+    // Every tab's actions come from one list: Enter on a row shows them, F4 shows them plus the agreement-wide ones.
+
+    private (string Title, List<(string Label, Action Run)> Items) ContextActions()
+    {
+        var tab = _tabs.SelectedTab;
+        if (tab == _contactTab) return ContactList();
+        if (tab == _ticketTab) return TicketList();
+        if (tab == _weeklyTab) return ("Weekly reports", new() { ("Log a weekly report sent", LogWeekly) });
+        if (tab == _prepaidTab) return PrepaidList();
+        if (tab == _onbTab) return OnboardingList();
+        return InstanceList();
+    }
+
+    private void RowActions()
+    {
+        var (title, items) = ContextActions();
+        Picker.Actions(title, items.ToArray());
+    }
+
+    /// <summary>F4: what can be done here, then the agreement-wide actions.</summary>
+    private void ShowActions()
+    {
+        var (title, items) = ContextActions();
+        items.Add(("Agreement actions (review, notice, pause, usage, quote, billing) ...", AgreementActions));
+        Picker.Actions(title, items.ToArray());
+    }
+
+    /// <summary>The F4 menu's labels for the tab showing (for the self-test).</summary>
+    internal List<string> ActionLabels(TabView.Tab? tab = null)
+    {
+        if (tab != null) _tabs.SelectedTab = tab;
+        var (title, items) = ContextActions();
+        return items.Select(i => i.Label).Prepend(title).ToList();
+    }
+
+    internal IEnumerable<TabView.Tab> Tabs => _tabs.Tabs;
+
+    private (string, List<(string, Action)>) InstanceList()
     {
         var name = SelectedInstance();
-        if (name == null) { Ui.Form(AdminForms.AddInstance(_db, _ref), Refresh); return; }
-        Picker.Actions(name,
+        var add = ("Add an instance / Azure SQL server or pool", (Action)(() => Ui.Form(AdminForms.AddInstance(_db, _ref), Refresh)));
+        if (name == null) return ("Instances", new() { add });
+        return ($"Instance {name}", new()
+        {
             ("Update versions, database count, monitoring date, notes", () => Ui.Form(AdminForms.UpdateInstance(_db, _ref, name), Refresh)),
             ("Log a weekly report sent", () => Ui.Form(AdminForms.WeeklyReport(_db, _ref, name), Refresh)),
             ("Open a ticket for this instance", () =>
             {
                 var spec = AdminForms.OpenTicket(_db, _ref);
-                var withInstance = new FormSpec
+                Ui.Form(new FormSpec
                 {
                     Title = spec.Title, Intro = spec.Intro, Submit = spec.Submit,
                     Fields = spec.Fields.Select(f => f.Name == "InstanceName" ? Field.Text("InstanceName", f.Label, def: name) : f).ToList()
-                };
-                Ui.Form(withInstance, Refresh);
+                }, Refresh);
             }),
             ("Record unsupported-version risk acceptance", () => Ui.Form(AdminForms.RiskAcceptance(_db, _ref, name), Refresh)),
             ("Remove from cover", () => Ui.Form(AdminForms.RemoveInstance(_db, _ref, name), Refresh)),
-            ("Add another instance", () => Ui.Form(AdminForms.AddInstance(_db, _ref), Refresh)));
+            add
+        });
     }
 
-    private void ContactActions()
+    private (string, List<(string, Action)>) OnboardingList()
     {
+        var code = Grid.Selected(_onboarding, "Code");
+        var list = new List<(string, Action)>();
+        if (code != null) list.Add(($"Mark '{code}' done", CompleteOnboarding));
+        list.Add(("Checklist and version status", () => Ui.Try("Onboarding", () => Output.Show("Onboarding", _db.Proc("dbo.usp_Onboarding_Show", ("@Client", _ref))))));
+        return (code == null ? "Onboarding" : $"Onboarding {code}", list);
+    }
+
+    private (string, List<(string, Action)>) ContactList()
+    {
+        var add = ("Add a contact", (Action)(() => Ui.Form(AdminForms.AddContact(_db, _clientName), Refresh)));
         var idText = Grid.Selected(_contacts, "Id");
-        if (idText == null || !int.TryParse(idText, out var id)) { Ui.Form(AdminForms.AddContact(_db, _clientName), Refresh); return; }
+        if (idText == null || !int.TryParse(idText, out var id)) return ("Contacts", new() { add });
         var name = Grid.Selected(_contacts, "Name") ?? "Contact";
         var current = Grid.Selected(_contacts, "Status") == "Current";
-        var actions = new List<(string, Action)>
+        return ($"Contact {name}", new()
         {
             ("Edit details (name, e-mail, phone, raises tickets / receives invoices)", () => Ui.Form(AdminForms.EditContact(_db, id), Refresh)),
             current ? ("Remove as a contact (kept in history)", () => Ui.Form(AdminForms.RemoveContact(_db, id), Refresh))
                     : ("Add back as a contact", () => Ui.Form(AdminForms.ReaddContact(_db, id), Refresh)),
             ("History (dates as a contact)", () => Ui.Try("History", () =>
                 Output.Text($"{name} - contact history", Output.TextTable(Queries.ContactPeriods(_db, id))))),
-            ("Add another contact", () => Ui.Form(AdminForms.AddContact(_db, _clientName), Refresh))
-        };
-        Picker.Actions(name, actions.ToArray());
+            add
+        });
     }
 
-    private void PrepaidActions()
+    private (string, List<(string, Action)>) TicketList()
     {
+        var open = ("Open a ticket", (Action)(() => Ui.Form(AdminForms.OpenTicket(_db, _ref), Refresh)));
+        var reference = Grid.Selected(_tickets, "Ticket");
+        if (reference == null) return ("Tickets", new() { open });
+        var list = TicketActions.List(_db, reference, Refresh);
+        list.Add(open);
+        return ($"Ticket {reference}", list);
+    }
+
+    private (string, List<(string, Action)>) PrepaidList()
+    {
+        var sell = ("Sell pre-paid hours", (Action)(() => Ui.Form(AdminForms.SellPrepaid(_db, _ref), Refresh)));
         var reference = Grid.Selected(_prepaid, "Ref");
-        if (reference == null) { Ui.Form(AdminForms.SellPrepaid(_db, _ref), Refresh); return; }
+        if (reference == null) return ("Pre-paid hours", new() { sell });
         var state = Grid.Selected(_prepaid, "State");
-        var actions = new List<(string, Action)>
+        var list = new List<(string, Action)>
         {
             ("Where the hours went", () => Ui.Try("Pre-paid hours", () =>
             {
@@ -257,11 +316,11 @@ public sealed class AgreementWindow
         };
         if (state != "Cancelled")
         {
-            actions.Add(("Change expiry", () => Ui.Form(AdminForms.UpdatePrepaid(_db, reference), Refresh)));
-            if (Grid.Selected(_prepaid, "Used") is "0" or null) actions.Add(("Cancel (unused only)", () => Ui.Form(AdminForms.CancelPrepaid(_db, reference), Refresh)));
+            list.Add(("Change expiry", () => Ui.Form(AdminForms.UpdatePrepaid(_db, reference), Refresh)));
+            if (Grid.Selected(_prepaid, "Used") is "0" or null) list.Add(("Cancel (unused only)", () => Ui.Form(AdminForms.CancelPrepaid(_db, reference), Refresh)));
         }
-        actions.Add(("Sell more pre-paid hours", () => Ui.Form(AdminForms.SellPrepaid(_db, _ref), Refresh)));
-        Picker.Actions(reference, actions.ToArray());
+        list.Add(sell);
+        return ($"Pre-paid hours {reference}", list);
     }
 
     private void CompleteOnboarding()
@@ -272,13 +331,6 @@ public sealed class AgreementWindow
         Ui.Form(AdminForms.CompleteOnboarding(_db, _ref, code, description), Refresh);
     }
 
-    private void TicketAction()
-    {
-        var reference = Grid.Selected(_tickets, "Ticket");
-        if (reference == null) { Ui.Form(AdminForms.OpenTicket(_db, _ref), Refresh); return; }
-        TicketActions.Show(_db, reference, Refresh);
-    }
-
     private void LogWeekly()
     {
         var names = Queries.InstanceNames(_db, _ref);
@@ -287,20 +339,14 @@ public sealed class AgreementWindow
         if (name != null) Ui.Form(AdminForms.WeeklyReport(_db, _ref, name), Refresh);
     }
 
-    private void AllActions()
+    private void AgreementActions()
     {
         var paused = Queries.Agreement(_db, _ref)?["SupportPausedFrom"] is not DBNull;
         Picker.Actions($"Agreement {_ref}",
-            ("Add an instance / Azure SQL server or pool", () => Ui.Form(AdminForms.AddInstance(_db, _ref), Refresh)),
-            ("Actions for the selected instance", InstanceActions),
-            ("Add a contact", () => Ui.Form(AdminForms.AddContact(_db, _clientName), Refresh)),
-            ("Edit, remove or add back the selected contact", () => { _tabs.SelectedTab = _contactTab; ContactActions(); }),
-            ("Mark the selected onboarding item done", () => { _tabs.SelectedTab = _onbTab; CompleteOnboarding(); }),
-            ("Open a ticket", () => Ui.Form(AdminForms.OpenTicket(_db, _ref), Refresh)),
-            ("Log a weekly report sent", LogWeekly),
             ("Record the initial review delivered", () => Ui.Form(AdminForms.RecordReview(_db, _ref), Refresh)),
             ("Included hours used this cycle", () => Ui.Try("Usage", () => Output.Show("Usage", _db.Proc("dbo.usp_Agreement_Usage", ("@Client", _ref))))),
             ("Onboarding checklist and version status", () => Ui.Try("Onboarding", () => Output.Show("Onboarding", _db.Proc("dbo.usp_Onboarding_Show", ("@Client", _ref))))),
+            ("Open a ticket", () => Ui.Form(AdminForms.OpenTicket(_db, _ref), Refresh)),
             ("Project quote", () => Ui.Form(AdminForms.AddQuote(_db, _ref), Refresh)),
             ("Sell pre-paid hours", () => Ui.Form(AdminForms.SellPrepaid(_db, _ref), Refresh)),
             ("Notice: preview or record the end date", () => Ui.Form(AdminForms.GiveNotice(_db, _ref), Refresh)),

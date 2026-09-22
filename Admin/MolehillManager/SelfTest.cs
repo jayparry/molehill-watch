@@ -489,7 +489,8 @@ public static class SelfTest
         AdminForms.CompleteOnboarding(db, reference, "REMOTE_ACCESS", "Remote access"), AdminForms.RecordReview(db, reference),
         AdminForms.GiveNotice(db, reference), AdminForms.PauseSupport(db, reference, true), AdminForms.PauseSupport(db, reference, false),
         AdminForms.PriceChange(db), AdminForms.AddQuote(db, reference), AdminForms.OpenTicket(db, reference),
-        AdminForms.RespondTicket(db, ticket), AdminForms.EstimateTicket(db, ticket), AdminForms.LogTime(db, ticket), AdminForms.CloseTicket(db, ticket),
+        AdminForms.RespondTicket(db, ticket), AdminForms.EstimateTicket(db, ticket), AdminForms.LogTime(db, ticket), AdminForms.SetTicketRate(db, ticket),
+        AdminForms.CloseTicket(db, ticket),
         AdminForms.RunBilling(db), AdminForms.AdjustInvoice(db, invoice), AdminForms.SetInvoiceStatus(db, invoice, "Paid"),
         AdminForms.BusinessDetails(db), AdminForms.SellPrepaid(db, reference)
     }).Concat(db.Scalar("SELECT TOP (1) PackageRef FROM dbo.PrepaidPackage;") is string pk
@@ -608,8 +609,25 @@ public static class SelfTest
         Step("log 90 minutes, rate worked out", () => Submit(AdminForms.LogTime(db, ticket), ("Minutes", "90"), ("Description", "Index review"),
             ("WorkStart", raised.AddHours(1).ToString("yyyy-MM-dd HH:mm"))));
         Step("log 30 minutes out of hours, forced rate", () => Submit(AdminForms.LogTime(db, ticket), ("Minutes", "30"), ("Description", "Evening check"),
-            ("WorkStart", raised.Date.AddHours(20).ToString("yyyy-MM-dd HH:mm")), ("RateType", "OutOfHours")));
+            ("WorkStart", raised.Date.AddHours(20).ToString("yyyy-MM-dd HH:mm")), ("RateType", "Out of hours")));
         Step("time recorded", () => Queries.TimeEntries(db, ticket), t => t.Rows.Count == 2 && (string)t.Rows[0]["Rate"] == "BusinessHours" ? null : "wrong entries");
+
+        // the ticket's rate decides, not the clock: a normal ticket worked at 21:00 is still business hours
+        var late = Step("open a normal ticket in the evening", () => Submit(AdminForms.OpenTicket(db, reference), ("Title", "Evening question"),
+            ("RaisedAt", raised.Date.AddHours(21).ToString("yyyy-MM-dd HH:mm"))), r => r.First is { Rows.Count: 1 } ? null : "no ticket");
+        var lateRef = late?.First?.Rows[0]["TicketRef"] as string ?? "MW-?";
+        Step("its rate defaults to business hours", () => Queries.Ticket(db, lateRef)!, r => (string)r["RateType"] == "BusinessHours" ? null : (string)r["RateType"]);
+        Step("time logged late in the day stays business hours", () => Submit(AdminForms.LogTime(db, lateRef), ("Minutes", "20"), ("Description", "Answered"),
+            ("WorkStart", raised.Date.AddHours(21).ToString("yyyy-MM-dd HH:mm")), ("IsBillable", "0")));   // not billable: keeps the billing figures below unchanged
+        Step("recorded at the business-hours rate", () => Queries.TimeEntries(db, lateRef), t => (string)t.Rows[0]["Rate"] == "BusinessHours" ? null : (string)t.Rows[0]["Rate"]);
+        Step("change the ticket to out of hours, re-rating its time", () => Submit(AdminForms.SetTicketRate(db, lateRef), ("RateType", "Out of hours")));
+        Step("its time is now out of hours", () => Queries.TimeEntries(db, lateRef), t => (string)t.Rows[0]["Rate"] == "OutOfHours" ? null : (string)t.Rows[0]["Rate"]);
+        Step("back to business hours", () => Submit(AdminForms.SetTicketRate(db, lateRef), ("RateType", "Business hours")));
+        var planned = Step("planned out-of-hours ticket", () => Submit(AdminForms.OpenTicket(db, reference), ("Title", "Tier change"), ("WorkType", "PlannedOutOfHours"),
+            ("RaisedAt", raised.ToString("yyyy-MM-dd HH:mm"))), r => r.First is { Rows.Count: 1 } ? null : "no ticket");
+        Step("defaults to out of hours", () => Queries.Ticket(db, planned?.First?.Rows[0]["TicketRef"] as string ?? "?")!,
+            r => (string)r["RateType"] == "OutOfHours" ? null : (string)r["RateType"]);
+        Step("close the planned ticket unworked", () => Submit(AdminForms.CloseTicket(db, planned?.First?.Rows[0]["TicketRef"] as string ?? "?"), ("Resolution", "Cancelled"), ("Status", "Closed")));
         Step("close", () => Submit(AdminForms.CloseTicket(db, ticket), ("Resolution", "Added two indexes")));
         Step("ticket detail", () => TicketActions.Describe(db, ticket), s => s.Contains("Added two indexes") && s.Contains("Index review") ? null : "detail incomplete");
         Step("project quote", () => Submit(AdminForms.AddQuote(db, reference), ("Title", "Upgrade to 2022"), ("EstimatedHours", "12"), ("TicketRef", ticket)));
@@ -688,6 +706,34 @@ public static class SelfTest
         {
             Step("main window over the test data", () => { new MainWindow(db).CreateTop(); return 0; });
             Step("agreement window over the test data", () => new AgreementWindow(db, reference).Build());
+
+            // F4 lists what fits the tab and row showing
+            var aw = new AgreementWindow(db, reference);
+            aw.Build();
+            foreach (var tab in aw.Tabs.ToList())
+            {
+                var labels = aw.ActionLabels(tab);
+                var tabName = tab.Text.ToString();
+                var expected = tabName switch
+                {
+                    "Instances" => "Update versions",
+                    "Onboarding" => "Mark '",
+                    "Contacts" => "Edit details",
+                    "Tickets" => "Change rate",
+                    "Weekly reports" => "Log a weekly report",
+                    _ => "Where the hours went"
+                };
+                Check($"agreement F4 on {tabName}: {labels[0]}", labels.Skip(1).Any(l => l.StartsWith(expected))
+                      && !labels.Any(l => l.StartsWith("Pause support") || l.StartsWith("Notice")), string.Join(" | ", labels.Skip(1)));
+            }
+            var mw = new MainWindow(db);
+            mw.CreateTop();
+            var mainExpect = new[] { "Save the dashboard", "Open the agreement", "Change rate", "Mark paid" };
+            for (var i = 0; i < 4; i++)
+            {
+                var labels = mw.ActionLabels(i);
+                Check($"main F4 on tab {i + 1}: {labels[0]}", labels.Skip(1).Any(l => l.StartsWith(mainExpect[i])), string.Join(" | ", labels.Skip(1)));
+            }
             Submit(AdminForms.RemoveContact(db, SamId()), ("Reason", "Toggle test"));
             var win = new AgreementWindow(db, reference);
             win.Build();

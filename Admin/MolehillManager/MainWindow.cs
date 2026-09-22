@@ -63,12 +63,12 @@ public sealed class MainWindow
             new MenuBarItem("_Tickets", new[]
             {
                 new MenuItem("_New ticket...", "", () => Ui.Form(AdminForms.OpenTicket(_db), RefreshAll)),
-                new MenuItem("_Actions on selected ticket...", "", TicketAction)
+                new MenuItem("_Actions on selected ticket...", "", () => { _tabs.SelectedTab = _ticketsTab; ShowActions(); })
             }),
             new MenuBarItem("_Billing", new[]
             {
                 new MenuItem("_Run billing...", "", () => Ui.Form(AdminForms.RunBilling(_db), RefreshAll)),
-                new MenuItem("_Actions on selected invoice...", "", InvoiceAction)
+                new MenuItem("_Actions on selected invoice...", "", () => { _tabs.SelectedTab = _billingTab; ShowActions(); })
             }),
             new MenuBarItem("_Help", new[]
             {
@@ -95,7 +95,7 @@ public sealed class MainWindow
         var statusBar = new StatusBar(new[]
         {
             new StatusItem(Key.F2, "~F2~ New", New),
-            new StatusItem(Key.F3, "~F3~ Open/actions", Open),
+            new StatusItem(Key.F4, "~F4~ Actions", ShowActions),
             new StatusItem(Key.F5, "~F5~ Refresh", RefreshAll),
             new StatusItem(Key.F6, "~F6~ Run billing", () => Ui.Form(AdminForms.RunBilling(_db), RefreshAll)),
             new StatusItem(Key.F1, "~F1~ Keys", Keys),
@@ -157,7 +157,7 @@ public sealed class MainWindow
         var hint = new Label("Enter: respond, log time, estimate, close   F2: new ticket") { X = 30, Y = 0, ColorScheme = Colors.Menu };
         var listFrame = new FrameView("Tickets") { X = 0, Y = 1, Width = Dim.Fill(), Height = Dim.Percent(55) };
         _tickets = Grid.Make();
-        _tickets.CellActivated += _ => TicketAction();
+        _tickets.CellActivated += _ => ShowActions();
         _tickets.SelectedCellChanged += _ => ShowTicketDetail();
         listFrame.Add(_tickets);
         var detailFrame = new FrameView("Ticket") { X = 0, Y = Pos.Bottom(listFrame), Width = Dim.Fill(), Height = Dim.Fill() };
@@ -175,7 +175,7 @@ public sealed class MainWindow
         var hint = new Label("Enter: view/save, mark sent/paid/void, adjust   F6: run billing") { X = 50, Y = 0, ColorScheme = Colors.Menu };
         var listFrame = new FrameView("Invoices") { X = 0, Y = 1, Width = Dim.Fill(), Height = Dim.Percent(55) };
         _invoices = Grid.Make();
-        _invoices.CellActivated += _ => InvoiceAction();
+        _invoices.CellActivated += _ => ShowActions();
         _invoices.SelectedCellChanged += _ => ShowInvoiceDetail();
         listFrame.Add(_invoices);
         var detailFrame = new FrameView("Invoice lines") { X = 0, Y = Pos.Bottom(listFrame), Width = Dim.Fill(), Height = Dim.Fill() };
@@ -270,12 +270,88 @@ public sealed class MainWindow
         else NewClient();
     }
 
-    private void Open()
+    /// <summary>F4: the actions for the tab showing and its selected row.</summary>
+    private (string Title, List<(string Label, Action Run)> Items) ContextActions()
     {
-        if (_tabs.SelectedTab == _ticketsTab) TicketAction();
-        else if (_tabs.SelectedTab == _billingTab) InvoiceAction();
-        else if (_tabs.SelectedTab == _dashTab) ShowAlert();
-        else OpenAgreement();
+        if (_tabs.SelectedTab == _ticketsTab)
+        {
+            var newTicket = ("New ticket", (Action)(() => Ui.Form(AdminForms.OpenTicket(_db), RefreshAll)));
+            var reference = Grid.Selected(_tickets, "Ticket");
+            if (reference == null) return ("Tickets", new() { newTicket });
+            var list = TicketActions.List(_db, reference, RefreshAll);
+            list.Add(newTicket);
+            return ($"Ticket {reference}", list);
+        }
+        if (_tabs.SelectedTab == _billingTab)
+        {
+            var run = ("Run billing", (Action)(() => Ui.Form(AdminForms.RunBilling(_db), RefreshAll)));
+            var no = Grid.Selected(_invoices, "Invoice");
+            if (no == null) return ("Billing", new() { run });
+            return ($"Invoice {no}", new()
+            {
+                ("Save as HTML (and open)", () => Ui.Try("Invoice", () => Ui.Saved("Invoice", AdminForms.SaveInvoiceHtml(_db, no, AdminForms.OutputFolder)))),
+                ("Mark sent", () => Ui.Form(AdminForms.SetInvoiceStatus(_db, no, "Sent"), RefreshAll)),
+                ("Mark paid", () => Ui.Form(AdminForms.SetInvoiceStatus(_db, no, "Paid"), RefreshAll)),
+                ("Add an adjustment or credit (draft only)", () => Ui.Form(AdminForms.AdjustInvoice(_db, no), RefreshAll)),
+                ("Void", () =>
+                {
+                    if (MessageBox.Query("Void", $"Void {no}? Any time it billed becomes billable again.", "Void", "Cancel") == 0)
+                        Ui.Form(AdminForms.SetInvoiceStatus(_db, no, "Void"), RefreshAll);
+                }),
+                run
+            });
+        }
+        if (_tabs.SelectedTab == _dashTab)
+        {
+            var list = new List<(string, Action)>();
+            var row = Grid.SelectedRow(_alerts);
+            if (row != null)
+            {
+                list.Add(("Show the whole alert", ShowAlert));
+                var client = row.Table.Columns.Contains("Client") ? row["Client"] as string : null;
+                var reference = string.IsNullOrEmpty(client) ? null
+                    : _db.Scalar("""
+                        SELECT TOP (1) a.AgreementRef FROM dbo.Agreement a JOIN dbo.Client c ON c.ClientId = a.ClientId
+                        WHERE c.ClientName = @c ORDER BY CASE WHEN a.EndDate IS NULL THEN 0 ELSE 1 END, a.StartDate DESC;
+                        """, ("@c", client)) as string;
+                if (reference != null) list.Add(($"Open {client}'s agreement ({reference})", () => { new AgreementWindow(_db, reference).Run(); RefreshAll(); }));
+            }
+            list.Add(("Save the dashboard as HTML", () => Ui.Try("Dashboard", () => Ui.Saved("Dashboard", AdminForms.SaveDashboardHtml(_db, AdminForms.OutputFolder)))));
+            return ("Dashboard", list);
+        }
+        // Clients
+        var newClient = ("New client", (Action)NewClient);
+        var agreement = Grid.Selected(_agreements, "Ref");
+        if (agreement == null) return ("Clients", new() { newClient });
+        var name = Grid.Selected(_agreements, "Client");
+        return ($"{name} ({agreement})", new()
+        {
+            ("Open the agreement (instances, contacts, onboarding, pre-paid hours...)", OpenAgreement),
+            ("Open a ticket", () => Ui.Form(AdminForms.OpenTicket(_db, agreement), RefreshAll)),
+            ("Sell pre-paid hours", () => Ui.Form(AdminForms.SellPrepaid(_db, agreement), RefreshAll)),
+            ("Run billing for this agreement", () => Ui.Try("Billing", () =>
+            {
+                var r = _db.Proc("dbo.usp_Billing_Run", ("@Client", agreement));
+                if (r.First is { Rows.Count: 0 }) r.Messages.Add("Nothing new to invoice.");
+                Output.Show("Billing", r);
+                RefreshAll();
+            })),
+            newClient
+        });
+    }
+
+    private void ShowActions()
+    {
+        var (title, items) = ContextActions();
+        Picker.Actions(title, items.ToArray());
+    }
+
+    /// <summary>The F4 menu's labels for a tab (for the self-test).</summary>
+    internal List<string> ActionLabels(int tabIndex)
+    {
+        _tabs.SelectedTab = _tabs.Tabs.ElementAt(tabIndex);
+        var (title, items) = ContextActions();
+        return items.Select(i => i.Label).Prepend(title).ToList();
     }
 
     private void NewClient()
@@ -299,29 +375,6 @@ public sealed class MainWindow
         RefreshAll();
     }
 
-    private void TicketAction()
-    {
-        var reference = Grid.Selected(_tickets, "Ticket");
-        if (reference == null) { Ui.Form(AdminForms.OpenTicket(_db), RefreshAll); return; }
-        TicketActions.Show(_db, reference, RefreshAll);
-    }
-
-    private void InvoiceAction()
-    {
-        var no = Grid.Selected(_invoices, "Invoice");
-        if (no == null) return;
-        Picker.Actions($"Invoice {no}",
-            ("Save as HTML (and open)", () => Ui.Try("Invoice", () => Ui.Saved("Invoice", AdminForms.SaveInvoiceHtml(_db, no, AdminForms.OutputFolder)))),
-            ("Mark sent", () => Ui.Form(AdminForms.SetInvoiceStatus(_db, no, "Sent"), RefreshAll)),
-            ("Mark paid", () => Ui.Form(AdminForms.SetInvoiceStatus(_db, no, "Paid"), RefreshAll)),
-            ("Add an adjustment or credit (draft only)", () => Ui.Form(AdminForms.AdjustInvoice(_db, no), RefreshAll)),
-            ("Void", () =>
-            {
-                if (MessageBox.Query("Void", $"Void {no}? Any time it billed becomes billable again.", "Void", "Cancel") == 0)
-                    Ui.Form(AdminForms.SetInvoiceStatus(_db, no, "Void"), RefreshAll);
-            }));
-    }
-
     private void Reconnect()
     {
         var db = _reconnect?.Invoke();
@@ -332,8 +385,13 @@ public sealed class MainWindow
 
     private static void Keys() => MessageBox.Query("Keys", """
         F2   New: client, ticket or billing run (by tab)
-        F3   Open / actions for the selected row (Enter too)
+        F4   Actions for the selected row on this tab
+             (Enter too; on Clients, Enter opens the agreement)
         F5   Refresh everything
+
+        In an agreement: F2 adds to the tab showing, F4 lists
+        the actions for the selected row plus the agreement
+        actions (review, notice, pause, usage, billing).
         F6   Run billing
         Ctrl+Q  Quit
 

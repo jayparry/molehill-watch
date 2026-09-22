@@ -114,7 +114,7 @@ Running from source (`dotnet run`) needs the .NET 8 SDK and keeps its config nex
 | Key | Action |
 |---|---|
 | F2 | New client, ticket or billing run, depending on the tab |
-| F3 / Enter | Open, or actions for the selected row |
+| F4 / Enter | Actions for the selected row on this tab (on Clients, Enter opens the agreement). In an agreement, F4 also offers the agreement actions. |
 | F5 | Refresh |
 | F6 | Run billing |
 | Ctrl+Q | Quit |

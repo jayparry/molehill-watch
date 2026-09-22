@@ -73,13 +73,17 @@ public static class Ui
 /// <summary>The actions on a ticket, shared by the Tickets tab and the agreement window.</summary>
 public static class TicketActions
 {
-    public static void Show(AdminDb db, string ticketRef, Action refresh) =>
-        Picker.Actions($"Ticket {ticketRef}",
-            ("Details and time logged", () => Ui.Try("Ticket", () => Details(db, ticketRef))),
-            ("Record first response", () => Ui.Form(AdminForms.RespondTicket(db, ticketRef), refresh)),
-            ("Log time", () => Ui.Form(AdminForms.LogTime(db, ticketRef), refresh)),
-            ("Estimate / client approval", () => Ui.Form(AdminForms.EstimateTicket(db, ticketRef), refresh)),
-            ("Resolve or close", () => Ui.Form(AdminForms.CloseTicket(db, ticketRef), refresh)));
+    public static List<(string Label, Action Run)> List(AdminDb db, string ticketRef, Action refresh) => new()
+    {
+        ("Details and time logged", () => Ui.Try("Ticket", () => Details(db, ticketRef))),
+        ("Record first response", () => Ui.Form(AdminForms.RespondTicket(db, ticketRef), refresh)),
+        ("Log time", () => Ui.Try("Log time", () => Ui.Form(AdminForms.LogTime(db, ticketRef), refresh))),
+        ("Change rate (business hours / out of hours)", () => Ui.Try("Rate", () => Ui.Form(AdminForms.SetTicketRate(db, ticketRef), refresh))),
+        ("Estimate / client approval", () => Ui.Form(AdminForms.EstimateTicket(db, ticketRef), refresh)),
+        ("Resolve or close", () => Ui.Form(AdminForms.CloseTicket(db, ticketRef), refresh))
+    };
+
+    public static void Show(AdminDb db, string ticketRef, Action refresh) => Picker.Actions($"Ticket {ticketRef}", List(db, ticketRef, refresh).ToArray());
 
     public static string Describe(AdminDb db, string ticketRef)
     {
@@ -87,7 +91,8 @@ public static class TicketActions
         if (t == null) return $"{ticketRef} not found.";
         var sb = new StringBuilder();
         sb.AppendLine($"{t["TicketRef"]}  {t["Title"]}");
-        sb.AppendLine($"{t["ClientName"]} ({t["AgreementRef"]})   {t["Severity"]} {t["WorkType"]}   Status: {t["Status"]}");
+        sb.AppendLine($"{t["ClientName"]} ({t["AgreementRef"]})   {t["Severity"]} {t["WorkType"]}   Status: {t["Status"]}   "
+                      + $"Charged: {AdminForms.RateLabel(t["RateType"] as string).ToLowerInvariant()}");
         if (t["InstanceName"] is string inst) sb.AppendLine($"Instance: {inst}");
         if (t["Contact"] is string contact) sb.AppendLine($"Raised by: {contact} via {t["Channel"]}");
         sb.AppendLine($"Raised {Output.Format(t["RaisedAt"])}   response due {Output.Format(t["ResponseDueAt"])}   " +

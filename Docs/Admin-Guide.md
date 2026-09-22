@@ -123,7 +123,11 @@ In **Molehill Manager**: open the agreement and go to the **Contacts** tab. Remo
 | Included hours this cycle | `EXEC dbo.usp_Agreement_Usage @Client = N'Contoso Ltd';` |
 
 * **Severity.** `Critical` covers server down, backups failing or severe blocking, and is due by end of the same business day. `Standard` is due by end of the next full business day.
-* **Rate type.** It's chosen from `@WorkStart`: Mon–Fri 09:00–17:30 outside bank holidays is `BusinessHours`, anything else is `OutOfHours`. Override with `@RateType`.
+* **Rate.** Each ticket has a rate, and its time is charged at that rate. Set it with `usp_Ticket_Open @RateType`:
+  * The default is `BusinessHours`, or `OutOfHours` for planned out-of-hours work.
+  * `ByTimeOfWork` rates each time entry by when the work was done (Mon–Fri 09:00–17:30 outside bank holidays is business hours).
+  * A single time entry can override it with `usp_Time_Log @RateType`.
+  * `EXEC dbo.usp_Ticket_SetRate @TicketRef = 'MW-00012', @RateType = 'OutOfHours';` changes a ticket's rate and re-rates its time not yet invoiced.
 * **Planned out-of-hours work** (patching, releases, and for Azure: service tier changes, migrations and failover tests): open the ticket with `@WorkType = 'PlannedOutOfHours'`.
 * **Non-billable time** (e.g. your own mistake): `@IsBillable = 0`.
 * **Project work** (health checks, upgrades, migrations): open with `@WorkType = 'Project'`, then `EXEC dbo.usp_Quote_Add ...`. Project time is never billed through the support invoices.

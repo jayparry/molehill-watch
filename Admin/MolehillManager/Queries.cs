@@ -169,7 +169,8 @@ public static class Queries
         """, ("@Ref", agreementRef));
 
     public static DataTable Tickets(AdminDb db, bool openOnly, string? agreementRef = null) => db.Query("""
-        SELECT TOP (500) t.TicketRef AS Ticket, c.ClientName AS Client, t.Severity, t.Status, t.WorkType AS Type, t.Title,
+        SELECT TOP (500) t.TicketRef AS Ticket, c.ClientName AS Client, t.Severity, t.Status, t.WorkType AS Type,
+               CASE t.RateType WHEN 'BusinessHours' THEN 'Business' WHEN 'OutOfHours' THEN 'Out of hours' ELSE 'By time' END AS Rate, t.Title,
                i.InstanceName AS Instance, t.RaisedAt AS Raised, t.ResponseDueAt AS ResponseDue, t.FirstResponseAt AS Responded,
                CAST(ISNULL((SELECT SUM(Minutes) FROM dbo.TimeEntry e WHERE e.TicketId = t.TicketId), 0) / 60.0 AS decimal(6,2)) AS Hours,
                t.EstimateHours AS Estimate, CASE WHEN t.EstimateApprovedAt IS NOT NULL THEN 'Yes' END AS Approved
@@ -183,7 +184,7 @@ public static class Queries
     public static DataRow? Ticket(AdminDb db, string ticketRef)
     {
         var t = db.Query("""
-            SELECT t.TicketRef, a.AgreementRef, c.ClientName, t.Title, t.Severity, t.WorkType, t.Status, i.InstanceName,
+            SELECT t.TicketRef, a.AgreementRef, c.ClientName, t.Title, t.Severity, t.WorkType, t.RateType, t.Status, i.InstanceName,
                    ct.FullName AS Contact, t.Channel, t.RaisedAt, t.ResponseDueAt, t.FirstResponseAt,
                    t.EstimateHours, t.EstimateSentAt, t.EstimateApprovedAt, t.ResolvedAt, t.Description, t.Resolution
             FROM dbo.Ticket t JOIN dbo.Agreement a ON a.AgreementId = t.AgreementId JOIN dbo.Client c ON c.ClientId = a.ClientId

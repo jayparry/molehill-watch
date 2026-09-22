@@ -14,6 +14,20 @@ public static class AdminForms
     public static readonly string[] Severities = { "Standard", "Critical" };
     public static readonly string[] WorkTypes = { "Support", "PlannedOutOfHours", "Project" };
     private const string Auto = "(automatic)";
+
+    // ticket rate choices shown in forms, and the value the database stores
+    public static readonly (string Label, string? Value)[] TicketRates =
+    {
+        ("Standard for the work type", null),              // business hours; out of hours for planned out-of-hours work
+        ("Business hours", "BusinessHours"),
+        ("Out of hours", "OutOfHours"),
+        ("By time of work", "ByTimeOfWork")
+    };
+    private static string? RateValue(string label) => TicketRates.FirstOrDefault(r => r.Label == label).Value;
+    public static string RateLabel(string? value) => value switch
+    {
+        "BusinessHours" => "Business hours", "OutOfHours" => "Out of hours", "ByTimeOfWork" => "By time of work", _ => value ?? ""
+    };
     private const string AllClients = "(all clients)";
     private const string LatestStandard = "(latest standard price list)";
 
@@ -486,7 +500,8 @@ public static class AdminForms
                 Field.Choice("Client", "Client", choices.ToArray(), def),
                 Field.Text("Title", "Title", required: true),
                 Field.Choice("Severity", "Severity", Severities),
-                Field.Choice("WorkType", "Work type", WorkTypes, help: "planned out-of-hours: tier changes, failover tests"),
+                Field.Choice("WorkType", "Work type", WorkTypes, help: "e.g. planned: tier change, failover test"),
+                Field.Choice("RateType", "Rate", TicketRates.Select(r => r.Label).ToArray(), help: "out of hours only if planned"),
                 Field.Text("InstanceName", "Instance", help: "optional"),
                 Field.Text("ContactName", "Raised by", help: "named contact"),
                 Field.DateTime("RaisedAt", "Raised at", help: "blank = now (UK)"),
@@ -496,7 +511,7 @@ public static class AdminForms
             Submit = v => db.Proc("dbo.usp_Ticket_Open", ("@Client", Queries.RefFromChoice(v["Client"])), ("@Title", v.Str("Title")),
                 ("@Severity", v.Str("Severity")), ("@InstanceName", v.Str("InstanceName")), ("@ContactName", v.Str("ContactName")),
                 ("@Description", v.Str("Description")), ("@RaisedAt", v.DateTime("RaisedAt")), ("@Channel", v.Str("Channel")),
-                ("@WorkType", v.Str("WorkType")))
+                ("@WorkType", v.Str("WorkType")), ("@RateType", RateValue(v["RateType"])))
         };
     }
 
@@ -524,21 +539,44 @@ public static class AdminForms
         Submit = v => db.Proc("dbo.usp_Ticket_Estimate", ("@TicketRef", ticketRef), ("@EstimateHours", v.Dec("EstimateHours")), ("@Approved", v.Bool("Approved")))
     };
 
-    public static FormSpec LogTime(AdminDb db, string ticketRef) => new()
+    public static FormSpec LogTime(AdminDb db, string ticketRef)
     {
-        Title = $"Log time - {ticketRef}",
-        Fields =
+        var ticketRate = db.Scalar("SELECT RateType FROM dbo.Ticket WHERE TicketRef = @r;", ("@r", ticketRef)) as string;
+        var ticketChoice = $"Ticket's rate ({RateLabel(ticketRate).ToLowerInvariant()})";
+        return new FormSpec
         {
-            Field.Int("Minutes", "Minutes", required: true),
-            Field.Text("Description", "Work done", required: true),
-            Field.DateTime("WorkStart", "Started at", help: "blank = now minus the minutes"),
-            Field.Choice("RateType", "Rate", new[] { Auto, "BusinessHours", "OutOfHours" }, help: "automatic = from the start time"),
-            Field.Bool("IsBillable", "Billable", def: true)
-        },
-        Submit = v => db.Proc("dbo.usp_Time_Log", ("@TicketRef", ticketRef), ("@Minutes", v.Int("Minutes")), ("@Description", v.Str("Description")),
-            ("@WorkStart", v.DateTime("WorkStart")), ("@RateType", v["RateType"] == Auto ? null : v.Str("RateType")),
-            ("@IsBillable", v.Bool("IsBillable")))
-    };
+            Title = $"Log time - {ticketRef}",
+            Fields =
+            {
+                Field.Int("Minutes", "Minutes", required: true),
+                Field.Text("Description", "Work done", required: true),
+                Field.DateTime("WorkStart", "Started at", help: "blank = now minus the minutes"),
+                Field.Choice("RateType", "Rate", new[] { ticketChoice, "Business hours", "Out of hours" }, help: "this entry only"),
+                Field.Bool("IsBillable", "Billable", def: true)
+            },
+            Submit = v => db.Proc("dbo.usp_Time_Log", ("@TicketRef", ticketRef), ("@Minutes", v.Int("Minutes")), ("@Description", v.Str("Description")),
+                ("@WorkStart", v.DateTime("WorkStart")), ("@RateType", v["RateType"] == ticketChoice ? null : RateValue(v["RateType"])),
+                ("@IsBillable", v.Bool("IsBillable")))
+        };
+    }
+
+    /// <summary>Change the rate a ticket's time is charged at (business hours, out of hours or by time of work).</summary>
+    public static FormSpec SetTicketRate(AdminDb db, string ticketRef)
+    {
+        var current = db.Scalar("SELECT RateType FROM dbo.Ticket WHERE TicketRef = @r;", ("@r", ticketRef)) as string;
+        return new FormSpec
+        {
+            Title = $"Change rate - {ticketRef}",
+            Intro = $"Currently: {RateLabel(current).ToLowerInvariant()}. Time already invoiced is never changed (void the invoice to re-bill it).",
+            Fields =
+            {
+                Field.Choice("RateType", "Charge at", TicketRates.Skip(1).Select(r => r.Label).ToArray(), def: RateLabel(current)),
+                Field.Bool("ApplyToUnbilled", "Re-rate time not yet invoiced", def: true)
+            },
+            Submit = v => db.Proc("dbo.usp_Ticket_SetRate", ("@TicketRef", ticketRef), ("@RateType", RateValue(v["RateType"])),
+                ("@ApplyToUnbilled", v.Bool("ApplyToUnbilled")))
+        };
+    }
 
     public static FormSpec CloseTicket(AdminDb db, string ticketRef) => new()
     {
