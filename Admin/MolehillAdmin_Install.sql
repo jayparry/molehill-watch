@@ -1,11 +1,19 @@
 /*
 ===============================================================================
  Molehill Watch - SQL Server Support Package
- Molehill Admin: contract, ticket, time and billing database     Version 1.6.0
+ Molehill Admin: clients, engagements, tickets, time and billing  Version 2.0.0
  Molehill Data Services  -  jay@jayparry.co.uk  -  molehilldataservices.com
 -------------------------------------------------------------------------------
  Runs on YOUR OWN SQL Server (Express is fine), not on client servers.
  Requires SQL Server 2017 or later.
+
+ Everything the business invoices hangs off an ENGAGEMENT:
+   * Monitoring  - a Molehill Watch support agreement, billed on its own cycle
+                   (fees in advance, support in arrears) as set out below
+   * Consultancy - project or advisory work for a client, billed at an agreed
+                   day rate (or hourly, or a fixed price) monthly in arrears
+ A client can have any number of both. Each engagement is invoiced separately;
+ free-text invoices cover anything that fits neither.
 
  Implements the commercial terms of the Molehill Watch agreement:
    * pricing: GBP 450 1st/2nd server, GBP 375 3rd+, GBP 225 AG/standby secondaries,
@@ -105,6 +113,36 @@ CREATE TABLE dbo.Contact (
     IsNamedContact   bit           NOT NULL CONSTRAINT DF_Contact_Named DEFAULT 0,   -- raises tickets (named point of contact)
     IsBillingContact bit           NOT NULL CONSTRAINT DF_Contact_Billing DEFAULT 0, -- receives invoices (the only billing setting)
     IsActive         bit           NOT NULL CONSTRAINT DF_Contact_Active DEFAULT 1);
+
+-- 2.0.0: an engagement is anything the business bills a client for. A Molehill Watch
+-- support agreement is one kind (details in dbo.Agreement); consultancy work is another.
+IF OBJECT_ID(N'dbo.Engagement') IS NULL
+CREATE TABLE dbo.Engagement (
+    EngagementId   int IDENTITY(1,1) CONSTRAINT PK_Engagement PRIMARY KEY,
+    EngagementRef  varchar(30)   NOT NULL CONSTRAINT UQ_Engagement_Ref UNIQUE,
+    ClientId       int           NOT NULL CONSTRAINT FK_Engagement_Client REFERENCES dbo.Client (ClientId),
+    EngagementType varchar(20)   NOT NULL CONSTRAINT CK_Engagement_Type CHECK (EngagementType IN ('Monitoring', 'Consultancy')),
+    Name           nvarchar(200) NOT NULL,
+    BillingMode    varchar(20)   NOT NULL CONSTRAINT CK_Engagement_Mode
+                   CHECK (BillingMode IN ('AgreementCycle', 'DayRate', 'Hourly', 'FixedPrice')),
+    DayRate        decimal(9,2)  NULL,          -- DayRate mode: agreed rate for a full day
+    HourlyRate     decimal(9,2)  NULL,          -- Hourly mode
+    OutOfHoursRate decimal(9,2)  NULL,          -- optional: hourly rate for out-of-hours consultancy
+    FixedPrice     decimal(10,2) NULL,          -- FixedPrice mode: invoiced when the work is marked complete
+    DayRounding    varchar(10)   NULL CONSTRAINT CK_Engagement_Rounding CHECK (DayRounding IN ('HalfDay', 'WholeDay', 'Exact')),
+    PurchaseOrder  nvarchar(100) NULL,          -- client PO number, printed on the invoice
+    Status         varchar(15)   NOT NULL CONSTRAINT DF_Engagement_Status DEFAULT 'Active'
+                   CONSTRAINT CK_Engagement_Status CHECK (Status IN ('Active', 'OnHold', 'Completed', 'Cancelled')),
+    StartDate      date          NULL,
+    EndDate        date          NULL,
+    CompletedOn    date          NULL,
+    Notes          nvarchar(max) NULL,
+    CreatedAt      datetime2(0)  NOT NULL CONSTRAINT DF_Engagement_CreatedAt DEFAULT SYSDATETIME(),
+    CONSTRAINT CK_Engagement_Rates CHECK (
+        (BillingMode = 'DayRate'    AND DayRate    IS NOT NULL) OR
+        (BillingMode = 'Hourly'     AND HourlyRate IS NOT NULL) OR
+        (BillingMode = 'FixedPrice' AND FixedPrice IS NOT NULL) OR
+         BillingMode = 'AgreementCycle'));
 
 IF OBJECT_ID(N'dbo.Agreement') IS NULL
 CREATE TABLE dbo.Agreement (
@@ -276,7 +314,8 @@ IF OBJECT_ID(N'dbo.Invoice') IS NULL
 CREATE TABLE dbo.Invoice (
     InvoiceId   int IDENTITY(1,1) CONSTRAINT PK_Invoice PRIMARY KEY,
     InvoiceNo   varchar(30)   NOT NULL CONSTRAINT UQ_Invoice_No UNIQUE,
-    AgreementId int           NOT NULL CONSTRAINT FK_Invoice_Agreement REFERENCES dbo.Agreement (AgreementId),
+    ClientId    int           NOT NULL CONSTRAINT FK_Invoice_Client REFERENCES dbo.Client (ClientId),
+    EngagementId int          NULL CONSTRAINT FK_Invoice_Engagement REFERENCES dbo.Engagement (EngagementId),  -- NULL = a free-text invoice for the client
     InvoiceDate date          NOT NULL,
     DueDate     date          NOT NULL,
     SubTotal    decimal(10,2) NOT NULL CONSTRAINT DF_Invoice_SubTotal DEFAULT 0,
@@ -308,8 +347,9 @@ IF OBJECT_ID(N'dbo.InvoiceLine') IS NULL
 CREATE TABLE dbo.InvoiceLine (
     InvoiceLineId  int IDENTITY(1,1) CONSTRAINT PK_InvoiceLine PRIMARY KEY,
     InvoiceId      int           NOT NULL CONSTRAINT FK_InvoiceLine_Invoice REFERENCES dbo.Invoice (InvoiceId),
-    LineType       varchar(20)   NOT NULL CONSTRAINT CK_InvoiceLine_Type CHECK (LineType IN ('MonthlyFee', 'BusinessHours', 'OutOfHours', 'Project', 'Adjustment', 'Info', 'PrepaidPurchase', 'PrepaidDrawn')),
+    LineType       varchar(20)   NOT NULL CONSTRAINT CK_InvoiceLine_Type CHECK (LineType IN ('MonthlyFee', 'BusinessHours', 'OutOfHours', 'Project', 'Adjustment', 'Info', 'PrepaidPurchase', 'PrepaidDrawn', 'Consultancy', 'FixedFee', 'Other')),
     BillingCycleId int           NULL,
+    WorkDate       date          NULL,          -- consultancy lines: the day the work was done
     InstanceId     int           NULL,
     TicketId       int           NULL,
     Description    nvarchar(500) NOT NULL,
@@ -319,8 +359,9 @@ CREATE TABLE dbo.InvoiceLine (
 
 IF OBJECT_ID(N'dbo.TimeEntry') IS NULL
 CREATE TABLE dbo.TimeEntry (
-    TimeEntryId int IDENTITY(1,1) CONSTRAINT PK_TimeEntry PRIMARY KEY,
-    TicketId    int           NOT NULL CONSTRAINT FK_TimeEntry_Ticket REFERENCES dbo.Ticket (TicketId),
+    TimeEntryId  int IDENTITY(1,1) CONSTRAINT PK_TimeEntry PRIMARY KEY,
+    EngagementId int          NOT NULL CONSTRAINT FK_TimeEntry_Engagement REFERENCES dbo.Engagement (EngagementId),
+    TicketId    int           NULL CONSTRAINT FK_TimeEntry_Ticket REFERENCES dbo.Ticket (TicketId),
     WorkStart   datetime2(0)  NOT NULL,
     Minutes     int           NOT NULL CONSTRAINT CK_TimeEntry_Minutes CHECK (Minutes > 0),
     RateType    varchar(20)   NOT NULL CONSTRAINT CK_TimeEntry_Rate CHECK (RateType IN ('BusinessHours', 'OutOfHours')),
@@ -409,12 +450,87 @@ BEGIN
     EXEC (N'UPDATE dbo.Ticket SET RateType = CASE WHEN WorkType = ''PlannedOutOfHours'' THEN ''OutOfHours'' ELSE ''ByTimeOfWork'' END;');
 END
 
-IF EXISTS (SELECT 1 FROM sys.check_constraints WHERE name = N'CK_InvoiceLine_Type' AND definition NOT LIKE N'%PrepaidDrawn%')
+IF EXISTS (SELECT 1 FROM sys.check_constraints WHERE name = N'CK_InvoiceLine_Type' AND definition NOT LIKE N'%Consultancy%')
 BEGIN
     ALTER TABLE dbo.InvoiceLine DROP CONSTRAINT CK_InvoiceLine_Type;
     ALTER TABLE dbo.InvoiceLine ADD CONSTRAINT CK_InvoiceLine_Type
-        CHECK (LineType IN ('MonthlyFee', 'BusinessHours', 'OutOfHours', 'Project', 'Adjustment', 'Info', 'PrepaidPurchase', 'PrepaidDrawn'));
+        CHECK (LineType IN ('MonthlyFee', 'BusinessHours', 'OutOfHours', 'Project', 'Adjustment', 'Info', 'PrepaidPurchase', 'PrepaidDrawn', 'Consultancy', 'FixedFee', 'Other'));
 END
+
+/*---------------------------------------------------------------------------
+  2.0.0: engagements. Databases from 1.x hang everything off the agreement;
+  from here an agreement is one kind of engagement and invoices, time and
+  billing hang off the engagement instead. Existing data is moved across.
+---------------------------------------------------------------------------*/
+IF COL_LENGTH(N'dbo.Agreement', N'EngagementId') IS NULL
+    ALTER TABLE dbo.Agreement ADD EngagementId int NULL CONSTRAINT FK_Agreement_Engagement REFERENCES dbo.Engagement (EngagementId);
+
+IF COL_LENGTH(N'dbo.InvoiceLine', N'WorkDate') IS NULL
+    ALTER TABLE dbo.InvoiceLine ADD WorkDate date NULL;
+
+IF COL_LENGTH(N'dbo.InvoiceLine', N'EngagementId') IS NULL
+    ALTER TABLE dbo.InvoiceLine ADD EngagementId int NULL CONSTRAINT FK_InvoiceLine_Engagement REFERENCES dbo.Engagement (EngagementId);
+
+IF COL_LENGTH(N'dbo.Invoice', N'ClientId') IS NULL
+    ALTER TABLE dbo.Invoice ADD ClientId int NULL CONSTRAINT FK_Invoice_Client REFERENCES dbo.Client (ClientId),
+                                EngagementId int NULL CONSTRAINT FK_Invoice_Engagement REFERENCES dbo.Engagement (EngagementId);
+
+IF COL_LENGTH(N'dbo.TimeEntry', N'EngagementId') IS NULL
+    ALTER TABLE dbo.TimeEntry ADD EngagementId int NULL CONSTRAINT FK_TimeEntry_Engagement REFERENCES dbo.Engagement (EngagementId);
+GO
+
+-- every agreement becomes a monitoring engagement, keeping its own reference
+INSERT dbo.Engagement (EngagementRef, ClientId, EngagementType, Name, BillingMode, Status, StartDate, EndDate)
+SELECT a.AgreementRef, a.ClientId, 'Monitoring', N'Molehill Watch SQL Server support', 'AgreementCycle',
+       CASE WHEN a.EndDate IS NOT NULL AND a.EndDate < CAST(SYSDATETIME() AS date) THEN 'Completed' ELSE 'Active' END,
+       a.StartDate, a.EndDate
+FROM dbo.Agreement a
+WHERE a.EngagementId IS NULL AND NOT EXISTS (SELECT 1 FROM dbo.Engagement e WHERE e.EngagementRef = a.AgreementRef);
+
+UPDATE a SET a.EngagementId = e.EngagementId
+FROM dbo.Agreement a JOIN dbo.Engagement e ON e.EngagementRef = a.AgreementRef
+WHERE a.EngagementId IS NULL;
+GO
+
+-- invoices and time move from the agreement to its engagement
+IF COL_LENGTH(N'dbo.Invoice', N'AgreementId') IS NOT NULL
+    EXEC(N'UPDATE i SET i.ClientId = a.ClientId, i.EngagementId = a.EngagementId
+           FROM dbo.Invoice i JOIN dbo.Agreement a ON a.AgreementId = i.AgreementId WHERE i.ClientId IS NULL;');
+
+UPDATE e SET e.EngagementId = a.EngagementId
+FROM dbo.TimeEntry e JOIN dbo.Ticket t ON t.TicketId = e.TicketId JOIN dbo.Agreement a ON a.AgreementId = t.AgreementId
+WHERE e.EngagementId IS NULL;
+GO
+
+IF COL_LENGTH(N'dbo.Invoice', N'AgreementId') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM dbo.Invoice WHERE ClientId IS NULL)
+BEGIN
+    DECLARE @fk sysname = (SELECT name FROM sys.foreign_keys WHERE parent_object_id = OBJECT_ID(N'dbo.Invoice') AND name LIKE N'FK_Invoice_Agreement%');
+    IF @fk IS NOT NULL EXEC(N'ALTER TABLE dbo.Invoice DROP CONSTRAINT ' + @fk);
+    ALTER TABLE dbo.Invoice DROP COLUMN AgreementId;
+    PRINT N'Invoices moved from agreements to engagements.';
+END
+GO
+
+-- once everything is across, the new links are required
+IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.Agreement') AND name = N'EngagementId' AND is_nullable = 1)
+   AND NOT EXISTS (SELECT 1 FROM dbo.Agreement WHERE EngagementId IS NULL)
+BEGIN
+    ALTER TABLE dbo.Agreement ALTER COLUMN EngagementId int NOT NULL;
+    IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UQ_Agreement_Engagement' AND object_id = OBJECT_ID(N'dbo.Agreement'))
+        CREATE UNIQUE INDEX UQ_Agreement_Engagement ON dbo.Agreement (EngagementId);
+END
+
+IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.Invoice') AND name = N'ClientId' AND is_nullable = 1)
+   AND NOT EXISTS (SELECT 1 FROM dbo.Invoice WHERE ClientId IS NULL)
+    ALTER TABLE dbo.Invoice ALTER COLUMN ClientId int NOT NULL;
+
+IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.TimeEntry') AND name = N'EngagementId' AND is_nullable = 1)
+   AND NOT EXISTS (SELECT 1 FROM dbo.TimeEntry WHERE EngagementId IS NULL)
+    ALTER TABLE dbo.TimeEntry ALTER COLUMN EngagementId int NOT NULL;
+
+-- consultancy time has no ticket
+IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.TimeEntry') AND name = N'TicketId' AND is_nullable = 0)
+    ALTER TABLE dbo.TimeEntry ALTER COLUMN TicketId int NULL;
 GO
 
 /*=============================================================================
@@ -434,6 +550,10 @@ FROM (VALUES
     ('VatRatePct',          N'20',                             N'VAT rate applied when VatRegistered = 1.'),
     ('BusinessHoursStart',  N'09:00',                          N'UK local time.'),
     ('BusinessHoursEnd',    N'17:30',                          N'UK local time.'),
+    ('DayHours',            N'7.5',                            N'Hours in a consultancy day. Used to turn logged time into days and back.'),
+    ('DayRateRounding',     N'HalfDay',                        N'How a day-rate engagement rounds each day worked: HalfDay, WholeDay or Exact.'),
+    ('ConsultancyRefPrefix',N'CON',                            N'Consultancy engagement references look like CON-0001.'),
+    ('CombineInvoicesPerClient', N'0',                         N'0 = one invoice per engagement (recommended). 1 = one invoice per client per run.'),
     ('MinimumChargeMode',   N'Fair',                           N'Fair = included hours are used at actual time, and a ticket is charged so its total is at least the minimum. Strict = the 1 hour minimum per ticket also applies before included hours are deducted.'),
     ('EstimateThresholdMinutes', N'60',                        N'Flag tickets for an estimate once logged time passes this.'),
     ('ReportGraceDays',     N'2',                              N'Days after the week ends (Sunday) before a missing weekly report is flagged.'),
@@ -604,6 +724,55 @@ BEGIN
 END
 GO
 
+-- hours in a consultancy day, and how each day worked is rounded
+CREATE OR ALTER FUNCTION dbo.fn_DayHours ()
+RETURNS decimal(5,2)
+AS
+BEGIN
+    RETURN ISNULL(NULLIF(TRY_CONVERT(decimal(5,2), dbo.fn_Setting('DayHours')), 0), 7.5);
+END
+GO
+
+CREATE OR ALTER FUNCTION dbo.fn_DaysWorked (@Minutes int, @Rounding varchar(10))
+RETURNS decimal(9,2)
+AS
+BEGIN
+    DECLARE @Exact decimal(18,6) = @Minutes / 60.0 / dbo.fn_DayHours();
+    SET @Rounding = ISNULL(@Rounding, NULLIF(dbo.fn_Setting('DayRateRounding'), N''));
+    RETURN CASE @Rounding
+             WHEN 'Exact'    THEN CAST(@Exact AS decimal(9,2))
+             WHEN 'WholeDay' THEN CAST(CEILING(@Exact) AS decimal(9,2))
+             ELSE CAST(CEILING(@Exact * 2) / 2.0 AS decimal(9,2))   -- HalfDay
+           END;
+END
+GO
+
+-- consultancy work, a line per day worked (out-of-hours work on its own line when
+-- the engagement has an out-of-hours rate). Quantity is days, or hours when billed hourly.
+CREATE OR ALTER FUNCTION dbo.fn_ConsultancyWork (@EngagementId int, @UnbilledOnly bit)
+RETURNS TABLE
+AS
+RETURN
+    SELECT EngagementId = e.EngagementId,
+           WorkDate     = CAST(te.WorkStart AS date),
+           te.RateType,
+           Minutes      = SUM(te.Minutes),
+           Hours        = CAST(SUM(te.Minutes) / 60.0 AS decimal(9,2)),
+           Days         = dbo.fn_DaysWorked(SUM(te.Minutes), e.DayRounding),
+           Unit         = CASE WHEN e.BillingMode = 'Hourly' OR (te.RateType = 'OutOfHours' AND e.OutOfHoursRate IS NOT NULL) THEN 'hour' ELSE 'day' END,
+           Quantity     = CASE WHEN e.BillingMode = 'Hourly' OR (te.RateType = 'OutOfHours' AND e.OutOfHoursRate IS NOT NULL)
+                               THEN CAST(SUM(te.Minutes) / 60.0 AS decimal(9,2))
+                               ELSE dbo.fn_DaysWorked(SUM(te.Minutes), e.DayRounding) END,
+           UnitPrice    = CASE WHEN te.RateType = 'OutOfHours' AND e.OutOfHoursRate IS NOT NULL THEN e.OutOfHoursRate
+                               WHEN e.BillingMode = 'Hourly' THEN e.HourlyRate
+                               ELSE ISNULL(e.DayRate, 0) END,
+           WorkDone     = STRING_AGG(CONVERT(nvarchar(max), te.Description), N'; ') WITHIN GROUP (ORDER BY te.WorkStart)
+    FROM dbo.Engagement e
+    JOIN dbo.TimeEntry te ON te.EngagementId = e.EngagementId
+    WHERE e.EngagementId = @EngagementId AND te.IsBillable = 1 AND (@UnbilledOnly = 0 OR te.InvoiceId IS NULL)
+    GROUP BY e.EngagementId, CAST(te.WorkStart AS date), te.RateType, e.DayRounding, e.BillingMode, e.OutOfHoursRate, e.HourlyRate, e.DayRate;
+GO
+
 CREATE OR ALTER FUNCTION dbo.fn_InitialTermEnd (@AgreementId int)
 RETURNS date
 AS
@@ -673,6 +842,25 @@ RETURN
 GO
 
 /*=============================================================================
+  3b. VIEWS
+=============================================================================*/
+GO
+-- every invoice with who it is for and what it is for (agreement columns are
+-- NULL for consultancy and free-text invoices)
+CREATE OR ALTER VIEW dbo.vw_Invoice
+AS
+SELECT i.InvoiceId, i.InvoiceNo, i.InvoiceDate, i.DueDate, i.SubTotal, i.VatRatePct, i.VatAmount, i.Total,
+       i.Status, i.SentAt, i.PaidAt, i.Notes, i.CreatedAt,
+       i.ClientId, c.ClientName,
+       i.EngagementId, e.EngagementRef, e.EngagementType, EngagementName = e.Name, e.PurchaseOrder,
+       a.AgreementId, a.AgreementRef, a.SupportPausedFrom
+FROM dbo.Invoice i
+JOIN dbo.Client c ON c.ClientId = i.ClientId
+LEFT JOIN dbo.Engagement e ON e.EngagementId = i.EngagementId
+LEFT JOIN dbo.Agreement a ON a.EngagementId = i.EngagementId;
+GO
+
+/*=============================================================================
   4. CLIENTS, AGREEMENTS AND INSTANCES
 =============================================================================*/
 -- Who receives invoices is set on contacts (usp_Contact_Add @IsBillingContact = 1), not on the client.
@@ -697,14 +885,30 @@ BEGIN
 END
 GO
 
-CREATE OR ALTER FUNCTION dbo.fn_ClientId (@Client nvarchar(200))   -- client name or agreement ref
+CREATE OR ALTER FUNCTION dbo.fn_ClientId (@Client nvarchar(200))   -- client name, agreement ref or engagement ref
 RETURNS int
 AS
 BEGIN
     RETURN COALESCE((SELECT ClientId FROM dbo.Client WHERE ClientName = @Client),
-                    (SELECT ClientId FROM dbo.Agreement WHERE AgreementRef = @Client));
+                    (SELECT ClientId FROM dbo.Agreement WHERE AgreementRef = @Client),
+                    (SELECT ClientId FROM dbo.Engagement WHERE EngagementRef = @Client));
 END
 GO
+
+-- engagement ref, agreement ref, or a client name when that client has exactly one engagement
+CREATE OR ALTER FUNCTION dbo.fn_EngagementId (@Engagement nvarchar(200))
+RETURNS int
+AS
+BEGIN
+    RETURN COALESCE(
+        (SELECT EngagementId FROM dbo.Engagement WHERE EngagementRef = @Engagement),
+        (SELECT EngagementId FROM dbo.Agreement WHERE AgreementRef = @Engagement),
+        (SELECT MIN(e.EngagementId) FROM dbo.Engagement e JOIN dbo.Client c ON c.ClientId = e.ClientId
+         WHERE c.ClientName = @Engagement AND e.Status IN ('Active', 'OnHold')
+         HAVING COUNT(*) = 1));
+END
+GO
+
 
 CREATE OR ALTER FUNCTION dbo.fn_LooksLikeEmail (@Email nvarchar(320))
 RETURNS bit
@@ -947,12 +1151,22 @@ BEGIN
     IF @PriceListId IS NULL BEGIN RAISERROR(N'No price list found.', 16, 1); RETURN; END
 
     BEGIN TRAN;
-    INSERT dbo.Agreement (AgreementRef, ClientId, SignedDate, StartDate, InitialTermMonths, PriceListId, TicketChannel)
-    SELECT ISNULL(@AgreementRef, 'TMP-' + LEFT(CONVERT(varchar(36), NEWID()), 20)), @ClientId, @SignedDate, @StartDate, InitialTermMonths, @PriceListId, @TicketChannel
+    -- the agreement is a monitoring engagement; both share one reference
+    DECLARE @TempRef varchar(30) = ISNULL(@AgreementRef, 'TMP-' + LEFT(CONVERT(varchar(36), NEWID()), 20));
+    INSERT dbo.Engagement (EngagementRef, ClientId, EngagementType, Name, BillingMode, Status, StartDate)
+    VALUES (@TempRef, @ClientId, 'Monitoring', N'Molehill Watch SQL Server support', 'AgreementCycle', 'Active', @StartDate);
+    DECLARE @EngagementId int = SCOPE_IDENTITY();
+
+    INSERT dbo.Agreement (AgreementRef, ClientId, EngagementId, SignedDate, StartDate, InitialTermMonths, PriceListId, TicketChannel)
+    SELECT @TempRef, @ClientId, @EngagementId, @SignedDate, @StartDate, InitialTermMonths, @PriceListId, @TicketChannel
     FROM dbo.PriceList WHERE PriceListId = @PriceListId;
     DECLARE @AgreementId int = SCOPE_IDENTITY();
     IF @AgreementRef IS NULL
-        UPDATE dbo.Agreement SET AgreementRef = 'MWA-' + RIGHT('0000' + CONVERT(varchar(10), @AgreementId), 4) WHERE AgreementId = @AgreementId;
+    BEGIN
+        DECLARE @NewRef varchar(30) = 'MWA-' + RIGHT('0000' + CONVERT(varchar(10), @AgreementId), 4);
+        UPDATE dbo.Agreement SET AgreementRef = @NewRef WHERE AgreementId = @AgreementId;
+        UPDATE dbo.Engagement SET EngagementRef = @NewRef WHERE EngagementId = @EngagementId;
+    END
 
     INSERT dbo.OnboardingItem (AgreementId, ItemCode, SortOrder, Description, IsRequired, CompletedDate)
     VALUES (@AgreementId, 'SIGNED',          1, N'Agreement signed and start date confirmed', 1, @SignedDate),
@@ -1150,6 +1364,205 @@ END
 GO
 
 /*=============================================================================
+  4b. ENGAGEMENTS (CONSULTANCY AND OTHER BILLABLE WORK)
+=============================================================================*/
+CREATE OR ALTER PROCEDURE dbo.usp_Engagement_Add
+    @Client         nvarchar(200),               -- client name
+    @Name           nvarchar(200),               -- what the work is, e.g. 'Data warehouse migration'
+    @BillingMode    varchar(20)   = 'DayRate',   -- DayRate | Hourly | FixedPrice
+    @DayRate        decimal(9,2)  = NULL,        -- agreed day rate
+    @HourlyRate     decimal(9,2)  = NULL,        -- Hourly mode
+    @OutOfHoursRate decimal(9,2)  = NULL,        -- optional hourly rate for out-of-hours work
+    @FixedPrice     decimal(10,2) = NULL,        -- FixedPrice mode
+    @StartDate      date          = NULL,
+    @EndDate        date          = NULL,
+    @PurchaseOrder  nvarchar(100) = NULL,        -- the client's PO number, printed on invoices
+    @DayRounding    varchar(10)   = NULL,        -- HalfDay (default) | WholeDay | Exact
+    @Notes          nvarchar(max) = NULL,
+    @EngagementRef  varchar(30)   = NULL         -- default CON-0001 style
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @ClientId int = dbo.fn_ClientId(@Client);
+    IF @ClientId IS NULL BEGIN RAISERROR(N'Client "%s" not found. Run usp_Client_Add first.', 16, 1, @Client); RETURN; END
+    IF @BillingMode NOT IN ('DayRate', 'Hourly', 'FixedPrice')
+    BEGIN
+        RAISERROR(N'@BillingMode must be DayRate, Hourly or FixedPrice. A Molehill Watch support agreement is set up with usp_Agreement_Create instead.', 16, 1);
+        RETURN;
+    END
+    IF @BillingMode = 'DayRate'    AND ISNULL(@DayRate, 0)    <= 0 BEGIN RAISERROR(N'A day-rate engagement needs @DayRate.', 16, 1); RETURN; END
+    IF @BillingMode = 'Hourly'     AND ISNULL(@HourlyRate, 0) <= 0 BEGIN RAISERROR(N'An hourly engagement needs @HourlyRate.', 16, 1); RETURN; END
+    IF @BillingMode = 'FixedPrice' AND ISNULL(@FixedPrice, 0) <= 0 BEGIN RAISERROR(N'A fixed-price engagement needs @FixedPrice.', 16, 1); RETURN; END
+    IF @DayRounding IS NOT NULL AND @DayRounding NOT IN ('HalfDay', 'WholeDay', 'Exact')
+    BEGIN RAISERROR(N'@DayRounding must be HalfDay, WholeDay or Exact.', 16, 1); RETURN; END
+
+    DECLARE @Prefix varchar(10) = ISNULL(NULLIF(dbo.fn_Setting('ConsultancyRefPrefix'), N''), 'CON');
+    IF @EngagementRef IS NULL
+    BEGIN
+        DECLARE @Seq int = ISNULL((SELECT MAX(TRY_CONVERT(int, RIGHT(EngagementRef, 4))) FROM dbo.Engagement WHERE EngagementRef LIKE @Prefix + '-%'), 0) + 1;
+        SET @EngagementRef = @Prefix + '-' + RIGHT('0000' + CONVERT(varchar(10), @Seq), 4);
+    END
+    IF EXISTS (SELECT 1 FROM dbo.Engagement WHERE EngagementRef = @EngagementRef)
+    BEGIN RAISERROR(N'Engagement %s already exists.', 16, 1, @EngagementRef); RETURN; END
+
+    INSERT dbo.Engagement (EngagementRef, ClientId, EngagementType, Name, BillingMode, DayRate, HourlyRate, OutOfHoursRate,
+                           FixedPrice, DayRounding, PurchaseOrder, Status, StartDate, EndDate, Notes)
+    VALUES (@EngagementRef, @ClientId, 'Consultancy', @Name, @BillingMode, @DayRate, @HourlyRate, @OutOfHoursRate,
+            @FixedPrice, @DayRounding, @PurchaseOrder, 'Active', ISNULL(@StartDate, CAST(dbo.fn_UkNow() AS date)), @EndDate, @Notes);
+
+    PRINT N'Engagement ' + @EngagementRef + N' created. Log work with usp_Work_Log, then usp_Billing_Run invoices it '
+        + CASE WHEN @BillingMode = 'FixedPrice' THEN N'when you mark it complete (usp_Engagement_Complete).' ELSE N'at the end of each month.' END;
+
+    SELECT e.EngagementRef, c.ClientName, e.Name, e.BillingMode,
+           Rate = CASE e.BillingMode WHEN 'DayRate' THEN NCHAR(163) + FORMAT(e.DayRate, 'N2') + N'/day'
+                                     WHEN 'Hourly'  THEN NCHAR(163) + FORMAT(e.HourlyRate, 'N2') + N'/hour'
+                                     ELSE NCHAR(163) + FORMAT(e.FixedPrice, 'N2') + N' fixed' END,
+           e.OutOfHoursRate, e.Status, e.StartDate, e.EndDate, e.PurchaseOrder
+    FROM dbo.Engagement e JOIN dbo.Client c ON c.ClientId = e.ClientId WHERE e.EngagementRef = @EngagementRef;
+END
+GO
+
+CREATE OR ALTER PROCEDURE dbo.usp_Engagement_Update       -- NULL = leave as it is
+    @Engagement     nvarchar(200),
+    @Name           nvarchar(200) = NULL,
+    @DayRate        decimal(9,2)  = NULL,
+    @HourlyRate     decimal(9,2)  = NULL,
+    @OutOfHoursRate decimal(9,2)  = NULL,
+    @FixedPrice     decimal(10,2) = NULL,
+    @StartDate      date          = NULL,
+    @EndDate        date          = NULL,
+    @PurchaseOrder  nvarchar(100) = NULL,
+    @DayRounding    varchar(10)   = NULL,
+    @Notes          nvarchar(max) = NULL,
+    @Status         varchar(15)   = NULL         -- Active | OnHold
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @Id int = dbo.fn_EngagementId(@Engagement);
+    IF @Id IS NULL BEGIN RAISERROR(N'Engagement "%s" not found.', 16, 1, @Engagement); RETURN; END
+    IF (SELECT EngagementType FROM dbo.Engagement WHERE EngagementId = @Id) = 'Monitoring'
+    BEGIN RAISERROR(N'That is a Molehill Watch agreement - change it with the agreement procedures (usp_PriceChange_Schedule, usp_Notice_Give).', 16, 1); RETURN; END
+    IF @Status IS NOT NULL AND @Status NOT IN ('Active', 'OnHold')
+    BEGIN RAISERROR(N'@Status must be Active or OnHold (use usp_Engagement_Complete or usp_Engagement_Cancel to finish it).', 16, 1); RETURN; END
+    IF @DayRounding IS NOT NULL AND @DayRounding NOT IN ('HalfDay', 'WholeDay', 'Exact')
+    BEGIN RAISERROR(N'@DayRounding must be HalfDay, WholeDay or Exact.', 16, 1); RETURN; END
+
+    UPDATE dbo.Engagement
+    SET Name = ISNULL(NULLIF(LTRIM(RTRIM(@Name)), N''), Name),
+        DayRate = ISNULL(@DayRate, DayRate), HourlyRate = ISNULL(@HourlyRate, HourlyRate),
+        OutOfHoursRate = ISNULL(@OutOfHoursRate, OutOfHoursRate), FixedPrice = ISNULL(@FixedPrice, FixedPrice),
+        StartDate = ISNULL(@StartDate, StartDate), EndDate = ISNULL(@EndDate, EndDate),
+        PurchaseOrder = ISNULL(@PurchaseOrder, PurchaseOrder), DayRounding = ISNULL(@DayRounding, DayRounding),
+        Notes = ISNULL(@Notes, Notes), Status = ISNULL(@Status, Status)
+    WHERE EngagementId = @Id;
+
+    IF (@DayRate IS NOT NULL OR @HourlyRate IS NOT NULL OR @OutOfHoursRate IS NOT NULL)
+       AND EXISTS (SELECT 1 FROM dbo.TimeEntry WHERE EngagementId = @Id AND InvoiceId IS NULL AND IsBillable = 1)
+        PRINT N'Note: the new rate applies to all time that has not been invoiced yet, including work already logged.';
+
+    EXEC dbo.usp_Engagement_Show @Engagement = @Engagement;
+END
+GO
+
+CREATE OR ALTER PROCEDURE dbo.usp_Engagement_Complete
+    @Engagement  nvarchar(200),
+    @CompletedOn date = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @Id int = dbo.fn_EngagementId(@Engagement);
+    IF @Id IS NULL BEGIN RAISERROR(N'Engagement "%s" not found.', 16, 1, @Engagement); RETURN; END
+    IF (SELECT EngagementType FROM dbo.Engagement WHERE EngagementId = @Id) = 'Monitoring'
+    BEGIN RAISERROR(N'A Molehill Watch agreement ends by giving notice (usp_Notice_Give).', 16, 1); RETURN; END
+    SET @CompletedOn = ISNULL(@CompletedOn, CAST(dbo.fn_UkNow() AS date));
+    UPDATE dbo.Engagement SET Status = 'Completed', CompletedOn = @CompletedOn, EndDate = ISNULL(EndDate, @CompletedOn) WHERE EngagementId = @Id;
+    PRINT N'Engagement marked complete. The next billing run invoices whatever is outstanding.';
+    EXEC dbo.usp_Engagement_Show @Engagement = @Engagement;
+END
+GO
+
+CREATE OR ALTER PROCEDURE dbo.usp_Engagement_Cancel
+    @Engagement nvarchar(200),
+    @Reason     nvarchar(500) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @Id int = dbo.fn_EngagementId(@Engagement);
+    IF @Id IS NULL BEGIN RAISERROR(N'Engagement "%s" not found.', 16, 1, @Engagement); RETURN; END
+    IF EXISTS (SELECT 1 FROM dbo.Invoice WHERE EngagementId = @Id AND Status <> 'Void')
+    BEGIN RAISERROR(N'This engagement has been invoiced, so it cannot be cancelled. Mark it complete instead (usp_Engagement_Complete).', 16, 1); RETURN; END
+    UPDATE dbo.Engagement SET Status = 'Cancelled', Notes = ISNULL(Notes + NCHAR(10), N'') + N'Cancelled: ' + ISNULL(@Reason, N'no reason given') WHERE EngagementId = @Id;
+    PRINT N'Engagement cancelled. Any time logged against it will not be invoiced.';
+END
+GO
+
+CREATE OR ALTER PROCEDURE dbo.usp_Engagement_Show
+    @Engagement nvarchar(200)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @Id int = dbo.fn_EngagementId(@Engagement);
+    IF @Id IS NULL BEGIN RAISERROR(N'Engagement "%s" not found.', 16, 1, @Engagement); RETURN; END
+
+    SELECT e.EngagementRef, c.ClientName, e.EngagementType, e.Name, e.BillingMode,
+           Rate = CASE e.BillingMode WHEN 'DayRate' THEN NCHAR(163) + FORMAT(e.DayRate, 'N2') + N'/day'
+                                     WHEN 'Hourly'  THEN NCHAR(163) + FORMAT(e.HourlyRate, 'N2') + N'/hour'
+                                     WHEN 'FixedPrice' THEN NCHAR(163) + FORMAT(e.FixedPrice, 'N2') + N' fixed'
+                                     ELSE N'per the agreement' END,
+           OutOfHours = CASE WHEN e.OutOfHoursRate IS NULL THEN N'at the day rate' ELSE NCHAR(163) + FORMAT(e.OutOfHoursRate, 'N2') + N'/hour' END,
+           e.Status, e.StartDate, e.EndDate, e.CompletedOn, e.PurchaseOrder,
+           DayRounding = ISNULL(e.DayRounding, dbo.fn_Setting('DayRateRounding')), e.Notes
+    FROM dbo.Engagement e JOIN dbo.Client c ON c.ClientId = e.ClientId WHERE e.EngagementId = @Id;
+
+    SELECT Worked = FORMAT(ISNULL(SUM(w.Days), 0), 'N2') + N' days',
+           Unbilled = FORMAT(ISNULL(SUM(CASE WHEN u.WorkDate IS NOT NULL THEN u.Days END), 0), 'N2') + N' days',
+           UnbilledValue = NCHAR(163) + FORMAT(ISNULL(SUM(CASE WHEN u.WorkDate IS NOT NULL THEN u.Quantity * u.UnitPrice END), 0), 'N2'),
+           Invoiced = NCHAR(163) + FORMAT(ISNULL((SELECT SUM(Total) FROM dbo.Invoice WHERE EngagementId = @Id AND Status <> 'Void'), 0), 'N2'),
+           LastWorked = MAX(w.WorkDate)
+    FROM dbo.fn_ConsultancyWork(@Id, 0) w
+    LEFT JOIN dbo.fn_ConsultancyWork(@Id, 1) u ON u.WorkDate = w.WorkDate AND u.RateType = w.RateType;
+
+    SELECT w.WorkDate, w.RateType, w.Days, w.Hours, Charge = NCHAR(163) + FORMAT(w.Quantity * w.UnitPrice, 'N2'),
+           Billed = CASE WHEN EXISTS (SELECT 1 FROM dbo.TimeEntry te WHERE te.EngagementId = @Id AND CAST(te.WorkStart AS date) = w.WorkDate AND te.RateType = w.RateType AND te.InvoiceId IS NULL AND te.IsBillable = 1)
+                         THEN N'not yet' ELSE N'invoiced' END,
+           w.WorkDone
+    FROM dbo.fn_ConsultancyWork(@Id, 0) w ORDER BY w.WorkDate DESC, w.RateType;
+
+    SELECT i.InvoiceNo, i.InvoiceDate, i.DueDate, i.Total, i.Status
+    FROM dbo.Invoice i WHERE i.EngagementId = @Id ORDER BY i.InvoiceNo;
+END
+GO
+
+CREATE OR ALTER PROCEDURE dbo.usp_Engagement_List
+    @Client        nvarchar(200) = NULL,     -- NULL = every client
+    @IncludeClosed bit           = 0
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @ClientId int = CASE WHEN @Client IS NOT NULL THEN dbo.fn_ClientId(@Client) END;
+    IF @Client IS NOT NULL AND @ClientId IS NULL BEGIN RAISERROR(N'Client "%s" not found.', 16, 1, @Client); RETURN; END
+
+    SELECT e.EngagementRef, c.ClientName, e.EngagementType, e.Name, e.Status,
+           Rate = CASE e.BillingMode WHEN 'DayRate' THEN NCHAR(163) + FORMAT(e.DayRate, 'N0') + N'/day'
+                                     WHEN 'Hourly'  THEN NCHAR(163) + FORMAT(e.HourlyRate, 'N0') + N'/hour'
+                                     WHEN 'FixedPrice' THEN NCHAR(163) + FORMAT(e.FixedPrice, 'N0') + N' fixed'
+                                     ELSE N'agreement' END,
+           UnbilledDays  = ISNULL(u.Days, 0),
+           UnbilledValue = ISNULL(u.Value, 0),
+           LastWorked    = u.LastWorked,
+           Invoiced      = ISNULL((SELECT SUM(Total) FROM dbo.Invoice i WHERE i.EngagementId = e.EngagementId AND i.Status <> 'Void'), 0),
+           e.PurchaseOrder
+    FROM dbo.Engagement e
+    JOIN dbo.Client c ON c.ClientId = e.ClientId
+    OUTER APPLY (SELECT Days = SUM(w.Days), Value = SUM(w.Quantity * w.UnitPrice), LastWorked = MAX(w.WorkDate)
+                 FROM dbo.fn_ConsultancyWork(e.EngagementId, 1) w) u
+    WHERE (@ClientId IS NULL OR e.ClientId = @ClientId)
+      AND (@IncludeClosed = 1 OR e.Status IN ('Active', 'OnHold'))
+    ORDER BY c.ClientName, CASE e.EngagementType WHEN 'Monitoring' THEN 0 ELSE 1 END, e.EngagementRef;
+END
+GO
+
+/*=============================================================================
   5. TERM, NOTICE AND PRICE CHANGES
 =============================================================================*/
 CREATE OR ALTER PROCEDURE dbo.usp_Agreement_RecordReview
@@ -1180,6 +1593,7 @@ BEGIN
 
     IF @WhatIf = 0
         UPDATE dbo.Agreement SET NoticeGivenDate = @NoticeDate, NoticeGivenBy = @GivenBy, EndDate = @EndDate WHERE AgreementId = @AgreementId;
+        UPDATE e SET e.EndDate = @EndDate FROM dbo.Engagement e JOIN dbo.Agreement a ON a.EngagementId = e.EngagementId WHERE a.AgreementId = @AgreementId;
 
     SELECT a.AgreementRef, c.ClientName, NoticeGiven = @NoticeDate, GivenBy = @GivenBy,
            InitialTermEnds = dbo.fn_InitialTermEnd(a.AgreementId), AgreementEnds = @EndDate,
@@ -1363,8 +1777,9 @@ BEGIN
                                            ELSE 'BusinessHours' END);
     IF @RateType NOT IN ('BusinessHours', 'OutOfHours') BEGIN RAISERROR(N'@RateType must be BusinessHours or OutOfHours.', 16, 1); RETURN; END
 
-    INSERT dbo.TimeEntry (TicketId, WorkStart, Minutes, RateType, Description, IsBillable)
-    VALUES (@TicketId, @WorkStart, @Minutes, @RateType, @Description, @IsBillable);
+    DECLARE @TicketEngagementId int = (SELECT EngagementId FROM dbo.Agreement WHERE AgreementId = @AgreementId);
+    INSERT dbo.TimeEntry (EngagementId, TicketId, WorkStart, Minutes, RateType, Description, IsBillable)
+    VALUES (@TicketEngagementId, @TicketId, @WorkStart, @Minutes, @RateType, @Description, @IsBillable);
 
     UPDATE dbo.Ticket SET Status = 'InProgress', FirstResponseAt = ISNULL(FirstResponseAt, @WorkStart)
     WHERE TicketId = @TicketId AND Status = 'Open';
@@ -1407,10 +1822,14 @@ CREATE OR ALTER PROCEDURE dbo.usp_Time_Update
 AS
 BEGIN
     SET NOCOUNT ON;
-    DECLARE @TicketId int, @InvoiceId int, @AgreementId int, @Ref varchar(20);
-    SELECT @TicketId = e.TicketId, @InvoiceId = e.InvoiceId, @AgreementId = t.AgreementId, @Ref = t.TicketRef
-    FROM dbo.TimeEntry e JOIN dbo.Ticket t ON t.TicketId = e.TicketId WHERE e.TimeEntryId = @TimeEntryId;
-    IF @TicketId IS NULL BEGIN RAISERROR(N'Time entry %d not found.', 16, 1, @TimeEntryId); RETURN; END
+    DECLARE @TicketId int, @InvoiceId int, @AgreementId int, @Ref varchar(30), @Found bit = 0;
+    SELECT @TicketId = e.TicketId, @InvoiceId = e.InvoiceId, @AgreementId = t.AgreementId,
+           @Ref = ISNULL(t.TicketRef, g.EngagementRef), @Found = 1
+    FROM dbo.TimeEntry e
+    LEFT JOIN dbo.Ticket t ON t.TicketId = e.TicketId
+    LEFT JOIN dbo.Engagement g ON g.EngagementId = e.EngagementId
+    WHERE e.TimeEntryId = @TimeEntryId;
+    IF @Found = 0 BEGIN RAISERROR(N'Time entry %d not found.', 16, 1, @TimeEntryId); RETURN; END
     IF @InvoiceId IS NOT NULL
     BEGIN
         DECLARE @No varchar(30) = (SELECT InvoiceNo FROM dbo.Invoice WHERE InvoiceId = @InvoiceId);
@@ -1428,10 +1847,11 @@ BEGIN
 
     DECLARE @NewStart datetime2(0) = (SELECT WorkStart FROM dbo.TimeEntry WHERE TimeEntryId = @TimeEntryId);
     PRINT N'Updated the time on ' + @Ref + N'.';
-    IF dbo.fn_IsBillablePeriod(@AgreementId, @NewStart) = 0
+    IF @AgreementId IS NOT NULL AND dbo.fn_IsBillablePeriod(@AgreementId, @NewStart) = 0
         PRINT N'WARNING: it is still dated outside the agreement''s billing period, so it will never be invoiced.';
-    SELECT e.TimeEntryId, t.TicketRef, e.WorkStart, e.Minutes, e.RateType, e.IsBillable, e.Description
-    FROM dbo.TimeEntry e JOIN dbo.Ticket t ON t.TicketId = e.TicketId WHERE e.TimeEntryId = @TimeEntryId;
+    SELECT e.TimeEntryId, Ref = ISNULL(t.TicketRef, g.EngagementRef), e.WorkStart, e.Minutes, e.RateType, e.IsBillable, e.Description
+    FROM dbo.TimeEntry e LEFT JOIN dbo.Ticket t ON t.TicketId = e.TicketId LEFT JOIN dbo.Engagement g ON g.EngagementId = e.EngagementId
+    WHERE e.TimeEntryId = @TimeEntryId;
 END
 GO
 
@@ -1441,9 +1861,10 @@ CREATE OR ALTER PROCEDURE dbo.usp_Time_Delete
 AS
 BEGIN
     SET NOCOUNT ON;
-    DECLARE @InvoiceId int, @Ref varchar(20), @Minutes int;
-    SELECT @InvoiceId = e.InvoiceId, @Ref = t.TicketRef, @Minutes = e.Minutes
-    FROM dbo.TimeEntry e JOIN dbo.Ticket t ON t.TicketId = e.TicketId WHERE e.TimeEntryId = @TimeEntryId;
+    DECLARE @InvoiceId int, @Ref varchar(30), @Minutes int;
+    SELECT @InvoiceId = e.InvoiceId, @Ref = ISNULL(t.TicketRef, g.EngagementRef), @Minutes = e.Minutes
+    FROM dbo.TimeEntry e LEFT JOIN dbo.Ticket t ON t.TicketId = e.TicketId LEFT JOIN dbo.Engagement g ON g.EngagementId = e.EngagementId
+    WHERE e.TimeEntryId = @TimeEntryId;
     IF @Ref IS NULL BEGIN RAISERROR(N'Time entry %d not found.', 16, 1, @TimeEntryId); RETURN; END
     IF @InvoiceId IS NOT NULL
     BEGIN
@@ -1559,6 +1980,58 @@ BEGIN
 END
 GO
 
+/*-----------------------------------------------------------------------------
+  Consultancy work: logged against the engagement, not a ticket. Give @Days
+  (1, 0.5, ...), @Hours or @Minutes - whichever suits.
+-----------------------------------------------------------------------------*/
+CREATE OR ALTER PROCEDURE dbo.usp_Work_Log
+    @Engagement  nvarchar(200),
+    @Description nvarchar(1000),
+    @Days        decimal(6,2) = NULL,
+    @Hours       decimal(6,2) = NULL,
+    @Minutes     int          = NULL,
+    @WorkDate    date         = NULL,           -- default today
+    @RateType    varchar(20)  = 'BusinessHours',-- OutOfHours only matters if the engagement has an out-of-hours rate
+    @IsBillable  bit          = 1
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @Id int = dbo.fn_EngagementId(@Engagement);
+    IF @Id IS NULL BEGIN RAISERROR(N'Engagement "%s" not found. Create it with usp_Engagement_Add.', 16, 1, @Engagement); RETURN; END
+
+    DECLARE @Type varchar(20), @Status varchar(15), @Start date, @End date, @Ref varchar(30), @Mode varchar(20);
+    SELECT @Type = EngagementType, @Status = Status, @Start = StartDate, @End = EndDate, @Ref = EngagementRef, @Mode = BillingMode
+    FROM dbo.Engagement WHERE EngagementId = @Id;
+    IF @Type = 'Monitoring'
+    BEGIN RAISERROR(N'That is a Molehill Watch agreement: support time belongs to a ticket (usp_Ticket_Open, then usp_Time_Log).', 16, 1); RETURN; END
+    IF @Status = 'Cancelled' BEGIN RAISERROR(N'Engagement %s is cancelled.', 16, 1, @Ref); RETURN; END
+    IF @RateType NOT IN ('BusinessHours', 'OutOfHours') BEGIN RAISERROR(N'@RateType must be BusinessHours or OutOfHours.', 16, 1); RETURN; END
+
+    DECLARE @Mins int = COALESCE(@Minutes, CONVERT(int, ROUND(@Hours * 60, 0)), CONVERT(int, ROUND(@Days * dbo.fn_DayHours() * 60, 0)));
+    IF ISNULL(@Mins, 0) <= 0 BEGIN RAISERROR(N'Give @Days, @Hours or @Minutes.', 16, 1); RETURN; END
+    SET @WorkDate = ISNULL(@WorkDate, CAST(dbo.fn_UkNow() AS date));
+
+    INSERT dbo.TimeEntry (EngagementId, TicketId, WorkStart, Minutes, RateType, Description, IsBillable)
+    VALUES (@Id, NULL, DATEADD(hour, 9, CAST(@WorkDate AS datetime2(0))), @Mins, @RateType, @Description, @IsBillable);
+
+    IF @Status = 'Completed' PRINT N'Note: this engagement is marked complete. The next billing run will invoice this time too.';
+    IF @WorkDate < @Start PRINT N'Note: that date is before the engagement started (' + CONVERT(nvarchar(11), @Start, 106) + N').';
+    IF @End IS NOT NULL AND @WorkDate > @End PRINT N'Note: that date is after the engagement''s end date (' + CONVERT(nvarchar(11), @End, 106) + N').';
+    IF @IsBillable = 0 PRINT N'Logged as non-billable, so it will not appear on an invoice.';
+
+    DECLARE @Rounded nvarchar(20) = (SELECT FORMAT(SUM(w.Days), 'N2') FROM dbo.fn_ConsultancyWork(@Id, 0) w WHERE w.WorkDate = @WorkDate);
+    IF @IsBillable = 1 AND @Mode <> 'FixedPrice'
+        PRINT N'Logged. ' + CONVERT(nvarchar(11), @WorkDate, 106) + N' now bills as ' + ISNULL(@Rounded, N'0') + N' day(s).';
+
+    SELECT w.WorkDate, w.RateType, w.Hours, BillsAs = FORMAT(w.Quantity, 'N2') + N' ' + w.Unit + N'(s)',
+           Charge = NCHAR(163) + FORMAT(w.Quantity * w.UnitPrice, 'N2'), w.WorkDone
+    FROM dbo.fn_ConsultancyWork(@Id, 0) w WHERE w.WorkDate = @WorkDate;
+
+    SELECT UnbilledDays = ISNULL(SUM(w.Days), 0), UnbilledValue = ISNULL(SUM(w.Quantity * w.UnitPrice), 0)
+    FROM dbo.fn_ConsultancyWork(@Id, 1) w;
+END
+GO
+
 /*=============================================================================
   7. BILLING
 =============================================================================*/
@@ -1616,17 +2089,20 @@ END
 GO
 
 CREATE OR ALTER PROCEDURE dbo.usp_Invoice_New
-    @AgreementId int,
-    @InvoiceDate date,
-    @InvoiceId   int OUTPUT
+    @InvoiceDate  date,
+    @InvoiceId    int OUTPUT,
+    @EngagementId int = NULL,          -- NULL = a free-text invoice for the client
+    @ClientId     int = NULL           -- taken from the engagement when not given
 AS
 BEGIN
     SET NOCOUNT ON;
+    SET @ClientId = ISNULL(@ClientId, (SELECT ClientId FROM dbo.Engagement WHERE EngagementId = @EngagementId));
+    IF @ClientId IS NULL BEGIN RAISERROR(N'An invoice needs a client or an engagement.', 16, 1); RETURN; END
     DECLARE @Prefix varchar(10) = ISNULL(NULLIF(dbo.fn_Setting('InvoicePrefix'), N''), 'INV');
     DECLARE @Year char(4) = CONVERT(char(4), YEAR(@InvoiceDate));
     DECLARE @Seq int = ISNULL((SELECT MAX(TRY_CONVERT(int, RIGHT(InvoiceNo, 4))) FROM dbo.Invoice WHERE InvoiceNo LIKE @Prefix + '-' + @Year + '-%'), 0) + 1;
-    INSERT dbo.Invoice (InvoiceNo, AgreementId, InvoiceDate, DueDate)
-    VALUES (@Prefix + '-' + @Year + '-' + RIGHT('0000' + CONVERT(varchar(10), @Seq), 4), @AgreementId, @InvoiceDate,
+    INSERT dbo.Invoice (InvoiceNo, ClientId, EngagementId, InvoiceDate, DueDate)
+    VALUES (@Prefix + '-' + @Year + '-' + RIGHT('0000' + CONVERT(varchar(10), @Seq), 4), @ClientId, @EngagementId, @InvoiceDate,
             DATEADD(day, ISNULL(TRY_CONVERT(int, dbo.fn_Setting('PaymentTermsDays')), 14), @InvoiceDate));
     SET @InvoiceId = SCOPE_IDENTITY();
 END
@@ -1670,7 +2146,8 @@ BEGIN
     SET @PackageId = SCOPE_IDENTITY();
     IF @Invoice = 1
     BEGIN
-        EXEC dbo.usp_Invoice_New @AgreementId = @AgreementId, @InvoiceDate = @PurchasedOn, @InvoiceId = @InvoiceId OUTPUT;
+        DECLARE @PkgEngagementId int = (SELECT EngagementId FROM dbo.Agreement WHERE AgreementId = @AgreementId);
+        EXEC dbo.usp_Invoice_New @EngagementId = @PkgEngagementId, @InvoiceDate = @PurchasedOn, @InvoiceId = @InvoiceId OUTPUT;
         INSERT dbo.InvoiceLine (InvoiceId, LineType, Description, Quantity, UnitPrice, Amount)
         SELECT @InvoiceId, 'PrepaidPurchase',
                N'Pre-paid support hours (' + PackageRef + N'): ' + FORMAT(Hours, 'N2') + N' h, usable '
@@ -1943,18 +2420,32 @@ GO
    After an agreement ends, its final additional support is invoiced on its own. */
 CREATE OR ALTER PROCEDURE dbo.usp_Billing_Run
     @AsOfDate date = NULL,
-    @Client   nvarchar(200) = NULL   -- NULL = all agreements
+    @Client   nvarchar(200) = NULL   -- client name (everything they have), or one agreement / engagement ref. NULL = everybody
 AS
 BEGIN
     SET NOCOUNT ON;
     SET @AsOfDate = ISNULL(@AsOfDate, CAST(dbo.fn_UkNow() AS date));
-    DECLARE @Only int = CASE WHEN @Client IS NOT NULL THEN dbo.fn_AgreementId(@Client) END;
-    IF @Client IS NOT NULL AND @Only IS NULL BEGIN RAISERROR(N'Agreement or client "%s" not found.', 16, 1, @Client); RETURN; END
+    DECLARE @OnlyClient int = NULL, @OnlyEng int = NULL;
+    IF @Client IS NOT NULL
+    BEGIN
+        SET @OnlyClient = dbo.fn_ClientId(@Client);
+        IF NOT EXISTS (SELECT 1 FROM dbo.Client WHERE ClientName = @Client) SET @OnlyEng = dbo.fn_EngagementId(@Client);
+        IF @OnlyClient IS NULL AND @OnlyEng IS NULL
+        BEGIN RAISERROR(N'Client, agreement or engagement "%s" not found.', 16, 1, @Client); RETURN; END
+    END
+    DECLARE @Ags TABLE (AgreementId int PRIMARY KEY);
+    INSERT @Ags SELECT a.AgreementId FROM dbo.Agreement a
+    WHERE (@OnlyEng IS NULL OR a.EngagementId = @OnlyEng) AND (@OnlyClient IS NULL OR a.ClientId = @OnlyClient);
+    DECLARE @Engs TABLE (EngagementId int PRIMARY KEY);
+    INSERT @Engs SELECT e.EngagementId FROM dbo.Engagement e
+    WHERE e.EngagementType = 'Consultancy' AND e.Status <> 'Cancelled'
+      AND (@OnlyEng IS NULL OR e.EngagementId = @OnlyEng) AND (@OnlyClient IS NULL OR e.ClientId = @OnlyClient);
     DECLARE @Created TABLE (InvoiceId int);
-    DECLARE @AgreementId int, @Start date, @End date, @n int, @cs date, @ce date, @pl int;
+    DECLARE @AgreementId int, @Start date, @End date, @n int, @cs date, @ce date, @pl int, @EngId int;
 
     -- 1. billing cycles
-    DECLARE a CURSOR LOCAL FAST_FORWARD FOR SELECT AgreementId, StartDate, EndDate FROM dbo.Agreement WHERE StartDate <= @AsOfDate AND (@Only IS NULL OR AgreementId = @Only);
+    DECLARE a CURSOR LOCAL FAST_FORWARD FOR SELECT AgreementId, StartDate, EndDate FROM dbo.Agreement
+        WHERE StartDate <= @AsOfDate AND AgreementId IN (SELECT AgreementId FROM @Ags);
     OPEN a;
     FETCH NEXT FROM a INTO @AgreementId, @Start, @End;
     WHILE @@FETCH_STATUS = 0
@@ -1983,13 +2474,14 @@ BEGIN
     DECLARE @CycleId int, @InvoiceId int, @PrevId int, @CycleNo int;
     DECLARE cyc CURSOR LOCAL FAST_FORWARD FOR
         SELECT BillingCycleId, AgreementId, CycleNumber, StartDate, EndDate FROM dbo.BillingCycle
-        WHERE FeeInvoiceId IS NULL AND StartDate <= @AsOfDate AND (@Only IS NULL OR AgreementId = @Only) ORDER BY AgreementId, CycleNumber;
+        WHERE FeeInvoiceId IS NULL AND StartDate <= @AsOfDate AND AgreementId IN (SELECT AgreementId FROM @Ags) ORDER BY AgreementId, CycleNumber;
     OPEN cyc;
     FETCH NEXT FROM cyc INTO @CycleId, @AgreementId, @CycleNo, @cs, @ce;
     WHILE @@FETCH_STATUS = 0
     BEGIN
         BEGIN TRAN;
-        EXEC dbo.usp_Invoice_New @AgreementId = @AgreementId, @InvoiceDate = @cs, @InvoiceId = @InvoiceId OUTPUT;
+        SET @EngId = (SELECT EngagementId FROM dbo.Agreement WHERE AgreementId = @AgreementId);
+        EXEC dbo.usp_Invoice_New @EngagementId = @EngId, @InvoiceDate = @cs, @InvoiceId = @InvoiceId OUTPUT;
 
         INSERT dbo.InvoiceLine (InvoiceId, LineType, BillingCycleId, InstanceId, Description, Quantity, UnitPrice, Amount)
         SELECT @InvoiceId, 'MonthlyFee', @CycleId, f.InstanceId,
@@ -2039,7 +2531,7 @@ BEGIN
     -- 3. finished cycles still holding unbilled support (final cycle of an ended agreement, or late time entries)
     DECLARE fin CURSOR LOCAL FAST_FORWARD FOR
         SELECT bc.BillingCycleId, bc.AgreementId, bc.EndDate FROM dbo.BillingCycle bc
-        WHERE bc.EndDate < @AsOfDate AND (@Only IS NULL OR bc.AgreementId = @Only)
+        WHERE bc.EndDate < @AsOfDate AND bc.AgreementId IN (SELECT AgreementId FROM @Ags)
           AND (bc.ArrearsProcessedAt IS NULL
                OR EXISTS (SELECT 1 FROM dbo.TimeEntry e JOIN dbo.Ticket t ON t.TicketId = e.TicketId
                           WHERE t.AgreementId = bc.AgreementId AND t.WorkType <> 'Project' AND e.IsBillable = 1 AND e.InvoiceId IS NULL
@@ -2055,7 +2547,8 @@ BEGIN
         BEGIN
             BEGIN TRAN;
             SET @cs = DATEADD(day, 1, @ce);
-            EXEC dbo.usp_Invoice_New @AgreementId = @AgreementId, @InvoiceDate = @cs, @InvoiceId = @InvoiceId OUTPUT;
+            SET @EngId = (SELECT EngagementId FROM dbo.Agreement WHERE AgreementId = @AgreementId);
+        EXEC dbo.usp_Invoice_New @EngagementId = @EngId, @InvoiceDate = @cs, @InvoiceId = @InvoiceId OUTPUT;
             EXEC dbo.usp_Invoice_AddArrears @InvoiceId = @InvoiceId, @BillingCycleId = @CycleId;
             EXEC dbo.usp_Invoice_Recalculate @InvoiceId = @InvoiceId;
             COMMIT;
@@ -2067,10 +2560,180 @@ BEGIN
     END
     CLOSE fin; DEALLOCATE fin;
 
-    SELECT i.InvoiceNo, c.ClientName, a.AgreementRef, i.InvoiceDate, i.DueDate, i.SubTotal, i.VatAmount, i.Total, i.Status
-    FROM @Created x JOIN dbo.Invoice i ON i.InvoiceId = x.InvoiceId
-    JOIN dbo.Agreement a ON a.AgreementId = i.AgreementId JOIN dbo.Client c ON c.ClientId = a.ClientId
+    /*-------------------------------------------------------------------------
+      4. consultancy engagements: time invoiced in arrears once a month has
+         ended (or as soon as the work is marked complete); fixed prices are
+         invoiced on completion.
+    -------------------------------------------------------------------------*/
+    DECLARE @Eid int, @Mode varchar(20), @Fixed decimal(10,2), @EStatus varchar(15), @EComp date,
+            @ERef varchar(30), @EName nvarchar(200), @MEnd date, @MStart date, @IDate date, @FpDays nvarchar(20);
+    DECLARE con CURSOR LOCAL FAST_FORWARD FOR
+        SELECT e.EngagementId, e.BillingMode, e.FixedPrice, e.Status, e.CompletedOn, e.EngagementRef, e.Name
+        FROM dbo.Engagement e WHERE e.EngagementId IN (SELECT EngagementId FROM @Engs) ORDER BY e.EngagementRef;
+    OPEN con;
+    FETCH NEXT FROM con INTO @Eid, @Mode, @Fixed, @EStatus, @EComp, @ERef, @EName;
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        IF @Mode IN ('DayRate', 'Hourly')
+        BEGIN
+            DECLARE mth CURSOR LOCAL FAST_FORWARD FOR
+                SELECT DISTINCT EOMONTH(te.WorkStart) FROM dbo.TimeEntry te
+                WHERE te.EngagementId = @Eid AND te.IsBillable = 1 AND te.InvoiceId IS NULL ORDER BY 1;
+            OPEN mth;
+            FETCH NEXT FROM mth INTO @MEnd;
+            WHILE @@FETCH_STATUS = 0
+            BEGIN
+                IF @MEnd <= @AsOfDate OR @EStatus = 'Completed'
+                BEGIN
+                    SET @MStart = DATEADD(day, 1, EOMONTH(@MEnd, -1));
+                    SET @IDate = CASE WHEN @MEnd <= @AsOfDate THEN @MEnd ELSE ISNULL(@EComp, @AsOfDate) END;
+                    BEGIN TRAN;
+                    EXEC dbo.usp_Invoice_New @EngagementId = @Eid, @InvoiceDate = @IDate, @InvoiceId = @InvoiceId OUTPUT;
+
+                    INSERT dbo.InvoiceLine (InvoiceId, LineType, EngagementId, WorkDate, Description, Quantity, UnitPrice, Amount)
+                    SELECT @InvoiceId, 'Consultancy', @Eid, w.WorkDate,
+                           CONVERT(nvarchar(11), w.WorkDate, 106) + N' - ' + w.WorkDone
+                           + CASE WHEN w.RateType = 'OutOfHours' THEN N' (out of hours)' ELSE N'' END,
+                           w.Quantity, w.UnitPrice, CAST(w.Quantity * w.UnitPrice AS decimal(10,2))
+                    FROM dbo.fn_ConsultancyWork(@Eid, 1) w
+                    WHERE w.WorkDate BETWEEN @MStart AND @MEnd
+                    ORDER BY w.WorkDate, w.RateType;
+
+                    UPDATE dbo.TimeEntry SET InvoiceId = @InvoiceId
+                    WHERE EngagementId = @Eid AND IsBillable = 1 AND InvoiceId IS NULL
+                      AND CAST(WorkStart AS date) BETWEEN @MStart AND @MEnd;
+
+                    EXEC dbo.usp_Invoice_Recalculate @InvoiceId = @InvoiceId;
+                    COMMIT;
+                    INSERT @Created VALUES (@InvoiceId);
+                END
+                FETCH NEXT FROM mth INTO @MEnd;
+            END
+            CLOSE mth; DEALLOCATE mth;
+        END
+        ELSE IF @Mode = 'FixedPrice' AND @EStatus = 'Completed'
+             AND NOT EXISTS (SELECT 1 FROM dbo.Invoice i JOIN dbo.InvoiceLine l ON l.InvoiceId = i.InvoiceId
+                             WHERE i.EngagementId = @Eid AND l.LineType = 'FixedFee' AND i.Status <> 'Void')
+        BEGIN
+            SET @IDate = ISNULL(@EComp, @AsOfDate);
+            BEGIN TRAN;
+            EXEC dbo.usp_Invoice_New @EngagementId = @Eid, @InvoiceDate = @IDate, @InvoiceId = @InvoiceId OUTPUT;
+            INSERT dbo.InvoiceLine (InvoiceId, LineType, EngagementId, Description, Quantity, UnitPrice, Amount)
+            VALUES (@InvoiceId, 'FixedFee', @Eid, @EName + N' - agreed fixed price, completed ' + CONVERT(nvarchar(11), @IDate, 106), 1, @Fixed, @Fixed);
+
+            SET @FpDays = (SELECT FORMAT(ISNULL(SUM(w.Days), 0), 'N2') FROM dbo.fn_ConsultancyWork(@Eid, 1) w);
+            IF @FpDays <> N'0.00'
+                INSERT dbo.InvoiceLine (InvoiceId, LineType, EngagementId, Description, Quantity, UnitPrice, Amount)
+                VALUES (@InvoiceId, 'Info', @Eid, N'Work done: ' + @FpDays + N' days, covered by the fixed price', 0, 0, 0);
+
+            UPDATE dbo.TimeEntry SET InvoiceId = @InvoiceId WHERE EngagementId = @Eid AND IsBillable = 1 AND InvoiceId IS NULL;
+            EXEC dbo.usp_Invoice_Recalculate @InvoiceId = @InvoiceId;
+            COMMIT;
+            INSERT @Created VALUES (@InvoiceId);
+        END
+        FETCH NEXT FROM con INTO @Eid, @Mode, @Fixed, @EStatus, @EComp, @ERef, @EName;
+    END
+    CLOSE con; DEALLOCATE con;
+
+    SELECT i.InvoiceNo, i.ClientName, Engagement = ISNULL(i.EngagementRef, N'(free-text)'), i.InvoiceDate, i.DueDate,
+           i.SubTotal, i.VatAmount, i.Total, i.Status
+    FROM @Created x JOIN dbo.vw_Invoice i ON i.InvoiceId = x.InvoiceId
     ORDER BY i.InvoiceNo;
+END
+GO
+
+/*-----------------------------------------------------------------------------
+  Invoices you type yourself: anything that is not a monitoring cycle or
+  consultancy time - licences bought for a client, a one-off piece of work,
+  expenses being re-charged.
+-----------------------------------------------------------------------------*/
+CREATE OR ALTER PROCEDURE dbo.usp_Invoice_Create
+    @Client      nvarchar(200),
+    @InvoiceDate date           = NULL,
+    @Engagement  nvarchar(200)  = NULL,    -- optional: put it against a piece of work
+    @Notes       nvarchar(1000) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @ClientId int = dbo.fn_ClientId(@Client);
+    IF @ClientId IS NULL BEGIN RAISERROR(N'Client "%s" not found.', 16, 1, @Client); RETURN; END
+    DECLARE @Eid int = CASE WHEN @Engagement IS NOT NULL THEN dbo.fn_EngagementId(@Engagement) END;
+    IF @Engagement IS NOT NULL AND @Eid IS NULL BEGIN RAISERROR(N'Engagement "%s" not found.', 16, 1, @Engagement); RETURN; END
+    IF @Eid IS NOT NULL AND (SELECT ClientId FROM dbo.Engagement WHERE EngagementId = @Eid) <> @ClientId
+    BEGIN RAISERROR(N'That engagement belongs to a different client.', 16, 1); RETURN; END
+
+    SET @InvoiceDate = ISNULL(@InvoiceDate, CAST(dbo.fn_UkNow() AS date));
+    DECLARE @InvoiceId int;
+    EXEC dbo.usp_Invoice_New @EngagementId = @Eid, @ClientId = @ClientId, @InvoiceDate = @InvoiceDate, @InvoiceId = @InvoiceId OUTPUT;
+    IF @Notes IS NOT NULL UPDATE dbo.Invoice SET Notes = @Notes WHERE InvoiceId = @InvoiceId;
+
+    DECLARE @No varchar(30) = (SELECT InvoiceNo FROM dbo.Invoice WHERE InvoiceId = @InvoiceId);
+    PRINT N'Draft invoice ' + @No + N' created. Add lines with usp_Invoice_AddLine, then send it with usp_Invoice_SetStatus.';
+    SELECT InvoiceNo, InvoiceDate, DueDate, Total, Status FROM dbo.Invoice WHERE InvoiceId = @InvoiceId;
+END
+GO
+
+CREATE OR ALTER PROCEDURE dbo.usp_Invoice_AddLine
+    @InvoiceNo   varchar(30),
+    @Description nvarchar(500),
+    @Amount      decimal(10,2) = NULL,    -- a single amount, or give @Quantity and @UnitPrice
+    @Quantity    decimal(9,2)  = NULL,
+    @UnitPrice   decimal(9,2)  = NULL,
+    @LineType    varchar(20)   = 'Other'  -- Other | Consultancy | Project | Adjustment | Info
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @InvoiceId int = (SELECT InvoiceId FROM dbo.Invoice WHERE InvoiceNo = @InvoiceNo AND Status = 'Draft');
+    IF @InvoiceId IS NULL BEGIN RAISERROR(N'Draft invoice %s not found (only drafts can be changed).', 16, 1, @InvoiceNo); RETURN; END
+    IF @LineType NOT IN ('Other', 'Consultancy', 'Project', 'Adjustment', 'Info', 'FixedFee')
+    BEGIN RAISERROR(N'@LineType must be Other, Consultancy, Project, FixedFee, Adjustment or Info.', 16, 1); RETURN; END
+    IF @Amount IS NULL AND (@Quantity IS NULL OR @UnitPrice IS NULL)
+    BEGIN RAISERROR(N'Give @Amount, or both @Quantity and @UnitPrice.', 16, 1); RETURN; END
+
+    SET @Quantity  = ISNULL(@Quantity, 1);
+    SET @UnitPrice = ISNULL(@UnitPrice, @Amount / NULLIF(@Quantity, 0));
+    DECLARE @LineAmount decimal(10,2) = CASE WHEN @LineType = 'Info' THEN 0 ELSE CAST(@Quantity * @UnitPrice AS decimal(10,2)) END;
+
+    INSERT dbo.InvoiceLine (InvoiceId, LineType, EngagementId, Description, Quantity, UnitPrice, Amount)
+    SELECT @InvoiceId, @LineType, i.EngagementId, @Description, @Quantity, @UnitPrice, @LineAmount
+    FROM dbo.Invoice i WHERE i.InvoiceId = @InvoiceId;
+
+    EXEC dbo.usp_Invoice_Recalculate @InvoiceId = @InvoiceId;
+    SELECT l.InvoiceLineId, l.LineType, l.Description, l.Quantity, l.UnitPrice, l.Amount
+    FROM dbo.InvoiceLine l WHERE l.InvoiceId = @InvoiceId ORDER BY l.InvoiceLineId;
+    SELECT InvoiceNo, SubTotal, VatAmount, Total FROM dbo.Invoice WHERE InvoiceId = @InvoiceId;
+END
+GO
+
+CREATE OR ALTER PROCEDURE dbo.usp_Invoice_RemoveLine
+    @InvoiceLineId int
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @InvoiceId int = (SELECT l.InvoiceId FROM dbo.InvoiceLine l JOIN dbo.Invoice i ON i.InvoiceId = l.InvoiceId
+                              WHERE l.InvoiceLineId = @InvoiceLineId AND i.Status = 'Draft');
+    IF @InvoiceId IS NULL BEGIN RAISERROR(N'Line %d not found on a draft invoice.', 16, 1, @InvoiceLineId); RETURN; END
+    IF EXISTS (SELECT 1 FROM dbo.InvoiceLine WHERE InvoiceLineId = @InvoiceLineId AND LineType IN ('MonthlyFee', 'BusinessHours', 'OutOfHours', 'PrepaidDrawn', 'PrepaidPurchase'))
+    BEGIN RAISERROR(N'That line was produced by the billing run. Void the invoice instead, correct the time or fees, and run billing again.', 16, 1); RETURN; END
+    DELETE dbo.InvoiceLine WHERE InvoiceLineId = @InvoiceLineId;
+    EXEC dbo.usp_Invoice_Recalculate @InvoiceId = @InvoiceId;
+    SELECT InvoiceNo, SubTotal, VatAmount, Total FROM dbo.Invoice WHERE InvoiceId = @InvoiceId;
+END
+GO
+
+CREATE OR ALTER PROCEDURE dbo.usp_Invoice_Show
+    @InvoiceNo varchar(30)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    IF NOT EXISTS (SELECT 1 FROM dbo.Invoice WHERE InvoiceNo = @InvoiceNo)
+    BEGIN RAISERROR(N'Invoice %s not found.', 16, 1, @InvoiceNo); RETURN; END
+    SELECT i.InvoiceNo, i.ClientName, Engagement = ISNULL(i.EngagementRef, N'(free-text)'), i.EngagementName,
+           i.PurchaseOrder, i.InvoiceDate, i.DueDate, i.SubTotal, i.VatAmount, i.Total, i.Status, i.SentAt, i.PaidAt, i.Notes
+    FROM dbo.vw_Invoice i WHERE i.InvoiceNo = @InvoiceNo;
+    SELECT l.InvoiceLineId, l.LineType, l.WorkDate, l.Description, l.Quantity, l.UnitPrice, l.Amount
+    FROM dbo.InvoiceLine l JOIN dbo.Invoice i ON i.InvoiceId = l.InvoiceId
+    WHERE i.InvoiceNo = @InvoiceNo ORDER BY l.InvoiceLineId;
 END
 GO
 
@@ -2110,8 +2773,8 @@ BEGIN
         -- lift a late-payment pause once nothing is overdue
         UPDATE a SET SupportPausedFrom = NULL
         FROM dbo.Agreement a
-        WHERE a.AgreementId = (SELECT AgreementId FROM dbo.Invoice WHERE InvoiceId = @InvoiceId) AND a.SupportPausedFrom IS NOT NULL
-          AND NOT EXISTS (SELECT 1 FROM dbo.Invoice i WHERE i.AgreementId = a.AgreementId AND i.Status = 'Sent' AND i.DueDate < @StatusDate);
+        WHERE a.ClientId = (SELECT ClientId FROM dbo.Invoice WHERE InvoiceId = @InvoiceId) AND a.SupportPausedFrom IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM dbo.Invoice i WHERE i.ClientId = a.ClientId AND i.Status = 'Sent' AND i.DueDate < @StatusDate);
     END
     ELSE IF @Status = 'Void'
     BEGIN
@@ -2171,15 +2834,27 @@ CREATE OR ALTER PROCEDURE dbo.usp_Invoice_Html
 AS
 BEGIN
     SET NOCOUNT ON;
-    DECLARE @InvoiceId int, @AgreementId int;
-    SELECT @InvoiceId = InvoiceId, @AgreementId = AgreementId FROM dbo.Invoice WHERE InvoiceNo = @InvoiceNo;
+    DECLARE @InvoiceId int, @EngagementId int, @EngType varchar(20);
+    SELECT @InvoiceId = i.InvoiceId, @EngagementId = i.EngagementId, @EngType = e.EngagementType
+    FROM dbo.Invoice i LEFT JOIN dbo.Engagement e ON e.EngagementId = i.EngagementId WHERE i.InvoiceNo = @InvoiceNo;
     IF @InvoiceId IS NULL BEGIN RAISERROR(N'Invoice %s not found.', 16, 1, @InvoiceNo); RETURN; END
+
+    -- what the invoice is for: the agreement reference, or the engagement and its PO number
+    DECLARE @RefHtml nvarchar(1000) = ISNULL((
+        SELECT N'<div class="label" style="margin-top:8px">' + CASE WHEN e.EngagementType = 'Monitoring' THEN N'Agreement' ELSE N'Engagement' END + N'</div>'
+             + dbo.fn_Html(e.EngagementRef)
+             + CASE WHEN e.EngagementType = 'Consultancy' THEN N'<br /><span style="color:#7A7473">' + dbo.fn_Html(e.Name) + N'</span>' ELSE N'' END
+             + ISNULL(N'<div class="label" style="margin-top:8px">Your reference</div>' + dbo.fn_Html(NULLIF(e.PurchaseOrder, N'')), N'')
+        FROM dbo.Engagement e WHERE e.EngagementId = @EngagementId), N'');
 
     DECLARE @Vat bit = CASE WHEN (SELECT VatRatePct FROM dbo.Invoice WHERE InvoiceId = @InvoiceId) > 0 THEN 1 ELSE 0 END;
     DECLARE @Rows nvarchar(max) = (
         SELECT STRING_AGG(CONVERT(nvarchar(max),
                    N'<tr' + CASE WHEN LineType IN ('Info', 'PrepaidDrawn') THEN N' class="info"' ELSE N'' END + N'><td>' + dbo.fn_Html(Description) + N'</td>'
-                 + N'<td class="num">' + CASE WHEN LineType = 'Info' THEN N'' WHEN LineType IN ('BusinessHours', 'OutOfHours', 'PrepaidPurchase', 'PrepaidDrawn') THEN FORMAT(Quantity, 'N2') + N' h' ELSE FORMAT(Quantity, 'N0') END + N'</td>'
+                 + N'<td class="num">' + CASE WHEN LineType = 'Info' THEN N''
+                        WHEN LineType IN ('BusinessHours', 'OutOfHours', 'PrepaidPurchase', 'PrepaidDrawn') THEN FORMAT(Quantity, 'N2') + N' h'
+                        WHEN LineType = 'Consultancy' THEN FORMAT(Quantity, 'N2') + CASE WHEN UnitPrice = 0 THEN N'' ELSE N' d' END
+                        ELSE FORMAT(Quantity, 'N2') END + N'</td>'
                  + N'<td class="num">' + CASE WHEN LineType = 'Info' THEN N'' WHEN LineType = 'PrepaidDrawn' THEN N'pre-paid' ELSE N'&#163;' + FORMAT(UnitPrice, 'N2') END + N'</td>'
                  + N'<td class="num">' + CASE WHEN LineType = 'Info' THEN N'' ELSE N'&#163;' + FORMAT(Amount, 'N2') END + N'</td></tr>'), N'')
                WITHIN GROUP (ORDER BY CASE LineType WHEN 'MonthlyFee' THEN 1 WHEN 'PrepaidPurchase' THEN 2 WHEN 'BusinessHours' THEN 3 WHEN 'OutOfHours' THEN 4 WHEN 'PrepaidDrawn' THEN 5 WHEN 'Info' THEN 7 ELSE 6 END, InvoiceLineId)
@@ -2208,21 +2883,22 @@ tr.info td{color:#55504F;font-style:italic;background:#F2FBFE}
 <div style="text-align:right"><div class="label">Invoice number</div><strong>' + i.InvoiceNo + N'</strong>
 <div class="label" style="margin-top:8px">Invoice date</div>' + CONVERT(nvarchar(11), i.InvoiceDate, 106) + N'
 <div class="label" style="margin-top:8px">Payment due</div>' + CONVERT(nvarchar(11), i.DueDate, 106) + N'
-<div class="label" style="margin-top:8px">Agreement</div>' + a.AgreementRef + N'</div></div>
+' + @RefHtml + N'</div></div>
 <table><tr><th>Description</th><th class="num">Qty</th><th class="num">Rate</th><th class="num">Amount</th></tr>' + ISNULL(@Rows, N'') + N'</table>
 <table class="totals">
 <tr><td>Subtotal</td><td class="num">&#163;' + FORMAT(i.SubTotal, 'N2') + N'</td></tr>'
     + CASE WHEN @Vat = 1 THEN N'<tr><td>VAT at ' + FORMAT(i.VatRatePct, 'N0') + N'%</td><td class="num">&#163;' + FORMAT(i.VatAmount, 'N2') + N'</td></tr>' ELSE N'' END + N'
 <tr class="grand"><td>Total due</td><td class="num">&#163;' + FORMAT(i.Total, 'N2') + N'</td></tr></table>
 <div class="note">' + CASE WHEN @Vat = 0 THEN dbo.fn_Html(dbo.fn_Setting('BusinessName')) + N' is not currently VAT registered, so no VAT is charged.<br />' ELSE N'' END
-    + N'Monthly fees are invoiced in advance; additional support is invoiced in arrears. Payment is due within '
-    + ISNULL(dbo.fn_Setting('PaymentTermsDays'), N'14') + N' days of the invoice date. Late payment may result in support being paused until payment is received.'
+    + CASE WHEN @EngType = 'Monitoring' THEN N'Monthly fees are invoiced in advance; additional support is invoiced in arrears. ' ELSE N'' END
+    + N'Payment is due within ' + ISNULL(dbo.fn_Setting('PaymentTermsDays'), N'14') + N' days of the invoice date.'
+    + CASE WHEN @EngType = 'Monitoring' THEN N' Late payment may result in support being paused until payment is received.' ELSE N'' END
     + CASE WHEN NULLIF(dbo.fn_Setting('PaymentDetails'), N'') IS NOT NULL THEN N'<br /><br /><strong>Payment details:</strong> ' + REPLACE(dbo.fn_Html(dbo.fn_Setting('PaymentDetails')), CHAR(10), N'<br />') ELSE N'' END
     + N'</div></div>
 <div class="foot">' + dbo.fn_Html(dbo.fn_Setting('BusinessName')) + ISNULL(N' &#183; ' + dbo.fn_Html(NULLIF(dbo.fn_Setting('BusinessAddress'), N'')), N'')
     + N' &#183; ' + dbo.fn_Html(dbo.fn_Setting('BusinessEmail')) + N' &#183; ' + dbo.fn_Html(dbo.fn_Setting('BusinessWebsite')) + N'</div>
 </div></body></html>'
-    FROM dbo.Invoice i JOIN dbo.Agreement a ON a.AgreementId = i.AgreementId JOIN dbo.Client c ON c.ClientId = a.ClientId
+    FROM dbo.Invoice i JOIN dbo.Client c ON c.ClientId = i.ClientId
     WHERE i.InvoiceId = @InvoiceId;
 
     IF @Select = 1 SELECT InvoiceNo = @InvoiceNo, Html = @Html;
@@ -2290,15 +2966,39 @@ BEGIN
            + N'. Send to: ' + ISNULL((SELECT STRING_AGG(ISNULL(ct.Email, ct.FullName + N' (no e-mail)'), N'; ') FROM dbo.Contact ct
                                       WHERE ct.ClientId = c.ClientId AND ct.IsActive = 1 AND ct.IsBillingContact = 1), N'NO ONE - add a contact that receives invoices')
            + N'. Then usp_Invoice_SetStatus @Status = ''Sent''.', NULL
-    FROM dbo.Invoice i JOIN dbo.Agreement a ON a.AgreementId = i.AgreementId JOIN dbo.Client c ON c.ClientId = a.ClientId
+    FROM dbo.vw_Invoice i JOIN dbo.Client c ON c.ClientId = i.ClientId
     WHERE i.Status = 'Draft';
 
     INSERT #A
     SELECT 1, 'Billing', c.ClientName, N'Payment overdue: ' + i.InvoiceNo,
            NCHAR(163) + FORMAT(i.Total, 'N2') + N' was due ' + CONVERT(nvarchar(11), i.DueDate, 106) + N' (' + CONVERT(nvarchar(10), DATEDIFF(day, i.DueDate, @Today)) + N' days). Support may be paused until paid'
-           + CASE WHEN a.SupportPausedFrom IS NOT NULL THEN N' - currently PAUSED.' ELSE N'.' END, NULL
-    FROM dbo.Invoice i JOIN dbo.Agreement a ON a.AgreementId = i.AgreementId JOIN dbo.Client c ON c.ClientId = a.ClientId
+           + CASE WHEN i.SupportPausedFrom IS NOT NULL THEN N' - currently PAUSED.' ELSE N'.' END, NULL
+    FROM dbo.vw_Invoice i JOIN dbo.Client c ON c.ClientId = i.ClientId
     WHERE i.Status = 'Sent' AND i.DueDate < @Today;
+
+    -- Consultancy: work waiting to be invoiced, and jobs that look finished
+    INSERT #A
+    SELECT 3, 'Consultancy', c.ClientName, N'Unbilled work: ' + e.EngagementRef + N' ' + e.Name,
+           FORMAT(u.Days, 'N2') + N' days (' + NCHAR(163) + FORMAT(u.Value, 'N2') + N') logged up to ' + CONVERT(nvarchar(11), u.LastWorked, 106)
+           + N'. Invoiced at the end of the month by usp_Billing_Run.', NULL
+    FROM dbo.Engagement e JOIN dbo.Client c ON c.ClientId = e.ClientId
+    CROSS APPLY (SELECT Days = SUM(w.Days), Value = SUM(w.Quantity * w.UnitPrice), LastWorked = MAX(w.WorkDate)
+                 FROM dbo.fn_ConsultancyWork(e.EngagementId, 1) w) u
+    WHERE e.EngagementType = 'Consultancy' AND e.Status IN ('Active', 'OnHold') AND e.BillingMode <> 'FixedPrice' AND u.Days > 0;
+
+    INSERT #A
+    SELECT 2, 'Consultancy', c.ClientName, N'Engagement past its end date: ' + e.EngagementRef + N' ' + e.Name,
+           N'It ended ' + CONVERT(nvarchar(11), e.EndDate, 106) + N' but is still open. Mark it complete (usp_Engagement_Complete) so the final invoice goes out.', NULL
+    FROM dbo.Engagement e JOIN dbo.Client c ON c.ClientId = e.ClientId
+    WHERE e.EngagementType = 'Consultancy' AND e.Status IN ('Active', 'OnHold') AND e.EndDate < @Today;
+
+    INSERT #A
+    SELECT 2, 'Consultancy', c.ClientName, N'Fixed price to invoice: ' + e.EngagementRef + N' ' + e.Name,
+           NCHAR(163) + FORMAT(e.FixedPrice, 'N2') + N' agreed, completed ' + CONVERT(nvarchar(11), e.CompletedOn, 106) + N'. The next billing run raises it.', NULL
+    FROM dbo.Engagement e JOIN dbo.Client c ON c.ClientId = e.ClientId
+    WHERE e.EngagementType = 'Consultancy' AND e.BillingMode = 'FixedPrice' AND e.Status = 'Completed'
+      AND NOT EXISTS (SELECT 1 FROM dbo.Invoice i JOIN dbo.InvoiceLine l ON l.InvoiceId = i.InvoiceId
+                      WHERE i.EngagementId = e.EngagementId AND l.LineType = 'FixedFee' AND i.Status <> 'Void');
 
     -- Contacts: onboarding done, but every named contact has since been removed
     INSERT #A
@@ -2430,13 +3130,30 @@ BEGIN
     WHERE a.EndDate IS NULL OR a.EndDate >= DATEADD(day, -60, @Today)
     ORDER BY c.ClientName;
 
+    -- Consultancy engagements
+    SELECT e.EngagementRef, c.ClientName, e.Name, e.Status,
+           Rate = CASE e.BillingMode WHEN 'DayRate' THEN NCHAR(163) + FORMAT(e.DayRate, 'N0') + N'/day'
+                                     WHEN 'Hourly'  THEN NCHAR(163) + FORMAT(e.HourlyRate, 'N0') + N'/hour'
+                                     ELSE NCHAR(163) + FORMAT(e.FixedPrice, 'N0') + N' fixed' END,
+           UnbilledDays = ISNULL(u.Days, 0), UnbilledValue = ISNULL(u.Value, 0), LastWorked = u.LastWorked,
+           Invoiced = ISNULL((SELECT SUM(i.Total) FROM dbo.Invoice i WHERE i.EngagementId = e.EngagementId AND i.Status <> 'Void'), 0)
+    FROM dbo.Engagement e JOIN dbo.Client c ON c.ClientId = e.ClientId
+    OUTER APPLY (SELECT Days = SUM(w.Days), Value = SUM(w.Quantity * w.UnitPrice), LastWorked = MAX(w.WorkDate)
+                 FROM dbo.fn_ConsultancyWork(e.EngagementId, 1) w) u
+    WHERE e.EngagementType = 'Consultancy'
+      AND (e.Status IN ('Active', 'OnHold') OR e.CompletedOn >= DATEADD(day, -60, @Today))
+    ORDER BY c.ClientName, e.EngagementRef;
+
     -- Money
     SELECT MonthlyRecurringRevenue = ISNULL((SELECT SUM(f.MonthlyFee) FROM dbo.Agreement a CROSS APPLY dbo.fn_AgreementFees(a.AgreementId, @Today) f
                                              WHERE a.StartDate <= @Today AND (a.EndDate IS NULL OR a.EndDate >= @Today)), 0),
            DraftInvoicesTotal = ISNULL((SELECT SUM(Total) FROM dbo.Invoice WHERE Status = 'Draft'), 0),
            UnpaidSentTotal    = ISNULL((SELECT SUM(Total) FROM dbo.Invoice WHERE Status = 'Sent'), 0),
            OverdueTotal       = ISNULL((SELECT SUM(Total) FROM dbo.Invoice WHERE Status = 'Sent' AND DueDate < @Today), 0),
-           PaidThisYear       = ISNULL((SELECT SUM(Total) FROM dbo.Invoice WHERE Status = 'Paid' AND YEAR(PaidAt) = YEAR(@Today)), 0);
+           PaidThisYear       = ISNULL((SELECT SUM(Total) FROM dbo.Invoice WHERE Status = 'Paid' AND YEAR(PaidAt) = YEAR(@Today)), 0),
+           UnbilledConsultancy = ISNULL((SELECT SUM(w.Quantity * w.UnitPrice) FROM dbo.Engagement e
+                                         CROSS APPLY dbo.fn_ConsultancyWork(e.EngagementId, 1) w
+                                         WHERE e.EngagementType = 'Consultancy' AND e.Status <> 'Cancelled'), 0);
 END
 GO
 
@@ -2501,6 +3218,6 @@ BEGIN
 END
 GO
 
-INSERT dbo.InstallHistory (Version) VALUES ('1.6.0');   -- bump with every schema change: Molehill Manager offers the upgrade
-PRINT N'Molehill Admin 1.6.0 installed.';
+INSERT dbo.InstallHistory (Version) VALUES ('2.0.0');   -- bump with every schema change: Molehill Manager offers the upgrade
+PRINT N'Molehill Admin 2.0.0 installed.';
 GO

@@ -5,10 +5,12 @@
 -------------------------------------------------------------------------------
  Puts a client back to "billing has never run": removes their invoices, invoice
  lines and billing cycles, releases their logged time, and gives back any
- pre-paid hours those invoices took.
+ pre-paid hours those invoices took. Covers every engagement they have -
+ Molehill Watch support and consultancy alike.
 
- KEPT: the client, agreement, instances, contacts, onboarding, tickets, time
- entries, weekly reports, quotes and pre-paid hour packages themselves.
+ KEPT: the client, their engagements and agreements, instances, contacts,
+ onboarding, tickets, time entries, weekly reports, quotes and pre-paid
+ hour packages themselves.
 
  The next billing run rebuilds the cycles and invoices from that data, so
  invoice numbers are reused and totals come out the same (unless prices,
@@ -28,8 +30,8 @@ USE MolehillAdmin;
 GO
 SET NOCOUNT ON;
 
-DECLARE @Client nvarchar(200) = N'Example Widgets Ltd';   -- client name or agreement ref
-DECLARE @OnlyThisAgreement bit = 0;   -- 0 = every agreement the client has; 1 = only the agreement ref given above
+DECLARE @Client nvarchar(200) = N'Example Widgets Ltd';   -- client name, agreement ref or engagement ref
+DECLARE @OnlyThisAgreement bit = 0;   -- 0 = everything the client has; 1 = only the agreement / engagement ref given above
 DECLARE @KeepPackageInvoices bit = 1; -- 1 = keep invoices that sold pre-paid hours (they are sales, not billing runs).
                                       --     Set to 0 only if you also want those gone: a billing run will NOT raise them
                                       --     again, so you would have to cancel the package and sell it again.
@@ -39,21 +41,26 @@ BEGIN TRAN;
 DECLARE @ClientId int = dbo.fn_ClientId(@Client);
 IF @ClientId IS NULL BEGIN RAISERROR(N'Client or agreement "%s" not found.', 16, 1, @Client); ROLLBACK; RETURN; END
 
+DECLARE @Engagements TABLE (EngagementId int PRIMARY KEY);
+INSERT @Engagements
+SELECT EngagementId FROM dbo.Engagement
+WHERE (@OnlyThisAgreement = 1 AND EngagementRef = @Client)
+   OR (@OnlyThisAgreement = 0 AND ClientId = @ClientId);
+
 DECLARE @Agreements TABLE (AgreementId int PRIMARY KEY);
 INSERT @Agreements
-SELECT AgreementId FROM dbo.Agreement
-WHERE (@OnlyThisAgreement = 1 AND AgreementRef = @Client)
-   OR (@OnlyThisAgreement = 0 AND ClientId = @ClientId);
+SELECT AgreementId FROM dbo.Agreement WHERE EngagementId IN (SELECT EngagementId FROM @Engagements);
 
 DECLARE @Invoices TABLE (InvoiceId int PRIMARY KEY);
 INSERT @Invoices
 SELECT i.InvoiceId FROM dbo.Invoice i
-WHERE i.AgreementId IN (SELECT AgreementId FROM @Agreements)
+WHERE (i.EngagementId IN (SELECT EngagementId FROM @Engagements)
+       OR (i.EngagementId IS NULL AND i.ClientId = @ClientId AND @OnlyThisAgreement = 0))   -- free-text invoices too
   AND (@KeepPackageInvoices = 0 OR NOT EXISTS (SELECT 1 FROM dbo.PrepaidPackage p WHERE p.InvoiceId = i.InvoiceId));
 
 /*--------------------------------------------------------------- what goes */
-SELECT Removing = 'Invoices', i.InvoiceNo, i.InvoiceDate, i.Total, i.Status
-FROM dbo.Invoice i JOIN @Invoices x ON x.InvoiceId = i.InvoiceId ORDER BY i.InvoiceNo;
+SELECT Removing = 'Invoices', i.InvoiceNo, For_ = ISNULL(i.EngagementRef, N'(free-text)'), i.InvoiceDate, i.Total, i.Status
+FROM dbo.vw_Invoice i JOIN @Invoices x ON x.InvoiceId = i.InvoiceId ORDER BY i.InvoiceNo;
 
 SELECT Removing = 'Billing cycles', bc.CycleNumber, bc.StartDate, bc.EndDate, bc.IncludedHoursUsed
 FROM dbo.BillingCycle bc WHERE bc.AgreementId IN (SELECT AgreementId FROM @Agreements) ORDER BY bc.AgreementId, bc.CycleNumber;
@@ -86,11 +93,16 @@ DELETE dbo.Invoice WHERE InvoiceId IN (SELECT InvoiceId FROM @Invoices);
 DELETE dbo.BillingCycle WHERE AgreementId IN (SELECT AgreementId FROM @Agreements);
 
 /*--------------------------------------------------------------- what's left */
-SELECT Left_Invoices = COUNT(*) FROM dbo.Invoice WHERE AgreementId IN (SELECT AgreementId FROM @Agreements);
+SELECT Left_Invoices = COUNT(*) FROM dbo.Invoice WHERE ClientId = @ClientId;
 SELECT Left_Cycles = COUNT(*) FROM dbo.BillingCycle WHERE AgreementId IN (SELECT AgreementId FROM @Agreements);
 SELECT PrepaidNow = f.PackageRef, f.Hours, f.Used, f.Remaining, f.State
 FROM @Agreements a CROSS APPLY dbo.fn_PrepaidPackages(a.AgreementId, CAST(dbo.fn_UkNow() AS date)) f
 ORDER BY f.PackageRef;
+
+SELECT ConsultancyNow = e.EngagementRef, e.Name, UnbilledDays = ISNULL(u.Days, 0), UnbilledValue = ISNULL(u.Value, 0)
+FROM dbo.Engagement e JOIN @Engagements x ON x.EngagementId = e.EngagementId
+OUTER APPLY (SELECT Days = SUM(w.Days), Value = SUM(w.Quantity * w.UnitPrice) FROM dbo.fn_ConsultancyWork(e.EngagementId, 1) w) u
+WHERE e.EngagementType = 'Consultancy';
 
 PRINT N'Billing reset. Run usp_Billing_Run for this client (or F6 in Molehill Manager) to rebuild the cycles and invoices.';
 
