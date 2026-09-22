@@ -1,7 +1,7 @@
 /*
 ===============================================================================
  Molehill Watch - SQL Server Support Package
- Molehill Admin: clients, engagements, tickets, time and billing  Version 2.1.0
+ Molehill Admin: clients, engagements, tickets, time and billing  Version 2.2.0
  Molehill Data Services  -  jay@jayparry.co.uk  -  molehilldataservices.com
 -------------------------------------------------------------------------------
  Runs on YOUR OWN SQL Server (Express is fine), not on client servers.
@@ -2217,6 +2217,7 @@ BEGIN
     PRINT N'Pre-paid hours ' + @Ref + N': ' + FORMAT(@Hours, 'N2') + N' h at GBP ' + FORMAT(@HourlyRate, 'N2') + N'/h = GBP ' + FORMAT(@Hours * @HourlyRate, 'N2')
         + CASE WHEN @Std > @HourlyRate THEN N' (GBP ' + FORMAT(@Std - @HourlyRate, 'N2') + N'/h below the standard business-hours rate).'
                WHEN @Std IS NOT NULL THEN N'. Note: not below the standard business-hours rate of GBP ' + FORMAT(@Std, 'N2') + N'/h.' ELSE N'.' END;
+    IF @InvoiceId IS NOT NULL EXEC dbo.usp_Invoice_Renumber @Year = NULL, @Quiet = 1;   -- keep the numbering in date order
     DECLARE @InvNo varchar(30) = (SELECT InvoiceNo FROM dbo.Invoice WHERE InvoiceId = @InvoiceId);
     IF @Invoice = 1 PRINT N'Draft invoice ' + @InvNo + N' created for the package.';
     ELSE PRINT N'No invoice created (@Invoice = 0): bill it yourself, e.g. with usp_Invoice_Adjust.';
@@ -2694,10 +2695,80 @@ BEGIN
     END
     CLOSE con; DEALLOCATE con;
 
+    -- numbers follow the invoice date, whatever order the run raised them in
+    IF EXISTS (SELECT 1 FROM @Created) EXEC dbo.usp_Invoice_Renumber @Quiet = 1;
+
     SELECT i.InvoiceNo, i.ClientName, Engagement = ISNULL(i.EngagementRef, N'(free-text)'), i.InvoiceDate, i.DueDate,
            i.SubTotal, i.VatAmount, i.Total, i.Status
     FROM @Created x JOIN dbo.vw_Invoice i ON i.InvoiceId = x.InvoiceId
-    ORDER BY i.InvoiceNo;
+    ORDER BY i.InvoiceDate, i.InvoiceNo;
+END
+GO
+
+/*-----------------------------------------------------------------------------
+  Invoice numbers run in invoice-date order. A billing run can raise invoices
+  in any order (support cycles, then each engagement's periods), so once it has
+  finished, the drafts are renumbered into date order.
+
+  Anything sent, paid or voided keeps its number for good - those have gone to
+  the client, and a voided number is never handed out again. Drafts take the
+  numbers left over, in date order, so a client's invoices arrive in sequence.
+-----------------------------------------------------------------------------*/
+CREATE OR ALTER PROCEDURE dbo.usp_Invoice_Renumber
+    @Year  int = NULL,     -- NULL = every year that has a draft invoice
+    @Quiet bit = 0         -- 1 = say nothing (the billing run uses this)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @Prefix varchar(10) = ISNULL(NULLIF(dbo.fn_Setting('InvoicePrefix'), N''), 'INV');
+    DECLARE @Changed TABLE (InvoiceId int PRIMARY KEY, OldNo varchar(30), NewNo varchar(30), InvoiceDate date);
+
+    DECLARE @y int;
+    DECLARE yr CURSOR LOCAL FAST_FORWARD FOR
+        SELECT DISTINCT YEAR(InvoiceDate) FROM dbo.Invoice
+        WHERE Status = 'Draft' AND (@Year IS NULL OR YEAR(InvoiceDate) = @Year);
+    OPEN yr;
+    FETCH NEXT FROM yr INTO @y;
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        DECLARE @Year4 char(4) = CONVERT(char(4), @y);
+        DECLARE @Taken TABLE (Seq int PRIMARY KEY);
+        DELETE @Taken;
+        INSERT @Taken
+        SELECT DISTINCT TRY_CONVERT(int, RIGHT(InvoiceNo, 4)) FROM dbo.Invoice
+        WHERE Status <> 'Draft' AND InvoiceNo LIKE @Prefix + '-' + @Year4 + '-%' AND TRY_CONVERT(int, RIGHT(InvoiceNo, 4)) IS NOT NULL;
+
+        DECLARE @Drafts int = (SELECT COUNT(*) FROM dbo.Invoice WHERE Status = 'Draft' AND YEAR(InvoiceDate) = @y);
+        DECLARE @Need int = @Drafts + (SELECT COUNT(*) FROM @Taken);
+
+        IF OBJECT_ID(N'tempdb..#Map') IS NOT NULL DROP TABLE #Map;
+        ;WITH n AS (SELECT TOP (@Need) Seq = ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) FROM sys.all_columns),
+              free AS (SELECT Seq, rn = ROW_NUMBER() OVER (ORDER BY Seq) FROM n WHERE Seq NOT IN (SELECT Seq FROM @Taken)),
+              d AS (SELECT InvoiceId, InvoiceNo, InvoiceDate, rn = ROW_NUMBER() OVER (ORDER BY InvoiceDate, InvoiceId)
+                    FROM dbo.Invoice WHERE Status = 'Draft' AND YEAR(InvoiceDate) = @y)
+        SELECT d.InvoiceId, OldNo = d.InvoiceNo, d.InvoiceDate,
+               NewNo = @Prefix + '-' + @Year4 + '-' + RIGHT('0000' + CONVERT(varchar(10), f.Seq), 4)
+        INTO #Map
+        FROM d JOIN free f ON f.rn = d.rn;
+
+        DELETE #Map WHERE OldNo = NewNo;
+        IF EXISTS (SELECT 1 FROM #Map)
+        BEGIN
+            -- park them out of the way first, so swapping two numbers cannot clash
+            UPDATE i SET InvoiceNo = 'RENUM-' + CONVERT(varchar(20), i.InvoiceId)
+            FROM dbo.Invoice i JOIN #Map m ON m.InvoiceId = i.InvoiceId;
+            UPDATE i SET InvoiceNo = m.NewNo
+            FROM dbo.Invoice i JOIN #Map m ON m.InvoiceId = i.InvoiceId;
+            INSERT @Changed SELECT InvoiceId, OldNo, NewNo, InvoiceDate FROM #Map;
+        END
+        DROP TABLE #Map;
+        FETCH NEXT FROM yr INTO @y;
+    END
+    CLOSE yr; DEALLOCATE yr;
+
+    IF @Quiet = 1 RETURN;
+    IF NOT EXISTS (SELECT 1 FROM @Changed) PRINT N'Invoice numbers are already in date order.';
+    SELECT Renumbered = OldNo, NowCalled = NewNo, InvoiceDate FROM @Changed ORDER BY InvoiceDate, NewNo;
 END
 GO
 
@@ -2726,6 +2797,7 @@ BEGIN
     EXEC dbo.usp_Invoice_New @EngagementId = @Eid, @ClientId = @ClientId, @InvoiceDate = @InvoiceDate, @InvoiceId = @InvoiceId OUTPUT;
     IF @Notes IS NOT NULL UPDATE dbo.Invoice SET Notes = @Notes WHERE InvoiceId = @InvoiceId;
 
+    EXEC dbo.usp_Invoice_Renumber @Year = NULL, @Quiet = 1;   -- keep the numbering in date order
     DECLARE @No varchar(30) = (SELECT InvoiceNo FROM dbo.Invoice WHERE InvoiceId = @InvoiceId);
     PRINT N'Draft invoice ' + @No + N' created. Add lines with usp_Invoice_AddLine, then send it with usp_Invoice_SetStatus.';
     SELECT InvoiceNo, InvoiceDate, DueDate, Total, Status FROM dbo.Invoice WHERE InvoiceId = @InvoiceId;
@@ -2743,7 +2815,7 @@ AS
 BEGIN
     SET NOCOUNT ON;
     DECLARE @InvoiceId int = (SELECT InvoiceId FROM dbo.Invoice WHERE InvoiceNo = @InvoiceNo AND Status = 'Draft');
-    IF @InvoiceId IS NULL BEGIN RAISERROR(N'Draft invoice %s not found (only drafts can be changed).', 16, 1, @InvoiceNo); RETURN; END
+    IF @InvoiceId IS NULL BEGIN RAISERROR(N'Draft invoice %s not found (only drafts can be changed - and draft numbers shift to stay in invoice-date order, so check the current one).', 16, 1, @InvoiceNo); RETURN; END
     IF @LineType NOT IN ('Other', 'Consultancy', 'Project', 'Adjustment', 'Info', 'FixedFee')
     BEGIN RAISERROR(N'@LineType must be Other, Consultancy, Project, FixedFee, Adjustment or Info.', 16, 1); RETURN; END
     IF @Amount IS NULL AND (@Quantity IS NULL OR @UnitPrice IS NULL)
@@ -2805,7 +2877,7 @@ AS
 BEGIN
     SET NOCOUNT ON;
     DECLARE @InvoiceId int = (SELECT InvoiceId FROM dbo.Invoice WHERE InvoiceNo = @InvoiceNo AND Status = 'Draft');
-    IF @InvoiceId IS NULL BEGIN RAISERROR(N'Draft invoice %s not found (only drafts can be changed).', 16, 1, @InvoiceNo); RETURN; END
+    IF @InvoiceId IS NULL BEGIN RAISERROR(N'Draft invoice %s not found (only drafts can be changed - and draft numbers shift to stay in invoice-date order, so check the current one).', 16, 1, @InvoiceNo); RETURN; END
     INSERT dbo.InvoiceLine (InvoiceId, LineType, Description, Quantity, UnitPrice, Amount) VALUES (@InvoiceId, 'Adjustment', @Description, 1, @Amount, @Amount);
     EXEC dbo.usp_Invoice_Recalculate @InvoiceId = @InvoiceId;
     SELECT InvoiceNo, SubTotal, VatAmount, Total FROM dbo.Invoice WHERE InvoiceId = @InvoiceId;
@@ -3279,6 +3351,6 @@ BEGIN
 END
 GO
 
-INSERT dbo.InstallHistory (Version) VALUES ('2.1.0');   -- bump with every schema change: Molehill Manager offers the upgrade
-PRINT N'Molehill Admin 2.1.0 installed.';
+INSERT dbo.InstallHistory (Version) VALUES ('2.2.0');   -- bump with every schema change: Molehill Manager offers the upgrade
+PRINT N'Molehill Admin 2.2.0 installed.';
 GO

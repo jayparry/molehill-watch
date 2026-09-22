@@ -94,7 +94,9 @@ Running from source (`dotnet run`) needs the .NET 8 SDK and keeps its config nex
 | **Dashboard** | The daily to-do list (SLA, onboarding, versions, billing, reviews), plus money totals | Full alert text |
 | **Clients** | Everything being billed: Molehill Watch agreements and consultancy engagements, with status, rate and anything not yet invoiced | Opens the agreement, or the engagement |
 | **Tickets** | Open tickets (or all), with SLA due times and hours logged | Respond, log time, estimate or approve, close |
-| **Billing** | Outstanding or all invoices, with what each is for and its lines | Save as HTML, mark sent or paid, add or remove a line, adjust, void |
+| **Billing** | Outstanding or all invoices, with what each is for and its lines | Save as HTML, mark sent or paid, add or remove a line, adjust, void, put draft numbers back in date order |
+
+Invoice numbers follow the invoice date: after every billing run the drafts are renumbered so the oldest is the lowest number. Sent, paid and voided invoices keep theirs. A draft's number can therefore change when an earlier-dated invoice turns up - read it off the screen rather than from memory.
 
 **Agreement window** (Enter on a client):
 

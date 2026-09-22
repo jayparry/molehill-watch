@@ -215,6 +215,8 @@ For consultancy engagements it raises a separate draft invoice per engagement fo
 
 Draft invoices are written to `Documents\Molehill Admin\Invoices\`. Open one in a browser and print it to PDF. A cycle with nothing covered and nothing owed gets no invoice, and the billing run tells you so. That usually means an instance's covered-from date is wrong.
 
+**Invoice numbers run in invoice-date order.** A run raises support cycles and consultancy periods in whatever order it works through them, so at the end it renumbers the drafts by date - the oldest invoice is always the lowest number. Anything **sent, paid or voided keeps its number for good**, and a voided number is never handed out again; drafts take the numbers left over. One consequence: a draft's number can change when a new, earlier-dated invoice appears, so quote numbers from the current list rather than one you wrote down. `EXEC dbo.usp_Invoice_Renumber;` does it on demand and prints what moved.
+
 | Step | Command |
 |---|---|
 | Add a credit or extra line to a draft | `EXEC dbo.usp_Invoice_Adjust @InvoiceNo = 'MDS-2026-0004', @Description = N'Goodwill credit', @Amount = -50;` |

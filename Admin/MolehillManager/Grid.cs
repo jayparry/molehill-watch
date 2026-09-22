@@ -93,6 +93,13 @@ public static class InvoiceActions
             if (MessageBox.Query("Void", $"Void {invoiceNo}? Any time it billed becomes billable again.", "Void", "Cancel") == 0)
                 Ui.Form(AdminForms.SetInvoiceStatus(db, invoiceNo, "Void"), refresh);
         }));
+        list.Add(("Put draft numbers back in date order", () => Ui.Try("Invoice numbers", () =>
+        {
+            var r = db.Proc("dbo.usp_Invoice_Renumber");
+            if (r.First is { Rows.Count: 0 }) r.Messages.Add("Nothing to do - they are already in date order.");
+            Output.Show("Invoice numbers", r);
+            refresh();
+        })));
         return list;
     }
 
