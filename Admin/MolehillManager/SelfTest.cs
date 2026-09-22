@@ -516,8 +516,8 @@ public static class SelfTest
         Console.WriteLine();
 
         Step("new client + contact + agreement", () => Submit(AdminForms.NewClient(db),
-                ("ClientName", name), ("BillingEmail", "accounts@selftest.example"), ("ContactName", "Pat Tester"),
-                ("ContactEmail", "pat@selftest.example"), ("ContactIsBilling", "1"), ("StartDate", D(start)),
+                ("ClientName", name), ("ContactName", "Pat Tester"),
+                ("ContactEmail", "pat@selftest.example"), ("ContactReceivesInvoices", "0"), ("StartDate", D(start)),
                 ("SignedDate", D(start.AddDays(-7))), ("AgreementRef", reference)),
             r => r.Tables.Any(t => t.Columns.Contains("AgreementRef") && t.Rows.Count == 1 && (string)t.Rows[0]["AgreementRef"] == reference) ? null : "agreement not returned");
 
@@ -526,6 +526,13 @@ public static class SelfTest
         ExpectError("required field is enforced", () => Submit(AdminForms.AddInstance(db, reference)), "Name is required");
         ExpectError("bad number is caught", () => Submit(AdminForms.AddInstance(db, reference), ("InstanceName", "X"), ("DatabaseCount", "lots")), "not a whole number");
 
+        Step("first contact raises tickets, doesn't receive invoices", () => Queries.Contacts(db, reference),
+            t => t.Rows.Cast<DataRow>().Any(r => (string)r["Name"] == "Pat Tester" && (string)r["Tickets"] == "Yes" && (string)r["Invoices"] == "") ? null : "flags wrong");
+        Step("summary says nobody receives invoices yet", () => AgreementWindow.Summary(db, reference, false), s => s.Contains("Invoices to: NO ONE") ? null : "not flagged");
+        Step("shared accounts address: receives invoices only", () => Submit(AdminForms.AddContact(db, name), ("FullName", "Accounts"),
+            ("Email", "accounts@selftest.example"), ("IsBillingContact", "1"), ("StartDate", D(start))));
+        Step("it doesn't raise tickets, and the summary shows where invoices go", () => AgreementWindow.Summary(db, reference, false),
+            s => s.Contains("Invoices to: Accounts <accounts@selftest.example>") ? null : s.Split('\n').FirstOrDefault(l => l.StartsWith("Invoices")) ?? "no line");
         Step("add contact from a start date", () => Submit(AdminForms.AddContact(db, name), ("FullName", "Sam Second"), ("Email", "sam@selftest.exmaple"),
             ("Phone", "01234 567890"), ("StartDate", D(start))));
         int SamId() => (int)Queries.Contacts(db, reference, includeRemoved: true).Rows.Cast<DataRow>().First(r => (string)r["Name"] == "Sam Second")["Id"];
@@ -623,6 +630,8 @@ public static class SelfTest
             t => t.Rows.Cast<DataRow>().Any(r => (string)r["Type"] == "Adjustment" && (decimal)r["Amount"] == -10m) ? null : "no adjustment line");
         var folder = Path.Combine(Path.GetTempPath(), "MolehillManager-selftest");
         Step("invoice HTML saved", () => AdminForms.SaveInvoiceHtml(db, invoice, folder), p => File.ReadAllText(p).Contains(invoice) ? null : "HTML lacks invoice number");
+        Step("invoice is billed to the contact that receives invoices, not the ticket contact", () => File.ReadAllText(Path.Combine(folder, invoice + ".html")),
+            h => h.Contains("accounts@selftest.example") && !h.Contains("pat@selftest.example") ? null : "wrong recipients");
         Step("dashboard HTML saved", () => AdminForms.SaveDashboardHtml(db, folder), p => File.ReadAllText(p).Contains("<html", StringComparison.OrdinalIgnoreCase) ? null : "not HTML");
         Step("mark sent", () => Submit(AdminForms.SetInvoiceStatus(db, invoice, "Sent")));
         Step("mark paid", () => Submit(AdminForms.SetInvoiceStatus(db, invoice, "Paid")));

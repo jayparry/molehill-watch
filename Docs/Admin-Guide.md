@@ -35,10 +35,15 @@ The **To do** list covers:
 
 Work through `Admin\Example-NewClient.sql`. It's the same steps with example values. Change `ROLLBACK` to `COMMIT` for real use.
 
-1. **Client and contacts.** Mark one contact as the named point of contact (required by the agreement).
+1. **Client and contacts.** Each contact has two ticks:
+   * **Raises tickets** (`@IsNamedContact`): the agreement needs at least one named point of contact.
+   * **Receives invoices** (`@IsBillingContact`): this is the only billing setting. Invoices are addressed to every current contact with it ticked, and the dashboard tells you who to send drafts to.
+
+   A shared finance mailbox is simply a contact with only **Receives invoices** ticked.
    ```sql
-   EXEC dbo.usp_Client_Add @ClientName = N'Contoso Ltd', @Address = N'...', @BillingEmail = N'accounts@contoso.co.uk';
-   EXEC dbo.usp_Contact_Add @ClientName = N'Contoso Ltd', @FullName = N'Sam Smith', @Email = N'sam@contoso.co.uk', @IsNamedContact = 1, @IsBillingContact = 1;
+   EXEC dbo.usp_Client_Add @ClientName = N'Contoso Ltd', @Address = N'...';
+   EXEC dbo.usp_Contact_Add @ClientName = N'Contoso Ltd', @FullName = N'Sam Smith', @Email = N'sam@contoso.co.uk', @IsNamedContact = 1;
+   EXEC dbo.usp_Contact_Add @ClientName = N'Contoso Ltd', @FullName = N'Accounts', @Email = N'accounts@contoso.co.uk', @IsBillingContact = 1;
    ```
 2. **Agreement.** The start date drives billing cycles, the 3-month term and notice dates.
    ```sql
@@ -98,7 +103,7 @@ Contacts are never deleted. Removing someone ends their current period as a cont
 * `@Client` takes the client name or agreement ref, or use `@ContactId` from `usp_Contact_Show`.
 * E-mail addresses that are obviously malformed are rejected.
 * A new start date must be after their last end date.
-* Removing the only named contact prints a warning, and the dashboard flags any agreement left with no current named contact.
+* Removing the only contact who raises tickets, or the only one who receives invoices, prints a warning. The dashboard flags any agreement without a current contact who raises tickets, or without anyone who receives invoices.
 * A ticket logged for a removed contact is still linked to them, with a warning to check the request is authorised. When no contact is given, the default is a current named contact.
 
 In **Molehill Manager**: open the agreement and go to the **Contacts** tab. Removed contacts are listed with their dates. Enter on a contact offers Edit, Remove or Add back, plus History.

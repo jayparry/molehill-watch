@@ -51,7 +51,9 @@ public static class Queries
     {
         var t = db.Query($"""
             DECLARE @Today date = CAST(dbo.fn_UkNow() AS date);
-            SELECT a.AgreementRef, c.ClientName, c.Address, c.BillingEmail, c.Notes AS ClientNotes,
+            SELECT a.AgreementRef, c.ClientName, c.Address, c.Notes AS ClientNotes,
+                   (SELECT STRING_AGG(ct.FullName + ISNULL(N' <' + ct.Email + N'>', N' (no e-mail)'), N'; ') FROM dbo.Contact ct
+                    WHERE ct.ClientId = c.ClientId AND ct.IsActive = 1 AND ct.IsBillingContact = 1) AS InvoicesTo,
                    {AgreementStatus} AS Status, a.SignedDate, a.StartDate, a.InitialTermMonths,
                    dbo.fn_InitialTermEnd(a.AgreementId) AS InitialTermEnds, p.Name AS PriceList, a.TicketChannel,
                    a.InitialReviewDoneDate, a.InitialReviewNotes, a.NoticeGivenDate, a.NoticeGivenBy, a.EndDate,
@@ -66,8 +68,8 @@ public static class Queries
     /// <summary>The client's contacts; removed ones too when asked, with the dates of their latest period.</summary>
     public static DataTable Contacts(AdminDb db, string agreementRef, bool includeRemoved = false) => db.Query("""
         SELECT ct.ContactId AS Id, ct.FullName AS Name, ct.Email, ct.Phone,
-               CASE WHEN ct.IsNamedContact = 1 THEN 'Yes' ELSE '' END AS Named,
-               CASE WHEN ct.IsBillingContact = 1 THEN 'Yes' ELSE '' END AS Billing,
+               CASE WHEN ct.IsNamedContact = 1 THEN 'Yes' ELSE '' END AS Tickets,
+               CASE WHEN ct.IsBillingContact = 1 THEN 'Yes' ELSE '' END AS Invoices,
                CASE WHEN ct.IsActive = 1 THEN 'Current' ELSE 'Removed' END AS Status,
                p.StartDate AS [From], p.EndDate AS [To],
                (SELECT COUNT(*) FROM dbo.ContactPeriod x WHERE x.ContactId = ct.ContactId) AS Periods

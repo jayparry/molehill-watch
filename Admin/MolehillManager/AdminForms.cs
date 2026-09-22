@@ -74,17 +74,17 @@ public static class AdminForms
         return new FormSpec
         {
             Title = "New client",
-            Intro = "Creates the client, their named contact and the agreement (with its onboarding checklist). " +
-                    "Add the instances afterwards from the agreement (Enter on it in the Clients tab).",
+            Intro = "Creates the client, a first contact and the agreement (with its onboarding checklist). Add more contacts, and the " +
+                    "instances, from the agreement afterwards - a shared accounts address can be a contact that only receives invoices.",
             Fields =
             {
                 Field.Text("ClientName", "Client name", required: true),
                 Field.Text("Address", "Address"),
-                Field.Text("BillingEmail", "Billing e-mail"),
-                Field.Text("ContactName", "Named contact", help: "leave blank to add later"),
+                Field.Text("ContactName", "First contact", help: "leave blank to add later"),
                 Field.Text("ContactEmail", "Contact e-mail"),
                 Field.Text("ContactPhone", "Contact phone"),
-                Field.Bool("ContactIsBilling", "Contact gets invoices"),
+                Field.Bool("ContactRaisesTickets", "Raises tickets", def: true, help: "named point of contact"),
+                Field.Bool("ContactReceivesInvoices", "Receives invoices", def: true),
                 Field.Date("StartDate", "Agreement start", required: true, def: DateTime.Today.ToString("yyyy-MM-dd"), help: "billing cycles run from here"),
                 Field.Date("SignedDate", "Signed on"),
                 Field.Text("TicketChannel", "Ticket channel", help: "blank = the standard e-mail address"),
@@ -98,13 +98,12 @@ public static class AdminForms
                 if (db.Scalar("SELECT 1 FROM dbo.Client WHERE ClientName = @n", ("@n", name)) != null)
                     throw new FormatException($"'{name}' already exists. To start another agreement for them, use 'New agreement for an existing client'.");
 
-                var client = db.Proc("dbo.usp_Client_Add", ("@ClientName", name), ("@Address", v.Str("Address")),
-                    ("@BillingEmail", v.Str("BillingEmail")), ("@Notes", v.Str("Notes")));
+                var client = db.Proc("dbo.usp_Client_Add", ("@ClientName", name), ("@Address", v.Str("Address")), ("@Notes", v.Str("Notes")));
                 ProcResult? contact = null;
                 if (v.Str("ContactName") != null)
                     contact = db.Proc("dbo.usp_Contact_Add", ("@ClientName", name), ("@FullName", v.Str("ContactName")),
                         ("@Email", v.Str("ContactEmail")), ("@Phone", v.Str("ContactPhone")),
-                        ("@IsNamedContact", true), ("@IsBillingContact", v.Bool("ContactIsBilling")));
+                        ("@IsNamedContact", v.Bool("ContactRaisesTickets")), ("@IsBillingContact", v.Bool("ContactReceivesInvoices")));
                 ProcResult agreement;
                 try
                 {
@@ -158,8 +157,8 @@ public static class AdminForms
             Field.Text("FullName", "Name", required: true),
             Field.Text("Email", "E-mail"),
             Field.Text("Phone", "Phone"),
-            Field.Bool("IsNamedContact", "Named contact", help: "may raise tickets"),
-            Field.Bool("IsBillingContact", "Billing contact"),
+            Field.Bool("IsNamedContact", "Raises tickets", help: "named point of contact"),
+            Field.Bool("IsBillingContact", "Receives invoices", help: "e.g. a shared accounts@ address"),
             Field.Date("StartDate", "Contact from", help: "blank = today")
         },
         Submit = v => db.Proc("dbo.usp_Contact_Add", ("@ClientName", clientName), ("@FullName", v.Str("FullName")),
@@ -182,8 +181,8 @@ public static class AdminForms
                 Field.Text("FullName", "Name", required: true, def: Cur(row, "FullName")),
                 Field.Text("Email", "E-mail", def: Cur(row, "Email"), help: "blank = none"),
                 Field.Text("Phone", "Phone", def: Cur(row, "Phone"), help: "blank = none"),
-                Field.Bool("IsNamedContact", "Named contact", def: row?["IsNamedContact"] is true, help: "may raise tickets"),
-                Field.Bool("IsBillingContact", "Billing contact", def: row?["IsBillingContact"] is true)
+                Field.Bool("IsNamedContact", "Raises tickets", def: row?["IsNamedContact"] is true, help: "named point of contact"),
+                Field.Bool("IsBillingContact", "Receives invoices", def: row?["IsBillingContact"] is true)
             },
             // every field is sent: an emptied e-mail or phone is cleared ('' clears, NULL would leave it)
             Submit = v => db.Proc("dbo.usp_Contact_Update", ("@ContactId", contactId), ("@NewFullName", v["FullName"].Trim()),
@@ -218,8 +217,8 @@ public static class AdminForms
                 Field.Date("StartDate", "Contact again from", help: "blank = today"),
                 Field.Text("Email", "E-mail", def: Cur(row, "Email")),
                 Field.Text("Phone", "Phone", def: Cur(row, "Phone")),
-                Field.Bool("IsNamedContact", "Named contact", def: row?["IsNamedContact"] is true),
-                Field.Bool("IsBillingContact", "Billing contact", def: row?["IsBillingContact"] is true)
+                Field.Bool("IsNamedContact", "Raises tickets", def: row?["IsNamedContact"] is true),
+                Field.Bool("IsBillingContact", "Receives invoices", def: row?["IsBillingContact"] is true)
             },
             Submit = v => db.Proc("dbo.usp_Contact_Reinstate", ("@ContactId", contactId), ("@StartDate", v.Date("StartDate")),
                 ("@Email", v["Email"].Trim()), ("@Phone", v["Phone"].Trim()),

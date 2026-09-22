@@ -19,13 +19,13 @@ EXEC dbo.usp_Client_Add
      @ClientName   = N'Example Widgets Ltd',
      @Address      = N'Unit 4, Example Park
 Exampletown
-EX1 2MP',
-     @BillingEmail = N'accounts@example-widgets.co.uk';
+EX1 2MP';
 
+-- Contacts. Two ticks decide everything: @IsNamedContact = raises tickets, @IsBillingContact = receives invoices.
 EXEC dbo.usp_Contact_Add @ClientName = N'Example Widgets Ltd', @FullName = N'Sam Example', @Email = N'sam@example-widgets.co.uk',
-     @Phone = N'01234 567890', @IsNamedContact = 1;          -- named point of contact for tickets
-EXEC dbo.usp_Contact_Add @ClientName = N'Example Widgets Ltd', @FullName = N'Alex Accounts', @Email = N'accounts@example-widgets.co.uk',
-     @IsBillingContact = 1;
+     @Phone = N'01234 567890', @IsNamedContact = 1;          -- raises tickets
+EXEC dbo.usp_Contact_Add @ClientName = N'Example Widgets Ltd', @FullName = N'Accounts', @Email = N'accounts@example-widgets.co.uk',
+     @IsBillingContact = 1;                                  -- a shared address that only receives invoices
 
 /* 2. Agreement (billing cycles run from the start date) ---------------------*/
 EXEC dbo.usp_Agreement_Create

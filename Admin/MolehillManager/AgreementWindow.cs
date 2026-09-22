@@ -113,7 +113,7 @@ public sealed class AgreementWindow
         sb.AppendLine($"Initial review: {(a["InitialReviewDoneDate"] is DBNull ? "not yet delivered" : F("InitialReviewDoneDate"))}" +
                       (a["SupportPausedFrom"] is DBNull ? "" : $"   SUPPORT PAUSED from {F("SupportPausedFrom")} (late payment)"));
         sb.AppendLine($"Tickets via: {F("TicketChannel")}");
-        sb.AppendLine($"Billing: {(a["BillingEmail"] is DBNull ? "(no billing e-mail)" : F("BillingEmail"))}" +
+        sb.AppendLine($"Invoices to: {(a["InvoicesTo"] is DBNull ? "NO ONE - add a contact that receives invoices (Contacts tab)" : F("InvoicesTo"))}" +
                       (a["Address"] is DBNull ? "" : $"   {F("Address")}"));
 
         var usage = db.Proc("dbo.usp_Agreement_Usage", ("@Client", agreementRef));
@@ -132,7 +132,7 @@ public sealed class AgreementWindow
             var fee = inst.Rows.Cast<DataRow>().Where(r => r["Fee"] is decimal).Sum(r => (decimal)r["Fee"]);
             sb.AppendLine().AppendLine($"Instances (monthly fee £{fee:N2}):");
             sb.Append(inst.Rows.Count == 0 ? "(none yet - open the agreement and press F2)\n" : Output.TextTable(inst));
-            var contacts = Queries.Contacts(db, agreementRef).DefaultView.ToTable(false, "Name", "Email", "Phone", "Named", "Billing", "From");
+            var contacts = Queries.Contacts(db, agreementRef).DefaultView.ToTable(false, "Name", "Email", "Phone", "Tickets", "Invoices", "From");
             sb.AppendLine().AppendLine("Contacts:");
             sb.Append(contacts.Rows.Count == 0 ? "(none)\n" : Output.TextTable(contacts));
         }
@@ -183,7 +183,7 @@ public sealed class AgreementWindow
         var current = Grid.Selected(_contacts, "Status") == "Current";
         var actions = new List<(string, Action)>
         {
-            ("Edit details (name, e-mail, phone, named / billing)", () => Ui.Form(AdminForms.EditContact(_db, id), Refresh)),
+            ("Edit details (name, e-mail, phone, raises tickets / receives invoices)", () => Ui.Form(AdminForms.EditContact(_db, id), Refresh)),
             current ? ("Remove as a contact (kept in history)", () => Ui.Form(AdminForms.RemoveContact(_db, id), Refresh))
                     : ("Add back as a contact", () => Ui.Form(AdminForms.ReaddContact(_db, id), Refresh)),
             ("History (dates as a contact)", () => Ui.Try("History", () =>

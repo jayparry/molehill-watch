@@ -1,7 +1,7 @@
 /*
 ===============================================================================
  Molehill Watch - SQL Server Support Package
- Molehill Admin: contract, ticket, time and billing database     Version 1.2.0
+ Molehill Admin: contract, ticket, time and billing database     Version 1.3.0
  Molehill Data Services  -  jay@jayparry.co.uk  -  molehilldataservices.com
 -------------------------------------------------------------------------------
  Runs on YOUR OWN SQL Server (Express is fine), not on client servers.
@@ -92,7 +92,6 @@ CREATE TABLE dbo.Client (
     ClientId     int IDENTITY(1,1) CONSTRAINT PK_Client PRIMARY KEY,
     ClientName   nvarchar(200) NOT NULL CONSTRAINT UQ_Client_Name UNIQUE,
     Address      nvarchar(500) NULL,
-    BillingEmail nvarchar(320) NULL,
     Notes        nvarchar(max) NULL,
     CreatedAt    datetime2(0)  NOT NULL CONSTRAINT DF_Client_CreatedAt DEFAULT SYSDATETIME());
 
@@ -103,8 +102,8 @@ CREATE TABLE dbo.Contact (
     FullName         nvarchar(200) NOT NULL,
     Email            nvarchar(320) NULL,
     Phone            nvarchar(50)  NULL,
-    IsNamedContact   bit           NOT NULL CONSTRAINT DF_Contact_Named DEFAULT 0,   -- named point of contact for tickets
-    IsBillingContact bit           NOT NULL CONSTRAINT DF_Contact_Billing DEFAULT 0,
+    IsNamedContact   bit           NOT NULL CONSTRAINT DF_Contact_Named DEFAULT 0,   -- raises tickets (named point of contact)
+    IsBillingContact bit           NOT NULL CONSTRAINT DF_Contact_Billing DEFAULT 0, -- receives invoices (the only billing setting)
     IsActive         bit           NOT NULL CONSTRAINT DF_Contact_Active DEFAULT 1);
 
 IF OBJECT_ID(N'dbo.Agreement') IS NULL
@@ -197,6 +196,35 @@ BEGIN
            CASE WHEN ct.IsActive = 0 THEN CAST(SYSDATETIME() AS date) END,
            CASE WHEN ct.IsActive = 0 THEN N'Already inactive when contact history started' END
     FROM dbo.Contact ct JOIN dbo.Client c ON c.ClientId = ct.ClientId;
+END
+GO
+
+-- 1.3.0: who receives invoices is set only on contacts. A client-level billing e-mail from an earlier version
+-- becomes a contact that receives invoices but doesn't raise tickets (or marks the contact that already has it).
+IF COL_LENGTH(N'dbo.Client', N'BillingEmail') IS NOT NULL
+BEGIN
+    EXEC (N'
+    UPDATE ct SET IsBillingContact = 1
+    FROM dbo.Contact ct JOIN dbo.Client c ON c.ClientId = ct.ClientId
+    WHERE ct.IsActive = 1 AND ct.Email = LTRIM(RTRIM(c.BillingEmail));
+
+    DECLARE @m TABLE (ClientId int, Email nvarchar(320), Since date);
+    INSERT @m
+    SELECT c.ClientId, LTRIM(RTRIM(c.BillingEmail)), CAST(c.CreatedAt AS date) FROM dbo.Client c
+    WHERE NULLIF(LTRIM(RTRIM(c.BillingEmail)), N'''') IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM dbo.Contact ct WHERE ct.ClientId = c.ClientId AND ct.IsActive = 1 AND ct.Email = LTRIM(RTRIM(c.BillingEmail)));
+
+    DECLARE @new TABLE (ContactId int, ClientId int);
+    INSERT dbo.Contact (ClientId, FullName, Email, IsNamedContact, IsBillingContact)
+    OUTPUT inserted.ContactId, inserted.ClientId INTO @new
+    SELECT m.ClientId,
+           CASE WHEN EXISTS (SELECT 1 FROM dbo.Contact x WHERE x.ClientId = m.ClientId AND x.FullName = N''Accounts'') THEN N''Accounts (billing)'' ELSE N''Accounts'' END,
+           m.Email, 0, 1
+    FROM @m m;
+    INSERT dbo.ContactPeriod (ContactId, StartDate) SELECT n.ContactId, m.Since FROM @new n JOIN @m m ON m.ClientId = n.ClientId;
+    IF @@ROWCOUNT > 0 PRINT N''Billing e-mails moved to contacts that receive invoices (called Accounts).'';
+
+    ALTER TABLE dbo.Client DROP COLUMN BillingEmail;');
 END
 GO
 
@@ -576,24 +604,24 @@ GO
 /*=============================================================================
   4. CLIENTS, AGREEMENTS AND INSTANCES
 =============================================================================*/
+-- Who receives invoices is set on contacts (usp_Contact_Add @IsBillingContact = 1), not on the client.
 CREATE OR ALTER PROCEDURE dbo.usp_Client_Add
     @ClientName   nvarchar(200),
     @Address      nvarchar(500) = NULL,
-    @BillingEmail nvarchar(320) = NULL,
     @Notes        nvarchar(max) = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
     IF EXISTS (SELECT 1 FROM dbo.Client WHERE ClientName = @ClientName)
     BEGIN
-        UPDATE dbo.Client SET Address = ISNULL(@Address, Address), BillingEmail = ISNULL(@BillingEmail, BillingEmail), Notes = ISNULL(@Notes, Notes)
+        UPDATE dbo.Client SET Address = ISNULL(@Address, Address), Notes = ISNULL(@Notes, Notes)
         WHERE ClientName = @ClientName;
         PRINT N'Updated client ' + @ClientName;
     END
     ELSE
     BEGIN
-        INSERT dbo.Client (ClientName, Address, BillingEmail, Notes) VALUES (@ClientName, @Address, @BillingEmail, @Notes);
-        PRINT N'Added client ' + @ClientName;
+        INSERT dbo.Client (ClientName, Address, Notes) VALUES (@ClientName, @Address, @Notes);
+        PRINT N'Added client ' + @ClientName + N'. Add contacts next: who raises tickets, and who receives invoices.';
     END
 END
 GO
@@ -645,8 +673,8 @@ CREATE OR ALTER PROCEDURE dbo.usp_Contact_Add
     @FullName         nvarchar(200),
     @Email            nvarchar(320) = NULL,
     @Phone            nvarchar(50)  = NULL,
-    @IsNamedContact   bit = NULL,               -- NULL = no (new contact) / unchanged (someone being re-added)
-    @IsBillingContact bit = NULL,
+    @IsNamedContact   bit = NULL,               -- raises tickets. NULL = no (new contact) / unchanged (someone being re-added)
+    @IsBillingContact bit = NULL,               -- receives invoices (e.g. a shared accounts@ address with tickets off)
     @StartDate        date = NULL               -- first day as a contact; default today
 AS
 BEGIN
@@ -764,7 +792,7 @@ BEGIN
     IF @Named = 1 AND NOT EXISTS (SELECT 1 FROM dbo.Contact WHERE ClientId = @ClientId AND IsActive = 1 AND IsNamedContact = 1)
         PRINT N'WARNING: ' + @Name + N' was the client''s only named point of contact. The agreement needs one: add another, or mark an existing contact as named.';
     IF @Billing = 1 AND NOT EXISTS (SELECT 1 FROM dbo.Contact WHERE ClientId = @ClientId AND IsActive = 1 AND IsBillingContact = 1)
-        PRINT N'Note: ' + @Name + N' was the billing contact. Invoices now go to the client''s billing e-mail only.';
+        PRINT N'WARNING: ' + @Name + N' was the only contact receiving invoices. Add another (a shared accounts address can be a contact that only receives invoices).';
 END
 GO
 
@@ -817,8 +845,8 @@ BEGIN
     DECLARE @ClientId int = dbo.fn_ClientId(@Client);
     IF @ClientId IS NULL BEGIN RAISERROR(N'Client or agreement "%s" not found.', 16, 1, @Client); RETURN; END
     SELECT ct.ContactId, ct.FullName, ct.Email, ct.Phone,
-           Named = CASE WHEN ct.IsNamedContact = 1 THEN 'Yes' ELSE '' END,
-           Billing = CASE WHEN ct.IsBillingContact = 1 THEN 'Yes' ELSE '' END,
+           RaisesTickets = CASE WHEN ct.IsNamedContact = 1 THEN 'Yes' ELSE '' END,
+           ReceivesInvoices = CASE WHEN ct.IsBillingContact = 1 THEN 'Yes' ELSE '' END,
            Status = CASE WHEN ct.IsActive = 1 THEN 'Current' ELSE 'Removed' END,
            Periods = STRING_AGG(CONVERT(nvarchar(11), p.StartDate, 106) + N' - ' + ISNULL(CONVERT(nvarchar(11), p.EndDate, 106), N'now'), N'; ')
                      WITHIN GROUP (ORDER BY p.StartDate)
@@ -1749,8 +1777,8 @@ tr.info td{color:#55504F;font-style:italic;background:#F2FBFE}
 <div class="hero"><div><div class="brand">' + dbo.fn_Html(dbo.fn_Setting('BusinessName')) + N'</div><div class="tag">SQL Server &amp; Azure Consultancy</div></div><div class="title">' + CASE WHEN i.Status = 'Void' THEN N'VOID' ELSE N'INVOICE' END + N'</div></div>
 <div class="body"><div class="cols">
 <div><div class="label">Bill to</div><strong>' + dbo.fn_Html(c.ClientName) + N'</strong><br />' + REPLACE(dbo.fn_Html(c.Address), CHAR(10), N'<br />')
-    + ISNULL(N'<br />' + dbo.fn_Html((SELECT TOP (1) FullName FROM dbo.Contact WHERE ClientId = c.ClientId AND IsBillingContact = 1 AND IsActive = 1)), N'')
-    + ISNULL(N'<br />' + dbo.fn_Html(c.BillingEmail), N'') + N'</div>
+    + ISNULL(N'<br />' + (SELECT STRING_AGG(dbo.fn_Html(FullName) + ISNULL(N' &#183; ' + dbo.fn_Html(Email), N''), N'<br />') WITHIN GROUP (ORDER BY FullName)
+                         FROM dbo.Contact WHERE ClientId = c.ClientId AND IsBillingContact = 1 AND IsActive = 1), N'') + N'</div>
 <div style="text-align:right"><div class="label">Invoice number</div><strong>' + i.InvoiceNo + N'</strong>
 <div class="label" style="margin-top:8px">Invoice date</div>' + CONVERT(nvarchar(11), i.InvoiceDate, 106) + N'
 <div class="label" style="margin-top:8px">Payment due</div>' + CONVERT(nvarchar(11), i.DueDate, 106) + N'
@@ -1821,7 +1849,10 @@ BEGIN
 
     -- Invoices
     INSERT #A
-    SELECT 2, 'Billing', c.ClientName, N'Draft invoice ready to send: ' + i.InvoiceNo, NCHAR(163) + FORMAT(i.Total, 'N2') + N', dated ' + CONVERT(nvarchar(11), i.InvoiceDate, 106) + N'. Review, send, then usp_Invoice_SetStatus @Status = ''Sent''.', NULL
+    SELECT 2, 'Billing', c.ClientName, N'Draft invoice ready to send: ' + i.InvoiceNo, NCHAR(163) + FORMAT(i.Total, 'N2') + N', dated ' + CONVERT(nvarchar(11), i.InvoiceDate, 106)
+           + N'. Send to: ' + ISNULL((SELECT STRING_AGG(ISNULL(ct.Email, ct.FullName + N' (no e-mail)'), N'; ') FROM dbo.Contact ct
+                                      WHERE ct.ClientId = c.ClientId AND ct.IsActive = 1 AND ct.IsBillingContact = 1), N'NO ONE - add a contact that receives invoices')
+           + N'. Then usp_Invoice_SetStatus @Status = ''Sent''.', NULL
     FROM dbo.Invoice i JOIN dbo.Agreement a ON a.AgreementId = i.AgreementId JOIN dbo.Client c ON c.ClientId = a.ClientId
     WHERE i.Status = 'Draft';
 
@@ -1840,6 +1871,14 @@ BEGIN
     WHERE (a.EndDate IS NULL OR a.EndDate >= @Today)
       AND EXISTS (SELECT 1 FROM dbo.OnboardingItem o WHERE o.AgreementId = a.AgreementId AND o.ItemCode = 'NAMED_CONTACT' AND o.CompletedDate IS NOT NULL)
       AND NOT EXISTS (SELECT 1 FROM dbo.Contact ct WHERE ct.ClientId = a.ClientId AND ct.IsActive = 1 AND ct.IsNamedContact = 1);
+
+    -- Contacts: nobody receives invoices
+    INSERT #A
+    SELECT 2, 'Contacts', c.ClientName, N'No one receives invoices (' + a.AgreementRef + N')',
+           N'No current contact has "receives invoices" set. Add one - a shared accounts address can be a contact that only receives invoices.', NULL
+    FROM dbo.Agreement a JOIN dbo.Client c ON c.ClientId = a.ClientId
+    WHERE (a.EndDate IS NULL OR a.EndDate >= @Today)
+      AND NOT EXISTS (SELECT 1 FROM dbo.Contact ct WHERE ct.ClientId = a.ClientId AND ct.IsActive = 1 AND ct.IsBillingContact = 1);
 
     -- Onboarding
     INSERT #A
@@ -2002,6 +2041,6 @@ BEGIN
 END
 GO
 
-INSERT dbo.InstallHistory (Version) VALUES ('1.2.0');   -- bump with every schema change: Molehill Manager offers the upgrade
-PRINT N'Molehill Admin 1.2.0 installed.';
+INSERT dbo.InstallHistory (Version) VALUES ('1.3.0');   -- bump with every schema change: Molehill Manager offers the upgrade
+PRINT N'Molehill Admin 1.3.0 installed.';
 GO
