@@ -37,6 +37,16 @@ public static class AdminInstaller
         }
     }
 
+    /// <summary>The version the built-in script installs (its INSERT into dbo.InstallHistory).</summary>
+    public static Version ScriptVersion
+    {
+        get
+        {
+            var m = Regex.Match(Script, @"INSERT dbo\.InstallHistory \(Version\) VALUES \('([0-9.]+)'\)");
+            return m.Success ? Version.Parse(m.Groups[1].Value) : new Version(0, 0);
+        }
+    }
+
     private static string MasterConnectionString(AppConfig config) =>
         new SqlConnectionStringBuilder(config.BuildConnectionString()) { InitialCatalog = "master" }.ConnectionString;
 
@@ -65,10 +75,21 @@ public static class AdminInstaller
             var clashes = r.IsDBNull(2) ? "" : r.GetString(2);
             var others = r.GetInt32(3);
             var partial = r.GetInt32(4) == 1;   // InstallHistory is the script's first table: an install that stopped part way
-            if (installed && current) return new DbCheck(DbState.Ready, $"Connected to {name} on {server}.");
+            r.Close();
+            // read separately: a reference to a missing table fails at compile time, even behind a CASE
+            var installedVersion = new Version(0, 0);
+            if (partial)
+            {
+                using var vcmd = conn.CreateCommand();
+                vcmd.CommandText = "SELECT TOP (1) Version FROM dbo.InstallHistory ORDER BY InstallId DESC;";
+                if (vcmd.ExecuteScalar() is string text && Version.TryParse(text, out var v)) installedVersion = v;
+            }
+            var behind = installedVersion < ScriptVersion;
+            if (installed && current && !behind) return new DbCheck(DbState.Ready, $"Connected to {name} on {server}.");
             if (installed)
                 return new DbCheck(DbState.NeedsUpgrade,
-                    $"MolehillAdmin in [{name}] on {server} is an older version. Upgrading keeps all your data (the install is safe to re-run), but take a backup first if you are unsure.");
+                    $"MolehillAdmin in [{name}] on {server} is an older version ({(installedVersion.Major == 0 ? "unknown" : installedVersion.ToString())}; "
+                    + $"this app brings {ScriptVersion}). Upgrading keeps all your data (the install is safe to re-run), but take a backup first if you are unsure.");
             if (partial)
                 return new DbCheck(DbState.NotInstalled, $"MolehillAdmin in [{name}] on {server} is only partly installed (an earlier install stopped). Finish the install? Nothing already there is lost.");
             if (clashes != "")

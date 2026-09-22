@@ -63,13 +63,31 @@ public static class Queries
         return t.Rows.Count == 0 ? null : t.Rows[0];
     }
 
-    public static DataTable Contacts(AdminDb db, string agreementRef) => db.Query("""
-        SELECT ct.FullName AS Name, ct.Email, ct.Phone,
+    /// <summary>The client's contacts; removed ones too when asked, with the dates of their latest period.</summary>
+    public static DataTable Contacts(AdminDb db, string agreementRef, bool includeRemoved = false) => db.Query("""
+        SELECT ct.ContactId AS Id, ct.FullName AS Name, ct.Email, ct.Phone,
                CASE WHEN ct.IsNamedContact = 1 THEN 'Yes' ELSE '' END AS Named,
-               CASE WHEN ct.IsBillingContact = 1 THEN 'Yes' ELSE '' END AS Billing
+               CASE WHEN ct.IsBillingContact = 1 THEN 'Yes' ELSE '' END AS Billing,
+               CASE WHEN ct.IsActive = 1 THEN 'Current' ELSE 'Removed' END AS Status,
+               p.StartDate AS [From], p.EndDate AS [To],
+               (SELECT COUNT(*) FROM dbo.ContactPeriod x WHERE x.ContactId = ct.ContactId) AS Periods
         FROM dbo.Contact ct JOIN dbo.Agreement a ON a.ClientId = ct.ClientId
-        WHERE a.AgreementRef = @Ref AND ct.IsActive = 1 ORDER BY ct.IsNamedContact DESC, ct.FullName;
-        """, ("@Ref", agreementRef));
+        OUTER APPLY (SELECT TOP (1) StartDate, EndDate FROM dbo.ContactPeriod WHERE ContactId = ct.ContactId ORDER BY StartDate DESC) p
+        WHERE a.AgreementRef = @Ref AND (@IncludeRemoved = 1 OR ct.IsActive = 1)
+        ORDER BY ct.IsActive DESC, ct.IsNamedContact DESC, ct.FullName;
+        """, ("@Ref", agreementRef), ("@IncludeRemoved", includeRemoved));
+
+    public static DataRow? Contact(AdminDb db, int contactId)
+    {
+        var t = db.Query("SELECT * FROM dbo.Contact WHERE ContactId = @Id;", ("@Id", contactId));
+        return t.Rows.Count == 0 ? null : t.Rows[0];
+    }
+
+    public static DataTable ContactPeriods(AdminDb db, int contactId) => db.Query("""
+        SELECT StartDate AS [From], EndDate AS [To], DATEDIFF(day, StartDate, ISNULL(EndDate, CAST(dbo.fn_UkNow() AS date))) + 1 AS Days,
+               EndReason AS Reason
+        FROM dbo.ContactPeriod WHERE ContactId = @Id ORDER BY StartDate;
+        """, ("@Id", contactId));
 
     /// <summary>Every instance on the agreement, with what it costs today (or from the start date, before it starts).</summary>
     public static DataTable Instances(AdminDb db, string agreementRef) => db.Query("""

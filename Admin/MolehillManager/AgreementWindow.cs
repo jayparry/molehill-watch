@@ -48,7 +48,7 @@ public sealed class AgreementWindow
         }
         _instances = Table(InstanceActions);
         _onboarding = Table(CompleteOnboarding);
-        _contacts = Table(() => Ui.Form(AdminForms.AddContact(_db, _clientName), Refresh));
+        _contacts = Table(ContactActions);
         _tickets = Table(TicketAction);
         _weekly = Table(LogWeekly);
 
@@ -63,7 +63,7 @@ public sealed class AgreementWindow
         _tabs.AddTab(_ticketTab, false);
         _tabs.AddTab(_weeklyTab, false);
 
-        var hint = new Label("Enter on a row: actions for it.  F2 adds (instance, contact, ticket, weekly report).  F4: all agreement actions.")
+        var hint = new Label("Enter on a row: actions for it (contacts: edit, remove, add back).  F2 adds.  F4: all agreement actions.")
             { X = 0, Y = Pos.AnchorEnd(2), Width = Dim.Fill(), ColorScheme = Colors.Menu };
         _dialog.Add(_summary, _tabs, hint);
 
@@ -93,7 +93,7 @@ public sealed class AgreementWindow
             _summary.Text = Summary(_db, _ref, includeInstances: false);
             Grid.Bind(_instances, Queries.Instances(_db, _ref));
             Grid.Bind(_onboarding, Queries.Onboarding(_db, _ref));
-            Grid.Bind(_contacts, Queries.Contacts(_db, _ref));
+            Grid.Bind(_contacts, Queries.Contacts(_db, _ref, includeRemoved: true));
             Grid.Bind(_tickets, Queries.Tickets(_db, openOnly: false, _ref));
             Grid.Bind(_weekly, Queries.WeeklyReports(_db, _ref));
         });
@@ -132,7 +132,7 @@ public sealed class AgreementWindow
             var fee = inst.Rows.Cast<DataRow>().Where(r => r["Fee"] is decimal).Sum(r => (decimal)r["Fee"]);
             sb.AppendLine().AppendLine($"Instances (monthly fee £{fee:N2}):");
             sb.Append(inst.Rows.Count == 0 ? "(none yet - open the agreement and press F2)\n" : Output.TextTable(inst));
-            var contacts = Queries.Contacts(db, agreementRef);
+            var contacts = Queries.Contacts(db, agreementRef).DefaultView.ToTable(false, "Name", "Email", "Phone", "Named", "Billing", "From");
             sb.AppendLine().AppendLine("Contacts:");
             sb.Append(contacts.Rows.Count == 0 ? "(none)\n" : Output.TextTable(contacts));
         }
@@ -175,6 +175,24 @@ public sealed class AgreementWindow
             ("Add another instance", () => Ui.Form(AdminForms.AddInstance(_db, _ref), Refresh)));
     }
 
+    private void ContactActions()
+    {
+        var idText = Grid.Selected(_contacts, "Id");
+        if (idText == null || !int.TryParse(idText, out var id)) { Ui.Form(AdminForms.AddContact(_db, _clientName), Refresh); return; }
+        var name = Grid.Selected(_contacts, "Name") ?? "Contact";
+        var current = Grid.Selected(_contacts, "Status") == "Current";
+        var actions = new List<(string, Action)>
+        {
+            ("Edit details (name, e-mail, phone, named / billing)", () => Ui.Form(AdminForms.EditContact(_db, id), Refresh)),
+            current ? ("Remove as a contact (kept in history)", () => Ui.Form(AdminForms.RemoveContact(_db, id), Refresh))
+                    : ("Add back as a contact", () => Ui.Form(AdminForms.ReaddContact(_db, id), Refresh)),
+            ("History (dates as a contact)", () => Ui.Try("History", () =>
+                Output.Text($"{name} - contact history", Output.TextTable(Queries.ContactPeriods(_db, id))))),
+            ("Add another contact", () => Ui.Form(AdminForms.AddContact(_db, _clientName), Refresh))
+        };
+        Picker.Actions(name, actions.ToArray());
+    }
+
     private void CompleteOnboarding()
     {
         var code = Grid.Selected(_onboarding, "Code");
@@ -205,6 +223,7 @@ public sealed class AgreementWindow
             ("Add an instance / Azure SQL server or pool", () => Ui.Form(AdminForms.AddInstance(_db, _ref), Refresh)),
             ("Actions for the selected instance", InstanceActions),
             ("Add a contact", () => Ui.Form(AdminForms.AddContact(_db, _clientName), Refresh)),
+            ("Edit, remove or add back the selected contact", () => { _tabs.SelectedTab = _contactTab; ContactActions(); }),
             ("Mark the selected onboarding item done", () => { _tabs.SelectedTab = _onbTab; CompleteOnboarding(); }),
             ("Open a ticket", () => Ui.Form(AdminForms.OpenTicket(_db, _ref), Refresh)),
             ("Log a weekly report sent", LogWeekly),

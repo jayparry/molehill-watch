@@ -152,18 +152,80 @@ public static class AdminForms
     public static FormSpec AddContact(AdminDb db, string clientName) => new()
     {
         Title = $"Add contact - {clientName}",
+        Intro = "Someone who was removed earlier is added back as the same contact, with a new start date (their history is kept).",
         Fields =
         {
             Field.Text("FullName", "Name", required: true),
             Field.Text("Email", "E-mail"),
             Field.Text("Phone", "Phone"),
             Field.Bool("IsNamedContact", "Named contact", help: "may raise tickets"),
-            Field.Bool("IsBillingContact", "Billing contact")
+            Field.Bool("IsBillingContact", "Billing contact"),
+            Field.Date("StartDate", "Contact from", help: "blank = today")
         },
         Submit = v => db.Proc("dbo.usp_Contact_Add", ("@ClientName", clientName), ("@FullName", v.Str("FullName")),
             ("@Email", v.Str("Email")), ("@Phone", v.Str("Phone")),
-            ("@IsNamedContact", v.Bool("IsNamedContact")), ("@IsBillingContact", v.Bool("IsBillingContact")))
+            ("@IsNamedContact", v.Bool("IsNamedContact")), ("@IsBillingContact", v.Bool("IsBillingContact")),
+            ("@StartDate", v.Date("StartDate")))
     };
+
+    private static string Cur(DataRow? row, string col) => row == null || row[col] is DBNull ? "" : row[col].ToString() ?? "";
+
+    /// <summary>Correct a contact's details. Clearing the e-mail or phone removes it.</summary>
+    public static FormSpec EditContact(AdminDb db, int contactId)
+    {
+        var row = Queries.Contact(db, contactId);
+        return new FormSpec
+        {
+            Title = $"Edit contact - {Cur(row, "FullName")}",
+            Fields =
+            {
+                Field.Text("FullName", "Name", required: true, def: Cur(row, "FullName")),
+                Field.Text("Email", "E-mail", def: Cur(row, "Email"), help: "blank = none"),
+                Field.Text("Phone", "Phone", def: Cur(row, "Phone"), help: "blank = none"),
+                Field.Bool("IsNamedContact", "Named contact", def: row?["IsNamedContact"] is true, help: "may raise tickets"),
+                Field.Bool("IsBillingContact", "Billing contact", def: row?["IsBillingContact"] is true)
+            },
+            // every field is sent: an emptied e-mail or phone is cleared ('' clears, NULL would leave it)
+            Submit = v => db.Proc("dbo.usp_Contact_Update", ("@ContactId", contactId), ("@NewFullName", v["FullName"].Trim()),
+                ("@Email", v["Email"].Trim()), ("@Phone", v["Phone"].Trim()),
+                ("@IsNamedContact", v.Bool("IsNamedContact")), ("@IsBillingContact", v.Bool("IsBillingContact")))
+        };
+    }
+
+    /// <summary>Soft delete: the contact's current period ends; their record, history and tickets are kept.</summary>
+    public static FormSpec RemoveContact(AdminDb db, int contactId) => new()
+    {
+        Title = $"Remove contact - {Cur(Queries.Contact(db, contactId), "FullName")}",
+        Intro = "They stop being a contact from the day after the date given. Nothing is deleted: their details, dates and tickets are kept, and they can be added back later.",
+        Fields =
+        {
+            Field.Date("EndDate", "Last day as contact", help: "blank = today; not in the future"),
+            Field.Text("Reason", "Reason", help: "optional, e.g. left the company")
+        },
+        Submit = v => db.Proc("dbo.usp_Contact_Remove", ("@ContactId", contactId), ("@EndDate", v.Date("EndDate")), ("@Reason", v.Str("Reason")))
+    };
+
+    /// <summary>Brings a removed contact back with a new period; details can be updated at the same time.</summary>
+    public static FormSpec ReaddContact(AdminDb db, int contactId)
+    {
+        var row = Queries.Contact(db, contactId);
+        return new FormSpec
+        {
+            Title = $"Add back - {Cur(row, "FullName")}",
+            Intro = "Starts a new period as a contact. The earlier period(s) stay in their history.",
+            Fields =
+            {
+                Field.Date("StartDate", "Contact again from", help: "blank = today"),
+                Field.Text("Email", "E-mail", def: Cur(row, "Email")),
+                Field.Text("Phone", "Phone", def: Cur(row, "Phone")),
+                Field.Bool("IsNamedContact", "Named contact", def: row?["IsNamedContact"] is true),
+                Field.Bool("IsBillingContact", "Billing contact", def: row?["IsBillingContact"] is true)
+            },
+            Submit = v => db.Proc("dbo.usp_Contact_Reinstate", ("@ContactId", contactId), ("@StartDate", v.Date("StartDate")),
+                ("@Email", v["Email"].Trim()), ("@Phone", v["Phone"].Trim()),
+                ("@IsNamedContact", v.Bool("IsNamedContact")), ("@IsBillingContact", v.Bool("IsBillingContact")))
+        };
+    }
 
     // ------------------------------------------------------------------ instances
 

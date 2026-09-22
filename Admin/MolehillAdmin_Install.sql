@@ -1,7 +1,7 @@
 /*
 ===============================================================================
  Molehill Watch - SQL Server Support Package
- Molehill Admin: contract, ticket, time and billing database     Version 1.0.0
+ Molehill Admin: contract, ticket, time and billing database     Version 1.2.0
  Molehill Data Services  -  jay@jayparry.co.uk  -  molehilldataservices.com
 -------------------------------------------------------------------------------
  Runs on YOUR OWN SQL Server (Express is fine), not on client servers.
@@ -176,6 +176,28 @@ GO
 IF NOT EXISTS (SELECT 1 FROM sys.check_constraints WHERE name = N'CK_Instance_AzureDbCount')
     ALTER TABLE dbo.Instance ADD CONSTRAINT CK_Instance_AzureDbCount
         CHECK (Platform NOT IN ('AzureSqlDatabaseServer', 'AzureSqlDatabaseElasticPool') OR Role = 'GeoReplica' OR DatabaseCount >= 1);
+GO
+
+-- Contact history: one row per period someone was a contact (removed and re-added = two rows).
+-- Contact.IsActive is kept in step: 1 while the contact has an open period (EndDate NULL).
+IF OBJECT_ID(N'dbo.ContactPeriod') IS NULL
+BEGIN
+    CREATE TABLE dbo.ContactPeriod (
+        ContactPeriodId int IDENTITY(1,1) CONSTRAINT PK_ContactPeriod PRIMARY KEY,
+        ContactId       int           NOT NULL CONSTRAINT FK_ContactPeriod_Contact REFERENCES dbo.Contact (ContactId),
+        StartDate       date          NOT NULL,
+        EndDate         date          NULL,      -- last day as a contact; NULL = current
+        EndReason       nvarchar(400) NULL,
+        CONSTRAINT CK_ContactPeriod_Dates CHECK (EndDate IS NULL OR EndDate >= StartDate));
+    CREATE UNIQUE INDEX UX_ContactPeriod_Open ON dbo.ContactPeriod (ContactId) WHERE EndDate IS NULL;
+
+    -- contacts from before the history was kept: a contact since the client was set up
+    INSERT dbo.ContactPeriod (ContactId, StartDate, EndDate, EndReason)
+    SELECT ct.ContactId, CAST(c.CreatedAt AS date),
+           CASE WHEN ct.IsActive = 0 THEN CAST(SYSDATETIME() AS date) END,
+           CASE WHEN ct.IsActive = 0 THEN N'Already inactive when contact history started' END
+    FROM dbo.Contact ct JOIN dbo.Client c ON c.ClientId = ct.ClientId;
+END
 GO
 
 IF OBJECT_ID(N'dbo.OnboardingItem') IS NULL
@@ -576,24 +598,234 @@ BEGIN
 END
 GO
 
-CREATE OR ALTER PROCEDURE dbo.usp_Contact_Add
-    @ClientName       nvarchar(200),
-    @FullName         nvarchar(200),
-    @Email            nvarchar(320) = NULL,
-    @Phone            nvarchar(50)  = NULL,
-    @IsNamedContact   bit = 0,
-    @IsBillingContact bit = 0
+CREATE OR ALTER FUNCTION dbo.fn_ClientId (@Client nvarchar(200))   -- client name or agreement ref
+RETURNS int
+AS
+BEGIN
+    RETURN COALESCE((SELECT ClientId FROM dbo.Client WHERE ClientName = @Client),
+                    (SELECT ClientId FROM dbo.Agreement WHERE AgreementRef = @Client));
+END
+GO
+
+CREATE OR ALTER FUNCTION dbo.fn_LooksLikeEmail (@Email nvarchar(320))
+RETURNS bit
+AS
+BEGIN
+    RETURN CASE WHEN @Email LIKE N'%_@_%._%' AND @Email NOT LIKE N'% %' AND @Email NOT LIKE N'%@%@%'
+                     AND @Email NOT LIKE N'%..%' AND @Email NOT LIKE N'%.' AND @Email NOT LIKE N'%@.%' THEN 1 ELSE 0 END;
+END
+GO
+
+-- Finds a contact by id, or by client (name or agreement ref) + full name.
+CREATE OR ALTER PROCEDURE dbo.usp_Contact_Resolve
+    @ContactId int = NULL OUTPUT,
+    @Client    nvarchar(200) = NULL,
+    @FullName  nvarchar(200) = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
-    DECLARE @ClientId int = (SELECT ClientId FROM dbo.Client WHERE ClientName = @ClientName);
+    IF @ContactId IS NOT NULL
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM dbo.Contact WHERE ContactId = @ContactId)
+        BEGIN RAISERROR(N'Contact %d not found.', 16, 1, @ContactId); RETURN 1; END
+        RETURN 0;
+    END
+    DECLARE @ClientId int = dbo.fn_ClientId(@Client);
+    IF @ClientId IS NULL BEGIN RAISERROR(N'Client or agreement "%s" not found.', 16, 1, @Client); RETURN 1; END
+    IF (SELECT COUNT(*) FROM dbo.Contact WHERE ClientId = @ClientId AND FullName = @FullName) > 1
+    BEGIN RAISERROR(N'More than one contact called "%s" - use @ContactId (see usp_Contact_Show).', 16, 1, @FullName); RETURN 1; END
+    SET @ContactId = (SELECT ContactId FROM dbo.Contact WHERE ClientId = @ClientId AND FullName = @FullName);
+    IF @ContactId IS NULL BEGIN RAISERROR(N'"%s" is not a contact for %s.', 16, 1, @FullName, @Client); RETURN 1; END
+    RETURN 0;
+END
+GO
+
+CREATE OR ALTER PROCEDURE dbo.usp_Contact_Add
+    @ClientName       nvarchar(200),            -- client name or agreement ref
+    @FullName         nvarchar(200),
+    @Email            nvarchar(320) = NULL,
+    @Phone            nvarchar(50)  = NULL,
+    @IsNamedContact   bit = NULL,               -- NULL = no (new contact) / unchanged (someone being re-added)
+    @IsBillingContact bit = NULL,
+    @StartDate        date = NULL               -- first day as a contact; default today
+AS
+BEGIN
+    SET NOCOUNT, XACT_ABORT ON;
+    DECLARE @ClientId int = dbo.fn_ClientId(@ClientName);
     IF @ClientId IS NULL BEGIN RAISERROR(N'Client "%s" not found.', 16, 1, @ClientName); RETURN; END
+    SET @FullName = LTRIM(RTRIM(@FullName));
+    IF ISNULL(@FullName, N'') = N'' BEGIN RAISERROR(N'Give the contact''s name.', 16, 1); RETURN; END
+    SET @Email = NULLIF(LTRIM(RTRIM(@Email)), N'');
+    IF @Email IS NOT NULL AND dbo.fn_LooksLikeEmail(@Email) = 0 BEGIN RAISERROR(N'"%s" does not look like an e-mail address.', 16, 1, @Email); RETURN; END
+    SET @StartDate = ISNULL(@StartDate, CAST(dbo.fn_UkNow() AS date));
+
+    DECLARE @Existing int, @ExistingActive bit;
+    SELECT TOP (1) @Existing = ContactId, @ExistingActive = IsActive FROM dbo.Contact
+    WHERE ClientId = @ClientId AND FullName = @FullName ORDER BY IsActive DESC, ContactId DESC;
+    IF @ExistingActive = 1
+    BEGIN RAISERROR(N'%s is already a contact for this client. Use usp_Contact_Update to change their details.', 16, 1, @FullName); RETURN; END
+    IF @Existing IS NOT NULL
+    BEGIN
+        -- removed earlier: bring the same person back with a new period, keeping their history
+        EXEC dbo.usp_Contact_Reinstate @ContactId = @Existing, @StartDate = @StartDate, @Email = @Email, @Phone = @Phone,
+             @IsNamedContact = @IsNamedContact, @IsBillingContact = @IsBillingContact;
+        RETURN;
+    END
+
+    BEGIN TRAN;
     INSERT dbo.Contact (ClientId, FullName, Email, Phone, IsNamedContact, IsBillingContact)
-    VALUES (@ClientId, @FullName, @Email, @Phone, @IsNamedContact, @IsBillingContact);
+    VALUES (@ClientId, @FullName, @Email, NULLIF(LTRIM(RTRIM(@Phone)), N''), ISNULL(@IsNamedContact, 0), ISNULL(@IsBillingContact, 0));
+    DECLARE @ContactId int = SCOPE_IDENTITY();
+    INSERT dbo.ContactPeriod (ContactId, StartDate) VALUES (@ContactId, @StartDate);
+    COMMIT;
     IF @IsNamedContact = 1
         UPDATE dbo.OnboardingItem SET CompletedDate = ISNULL(CompletedDate, CAST(dbo.fn_UkNow() AS date))
         WHERE ItemCode = 'NAMED_CONTACT' AND AgreementId IN (SELECT AgreementId FROM dbo.Agreement WHERE ClientId = @ClientId);
-    PRINT N'Added contact ' + @FullName;
+    PRINT N'Added contact ' + @FullName + N' from ' + CONVERT(nvarchar(11), @StartDate, 106) + N'.';
+END
+GO
+
+-- Change a contact's details. NULL = leave as is; '' clears the e-mail or phone.
+CREATE OR ALTER PROCEDURE dbo.usp_Contact_Update
+    @ContactId        int           = NULL,
+    @Client           nvarchar(200) = NULL,     -- with @FullName, instead of @ContactId
+    @FullName         nvarchar(200) = NULL,
+    @NewFullName      nvarchar(200) = NULL,
+    @Email            nvarchar(320) = NULL,
+    @Phone            nvarchar(50)  = NULL,
+    @IsNamedContact   bit           = NULL,
+    @IsBillingContact bit           = NULL
+AS
+BEGIN
+    SET NOCOUNT, XACT_ABORT ON;
+    DECLARE @rc int;
+    EXEC @rc = dbo.usp_Contact_Resolve @ContactId = @ContactId OUTPUT, @Client = @Client, @FullName = @FullName;
+    IF @rc <> 0 OR @ContactId IS NULL RETURN;
+
+    DECLARE @ClientId int, @OldName nvarchar(200), @IsActive bit;
+    SELECT @ClientId = ClientId, @OldName = FullName, @IsActive = IsActive FROM dbo.Contact WHERE ContactId = @ContactId;
+    SET @NewFullName = NULLIF(LTRIM(RTRIM(@NewFullName)), N'');
+    IF @NewFullName IS NOT NULL AND EXISTS (SELECT 1 FROM dbo.Contact WHERE ClientId = @ClientId AND FullName = @NewFullName AND ContactId <> @ContactId)
+    BEGIN RAISERROR(N'This client already has a contact called %s.', 16, 1, @NewFullName); RETURN; END
+    IF NULLIF(LTRIM(RTRIM(@Email)), N'') IS NOT NULL AND dbo.fn_LooksLikeEmail(LTRIM(RTRIM(@Email))) = 0
+    BEGIN DECLARE @e nvarchar(320) = LTRIM(RTRIM(@Email)); RAISERROR(N'"%s" does not look like an e-mail address.', 16, 1, @e); RETURN; END
+
+    UPDATE dbo.Contact
+    SET FullName         = ISNULL(@NewFullName, FullName),
+        Email            = CASE WHEN @Email IS NULL THEN Email ELSE NULLIF(LTRIM(RTRIM(@Email)), N'') END,
+        Phone            = CASE WHEN @Phone IS NULL THEN Phone ELSE NULLIF(LTRIM(RTRIM(@Phone)), N'') END,
+        IsNamedContact   = ISNULL(@IsNamedContact, IsNamedContact),
+        IsBillingContact = ISNULL(@IsBillingContact, IsBillingContact)
+    WHERE ContactId = @ContactId;
+
+    IF @IsNamedContact = 1 AND @IsActive = 1
+        UPDATE dbo.OnboardingItem SET CompletedDate = ISNULL(CompletedDate, CAST(dbo.fn_UkNow() AS date))
+        WHERE ItemCode = 'NAMED_CONTACT' AND AgreementId IN (SELECT AgreementId FROM dbo.Agreement WHERE ClientId = @ClientId);
+    PRINT N'Updated ' + ISNULL(@NewFullName, @OldName) + CASE WHEN @IsActive = 0 THEN N' (no longer a current contact; their details were still corrected).' ELSE N'.' END;
+    SELECT ContactId, FullName, Email, Phone, IsNamedContact, IsBillingContact, IsActive FROM dbo.Contact WHERE ContactId = @ContactId;
+END
+GO
+
+-- Soft delete: ends the contact's current period. Their record, history and tickets are kept.
+CREATE OR ALTER PROCEDURE dbo.usp_Contact_Remove
+    @ContactId int           = NULL,
+    @Client    nvarchar(200) = NULL,            -- with @FullName, instead of @ContactId
+    @FullName  nvarchar(200) = NULL,
+    @EndDate   date          = NULL,            -- their last day as a contact; default today
+    @Reason    nvarchar(400) = NULL
+AS
+BEGIN
+    SET NOCOUNT, XACT_ABORT ON;
+    DECLARE @rc int;
+    EXEC @rc = dbo.usp_Contact_Resolve @ContactId = @ContactId OUTPUT, @Client = @Client, @FullName = @FullName;
+    IF @rc <> 0 OR @ContactId IS NULL RETURN;
+
+    DECLARE @Today date = CAST(dbo.fn_UkNow() AS date);
+    SET @EndDate = ISNULL(@EndDate, @Today);
+    DECLARE @Name nvarchar(200), @ClientId int, @Named bit, @Billing bit;
+    SELECT @Name = FullName, @ClientId = ClientId, @Named = IsNamedContact, @Billing = IsBillingContact FROM dbo.Contact WHERE ContactId = @ContactId;
+    DECLARE @PeriodId int, @From date;
+    SELECT @PeriodId = ContactPeriodId, @From = StartDate FROM dbo.ContactPeriod WHERE ContactId = @ContactId AND EndDate IS NULL;
+    IF @PeriodId IS NULL
+    BEGIN
+        DECLARE @Last nvarchar(11) = (SELECT CONVERT(nvarchar(11), MAX(EndDate), 106) FROM dbo.ContactPeriod WHERE ContactId = @ContactId);
+        RAISERROR(N'%s is not a current contact (removed %s).', 16, 1, @Name, @Last); RETURN;
+    END
+    IF @EndDate > @Today BEGIN RAISERROR(N'The end date is in the future. Record the removal on or after their last day.', 16, 1); RETURN; END
+    IF @EndDate < @From
+    BEGIN DECLARE @f nvarchar(11) = CONVERT(nvarchar(11), @From, 106); RAISERROR(N'%s only became a contact on %s; the end date cannot be before that.', 16, 1, @Name, @f); RETURN; END
+
+    BEGIN TRAN;
+    UPDATE dbo.ContactPeriod SET EndDate = @EndDate, EndReason = NULLIF(LTRIM(RTRIM(@Reason)), N'') WHERE ContactPeriodId = @PeriodId;
+    UPDATE dbo.Contact SET IsActive = 0 WHERE ContactId = @ContactId;
+    COMMIT;
+
+    PRINT N'Removed ' + @Name + N' as a contact (last day ' + CONVERT(nvarchar(11), @EndDate, 106) + N'). Their history and tickets are kept; add them again with usp_Contact_Add or usp_Contact_Reinstate.';
+    IF @Named = 1 AND NOT EXISTS (SELECT 1 FROM dbo.Contact WHERE ClientId = @ClientId AND IsActive = 1 AND IsNamedContact = 1)
+        PRINT N'WARNING: ' + @Name + N' was the client''s only named point of contact. The agreement needs one: add another, or mark an existing contact as named.';
+    IF @Billing = 1 AND NOT EXISTS (SELECT 1 FROM dbo.Contact WHERE ClientId = @ClientId AND IsActive = 1 AND IsBillingContact = 1)
+        PRINT N'Note: ' + @Name + N' was the billing contact. Invoices now go to the client''s billing e-mail only.';
+END
+GO
+
+-- Brings a removed contact back, with a new period. Details can be changed at the same time (NULL = unchanged).
+CREATE OR ALTER PROCEDURE dbo.usp_Contact_Reinstate
+    @ContactId        int           = NULL,
+    @Client           nvarchar(200) = NULL,     -- with @FullName, instead of @ContactId
+    @FullName         nvarchar(200) = NULL,
+    @StartDate        date          = NULL,     -- first day back; default today
+    @Email            nvarchar(320) = NULL,
+    @Phone            nvarchar(50)  = NULL,
+    @IsNamedContact   bit           = NULL,
+    @IsBillingContact bit           = NULL
+AS
+BEGIN
+    SET NOCOUNT, XACT_ABORT ON;
+    DECLARE @rc int;
+    EXEC @rc = dbo.usp_Contact_Resolve @ContactId = @ContactId OUTPUT, @Client = @Client, @FullName = @FullName;
+    IF @rc <> 0 OR @ContactId IS NULL RETURN;
+
+    SET @StartDate = ISNULL(@StartDate, CAST(dbo.fn_UkNow() AS date));
+    DECLARE @Name nvarchar(200) = (SELECT FullName FROM dbo.Contact WHERE ContactId = @ContactId);
+    IF EXISTS (SELECT 1 FROM dbo.ContactPeriod WHERE ContactId = @ContactId AND EndDate IS NULL)
+    BEGIN RAISERROR(N'%s is already a current contact.', 16, 1, @Name); RETURN; END
+    DECLARE @LastEnd date = (SELECT MAX(EndDate) FROM dbo.ContactPeriod WHERE ContactId = @ContactId);
+    IF @StartDate <= @LastEnd
+    BEGIN DECLARE @l nvarchar(11) = CONVERT(nvarchar(11), @LastEnd, 106); RAISERROR(N'%s was a contact until %s; the new start date must be after that.', 16, 1, @Name, @l); RETURN; END
+
+    BEGIN TRAN;
+    INSERT dbo.ContactPeriod (ContactId, StartDate) VALUES (@ContactId, @StartDate);
+    UPDATE dbo.Contact SET IsActive = 1 WHERE ContactId = @ContactId;
+    COMMIT;
+    IF @Email IS NOT NULL OR @Phone IS NOT NULL OR @IsNamedContact IS NOT NULL OR @IsBillingContact IS NOT NULL
+        EXEC dbo.usp_Contact_Update @ContactId = @ContactId, @Email = @Email, @Phone = @Phone,
+             @IsNamedContact = @IsNamedContact, @IsBillingContact = @IsBillingContact;
+    IF (SELECT IsNamedContact FROM dbo.Contact WHERE ContactId = @ContactId) = 1
+        UPDATE dbo.OnboardingItem SET CompletedDate = ISNULL(CompletedDate, CAST(dbo.fn_UkNow() AS date))
+        WHERE ItemCode = 'NAMED_CONTACT' AND AgreementId IN (SELECT AgreementId FROM dbo.Agreement WHERE ClientId = (SELECT ClientId FROM dbo.Contact WHERE ContactId = @ContactId));
+    PRINT @Name + N' is a contact again from ' + CONVERT(nvarchar(11), @StartDate, 106) + N' (previously until ' + CONVERT(nvarchar(11), @LastEnd, 106) + N').';
+END
+GO
+
+-- A client's contacts with their periods. @IncludeRemoved = 0 shows current contacts only.
+CREATE OR ALTER PROCEDURE dbo.usp_Contact_Show
+    @Client         nvarchar(200),
+    @IncludeRemoved bit = 1
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @ClientId int = dbo.fn_ClientId(@Client);
+    IF @ClientId IS NULL BEGIN RAISERROR(N'Client or agreement "%s" not found.', 16, 1, @Client); RETURN; END
+    SELECT ct.ContactId, ct.FullName, ct.Email, ct.Phone,
+           Named = CASE WHEN ct.IsNamedContact = 1 THEN 'Yes' ELSE '' END,
+           Billing = CASE WHEN ct.IsBillingContact = 1 THEN 'Yes' ELSE '' END,
+           Status = CASE WHEN ct.IsActive = 1 THEN 'Current' ELSE 'Removed' END,
+           Periods = STRING_AGG(CONVERT(nvarchar(11), p.StartDate, 106) + N' - ' + ISNULL(CONVERT(nvarchar(11), p.EndDate, 106), N'now'), N'; ')
+                     WITHIN GROUP (ORDER BY p.StartDate)
+    FROM dbo.Contact ct LEFT JOIN dbo.ContactPeriod p ON p.ContactId = ct.ContactId
+    WHERE ct.ClientId = @ClientId AND (@IncludeRemoved = 1 OR ct.IsActive = 1)
+    GROUP BY ct.ContactId, ct.FullName, ct.Email, ct.Phone, ct.IsNamedContact, ct.IsBillingContact, ct.IsActive
+    ORDER BY ct.IsActive DESC, ct.IsNamedContact DESC, ct.FullName;
 END
 GO
 
@@ -626,7 +858,7 @@ BEGIN
     INSERT dbo.OnboardingItem (AgreementId, ItemCode, SortOrder, Description, IsRequired, CompletedDate)
     VALUES (@AgreementId, 'SIGNED',          1, N'Agreement signed and start date confirmed', 1, @SignedDate),
            (@AgreementId, 'NAMED_CONTACT',   2, N'Named point of contact for support ticket queries', 1,
-                CASE WHEN EXISTS (SELECT 1 FROM dbo.Contact WHERE ClientId = @ClientId AND IsNamedContact = 1) THEN CAST(dbo.fn_UkNow() AS date) END),
+                CASE WHEN EXISTS (SELECT 1 FROM dbo.Contact WHERE ClientId = @ClientId AND IsNamedContact = 1 AND IsActive = 1) THEN CAST(dbo.fn_UkNow() AS date) END),
            (@AgreementId, 'TICKET_CHANNEL',  3, N'Agreed channel for raising support tickets', 1, NULL),
            (@AgreementId, 'REMOTE_ACCESS',   4, N'Remote access to each covered SQL Server (VPN, Azure Bastion or agreed equivalent)', 1, NULL),
            (@AgreementId, 'SSMS_ACCESS',     5, N'SSMS or equivalent tooling with access to each instance (jump box preferred)', 1, NULL),
@@ -931,7 +1163,17 @@ BEGIN
             PRINT N'WARNING: ' + @InstanceName + N' is not a covered instance on this agreement. Support for non-covered servers is quoted separately.';
     END
     DECLARE @ClientId int = (SELECT ClientId FROM dbo.Agreement WHERE AgreementId = @AgreementId);
-    DECLARE @ContactId int = (SELECT TOP (1) ContactId FROM dbo.Contact WHERE ClientId = @ClientId AND (FullName = @ContactName OR (@ContactName IS NULL AND IsNamedContact = 1)) ORDER BY IsNamedContact DESC);
+    DECLARE @ContactId int = (SELECT TOP (1) ContactId FROM dbo.Contact
+                              WHERE ClientId = @ClientId AND (FullName = @ContactName OR (@ContactName IS NULL AND IsNamedContact = 1 AND IsActive = 1))
+                              ORDER BY IsActive DESC, IsNamedContact DESC);
+    IF @ContactName IS NOT NULL AND @ContactId IS NULL
+        PRINT N'Note: ' + @ContactName + N' is not a contact for this client, so the ticket is logged without one.';
+    ELSE IF (SELECT IsActive FROM dbo.Contact WHERE ContactId = @ContactId) = 0
+    BEGIN
+        DECLARE @RemovedOn nvarchar(11) = (SELECT CONVERT(nvarchar(11), MAX(EndDate), 106) FROM dbo.ContactPeriod WHERE ContactId = @ContactId);
+        PRINT N'WARNING: ' + @ContactName + N' is no longer a contact for this client (removed ' + ISNULL(@RemovedOn, N'?')
+            + N'). Check the request is authorised by a current named contact.';
+    END
 
     DECLARE @a_End date, @a_Paused date, @a_Start date;
     SELECT @a_End = EndDate, @a_Paused = SupportPausedFrom, @a_Start = StartDate FROM dbo.Agreement WHERE AgreementId = @AgreementId;
@@ -1590,6 +1832,15 @@ BEGIN
     FROM dbo.Invoice i JOIN dbo.Agreement a ON a.AgreementId = i.AgreementId JOIN dbo.Client c ON c.ClientId = a.ClientId
     WHERE i.Status = 'Sent' AND i.DueDate < @Today;
 
+    -- Contacts: onboarding done, but every named contact has since been removed
+    INSERT #A
+    SELECT 2, 'Contacts', c.ClientName, N'No current named contact (' + a.AgreementRef + N')',
+           N'Every named point of contact has been removed. The agreement needs one for ticket queries: add or re-add one.', NULL
+    FROM dbo.Agreement a JOIN dbo.Client c ON c.ClientId = a.ClientId
+    WHERE (a.EndDate IS NULL OR a.EndDate >= @Today)
+      AND EXISTS (SELECT 1 FROM dbo.OnboardingItem o WHERE o.AgreementId = a.AgreementId AND o.ItemCode = 'NAMED_CONTACT' AND o.CompletedDate IS NOT NULL)
+      AND NOT EXISTS (SELECT 1 FROM dbo.Contact ct WHERE ct.ClientId = a.ClientId AND ct.IsActive = 1 AND ct.IsNamedContact = 1);
+
     -- Onboarding
     INSERT #A
     SELECT 2, 'Onboarding', c.ClientName, N'Onboarding incomplete (' + a.AgreementRef + N')',
@@ -1751,6 +2002,6 @@ BEGIN
 END
 GO
 
-INSERT dbo.InstallHistory (Version) VALUES ('1.0.0');
-PRINT N'Molehill Admin 1.0.0 installed.';
+INSERT dbo.InstallHistory (Version) VALUES ('1.2.0');   -- bump with every schema change: Molehill Manager offers the upgrade
+PRINT N'Molehill Admin 1.2.0 installed.';
 GO

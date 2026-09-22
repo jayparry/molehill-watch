@@ -293,6 +293,13 @@ public static class SelfTest
             Check("upgraded and ready", AdminInstaller.Inspect(a).State == DbState.Ready);
             Check("data kept", Convert.ToInt32(adb.Scalar("SELECT COUNT(*) FROM dbo.Client WHERE ClientName = N'Kept Ltd'")) == 1);
 
+            // 2b. schema current but an older recorded version (e.g. a later change that isn't a new column): upgrade offered
+            adb.Execute("INSERT dbo.InstallHistory (Version) VALUES ('1.0.0');");
+            var older = AdminInstaller.Inspect(a);
+            Check("older recorded version offered the upgrade", older.State == DbState.NeedsUpgrade && older.Message.Contains("1.0.0"), older.Message);
+            Step("upgrading it", () => AdminInstaller.Install(a));
+            Check("version recorded, ready again", AdminInstaller.Inspect(a).State == DbState.Ready && AdminInstaller.ScriptVersion >= new Version(1, 2));
+
             // 3. an install that stopped part way is finished, not refused as a clash
             adb.Execute("DROP PROCEDURE dbo.usp_Dashboard;");
             var partial = AdminInstaller.Inspect(a);
@@ -469,7 +476,12 @@ public static class SelfTest
         }
     }
 
-    private static IEnumerable<FormSpec> AllForms(AdminDb db, string reference, string client, string instance, string ticket, string invoice) => new[]
+    private static IEnumerable<FormSpec> AllForms(AdminDb db, string reference, string client, string instance, string ticket, string invoice)
+    {
+        var contact = db.Scalar("SELECT TOP (1) ContactId FROM dbo.Contact ORDER BY ContactId;") is int id ? id : 0;
+        var contactForms = contact == 0 ? Array.Empty<FormSpec>()
+            : new[] { AdminForms.EditContact(db, contact), AdminForms.RemoveContact(db, contact), AdminForms.ReaddContact(db, contact) };
+        return contactForms.Concat(new[]
     {
         AdminForms.NewClient(db), AdminForms.NewAgreement(db), AdminForms.AddContact(db, client),
         AdminForms.AddInstance(db, reference), AdminForms.UpdateInstance(db, reference, instance), AdminForms.RemoveInstance(db, reference, instance),
@@ -478,8 +490,10 @@ public static class SelfTest
         AdminForms.GiveNotice(db, reference), AdminForms.PauseSupport(db, reference, true), AdminForms.PauseSupport(db, reference, false),
         AdminForms.PriceChange(db), AdminForms.AddQuote(db, reference), AdminForms.OpenTicket(db, reference),
         AdminForms.RespondTicket(db, ticket), AdminForms.EstimateTicket(db, ticket), AdminForms.LogTime(db, ticket), AdminForms.CloseTicket(db, ticket),
-        AdminForms.RunBilling(db), AdminForms.AdjustInvoice(db, invoice), AdminForms.SetInvoiceStatus(db, invoice, "Paid")
-    };
+        AdminForms.RunBilling(db), AdminForms.AdjustInvoice(db, invoice), AdminForms.SetInvoiceStatus(db, invoice, "Paid"),
+        AdminForms.BusinessDetails(db)
+    });
+    }
 
     /// <summary>Fills in and submits every form, exactly as the dialogs do, against a test database.</summary>
     public static int Write(AdminDb db)
@@ -512,7 +526,27 @@ public static class SelfTest
         ExpectError("required field is enforced", () => Submit(AdminForms.AddInstance(db, reference)), "Name is required");
         ExpectError("bad number is caught", () => Submit(AdminForms.AddInstance(db, reference), ("InstanceName", "X"), ("DatabaseCount", "lots")), "not a whole number");
 
-        Step("add contact", () => Submit(AdminForms.AddContact(db, name), ("FullName", "Sam Second"), ("Email", "sam@selftest.example")));
+        Step("add contact from a start date", () => Submit(AdminForms.AddContact(db, name), ("FullName", "Sam Second"), ("Email", "sam@selftest.exmaple"),
+            ("Phone", "01234 567890"), ("StartDate", D(start))));
+        int SamId() => (int)Queries.Contacts(db, reference, includeRemoved: true).Rows.Cast<DataRow>().First(r => (string)r["Name"] == "Sam Second")["Id"];
+        Step("edit contact: fix the e-mail typo, clear the phone", () => Submit(AdminForms.EditContact(db, SamId()),
+            ("Email", "sam@selftest.example"), ("Phone", "")));
+        Step("edited details saved, the rest unchanged", () => Queries.Contact(db, SamId())!,
+            r => (string)r["Email"] == "sam@selftest.example" && r["Phone"] is DBNull && (string)r["FullName"] == "Sam Second" ? null : $"{r["Email"]} / {r["Phone"]}");
+        ExpectError("edit contact: bad e-mail refused", () => Submit(AdminForms.EditContact(db, SamId()), ("Email", "sam at selftest")), "does not look like an e-mail");
+        ExpectError("add contact: someone already current refused", () => Submit(AdminForms.AddContact(db, name), ("FullName", "Sam Second")), "already a contact");
+        Step("remove contact (soft)", () => Submit(AdminForms.RemoveContact(db, SamId()), ("EndDate", D(DateTime.Today.AddDays(-10))), ("Reason", "Left the company")));
+        Step("removed contact kept, shown as removed", () => Queries.Contacts(db, reference, includeRemoved: true),
+            t => t.Rows.Cast<DataRow>().Any(r => (string)r["Name"] == "Sam Second" && (string)r["Status"] == "Removed" && r["To"] is DateTime) ? null : "not removed");
+        Step("removed contact left out of the current list", () => Queries.Contacts(db, reference),
+            t => t.Rows.Cast<DataRow>().Any(r => (string)r["Name"] == "Sam Second") ? "still listed" : null);
+        ExpectError("remove contact: twice refused", () => Submit(AdminForms.RemoveContact(db, SamId())), "not a current contact");
+        ExpectError("add back: start before they left refused", () => Submit(AdminForms.ReaddContact(db, SamId()), ("StartDate", D(DateTime.Today.AddDays(-12)))), "must be after");
+        Step("add contact back", () => Submit(AdminForms.ReaddContact(db, SamId()), ("StartDate", D(DateTime.Today)), ("Phone", "07000 000000")));
+        Step("history has both periods, with the reason", () => Queries.ContactPeriods(db, SamId()),
+            t => t.Rows.Count == 2 && (string)t.Rows[0]["Reason"] == "Left the company" && t.Rows[1]["To"] is DBNull ? null : $"{t.Rows.Count} periods");
+        Step("back as a current contact with the new phone", () => Queries.Contact(db, SamId())!,
+            r => r["IsActive"] is true && (string)r["Phone"] == "07000 000000" ? null : "not current");
 
         var add = () => AdminForms.AddInstance(db, reference);
         Step("add SQL Server standalone", () => Submit(add(), ("InstanceName", "ST-SQL01"), ("SqlVersion", "2019"), ("Edition", "Standard")));

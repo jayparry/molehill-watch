@@ -83,6 +83,28 @@ Work through `Admin\Example-NewClient.sql`. It's the same steps with example val
 
 ---
 
+## Contacts
+
+Contacts are never deleted. Removing someone ends their current period as a contact; adding them back starts a new one. Their tickets and history stay linked to the same person.
+
+| Step | Command |
+|---|---|
+| Add (optionally from a date) | `EXEC dbo.usp_Contact_Add @ClientName = N'Contoso Ltd', @FullName = N'Sam Smith', @Email = N'sam@contoso.co.uk', @IsNamedContact = 1, @StartDate = '2026-10-01';` |
+| Correct details (only what you pass changes; `''` clears e-mail or phone) | `EXEC dbo.usp_Contact_Update @Client = N'Contoso Ltd', @FullName = N'Sam Smith', @Email = N'sam.smith@contoso.co.uk';` |
+| Remove (soft delete; the end date is their last day, not in the future) | `EXEC dbo.usp_Contact_Remove @Client = N'Contoso Ltd', @FullName = N'Sam Smith', @EndDate = '2026-12-31', @Reason = N'Left the company';` |
+| Add back later | `EXEC dbo.usp_Contact_Add ...` with the same name, or `EXEC dbo.usp_Contact_Reinstate @Client = N'Contoso Ltd', @FullName = N'Sam Smith', @StartDate = '2027-03-01';` |
+| Contacts and their dates | `EXEC dbo.usp_Contact_Show @Client = N'Contoso Ltd';` (`@IncludeRemoved = 0` for current only) |
+
+* `@Client` takes the client name or agreement ref, or use `@ContactId` from `usp_Contact_Show`.
+* E-mail addresses that are obviously malformed are rejected.
+* A new start date must be after their last end date.
+* Removing the only named contact prints a warning, and the dashboard flags any agreement left with no current named contact.
+* A ticket logged for a removed contact is still linked to them, with a warning to check the request is authorised. When no contact is given, the default is a current named contact.
+
+In **Molehill Manager**: open the agreement and go to the **Contacts** tab. Removed contacts are listed with their dates. Enter on a contact offers Edit, Remove or Add back, plus History.
+
+---
+
 ## Tickets
 
 | Step | Command |
