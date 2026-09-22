@@ -175,7 +175,7 @@ If a client's Molehill Watch lives in their own DBA database, add `-Database <na
 
 ## Consultancy and other work
 
-Work that isn't Molehill Watch support - a migration, a review, a few days of advice - is a **consultancy engagement**. You agree a day rate (or an hourly rate, or a fixed price), log the days as you work, and the billing run invoices each month once that month has ended.
+Work that isn't Molehill Watch support - a migration, a review, a few days of advice - is a **consultancy engagement**. You agree a day rate (or an hourly rate, or a fixed price), log the days as you work, and the billing run invoices **every two weeks**, counted from the day the work started.
 
 | Step | Command |
 |---|---|
@@ -194,7 +194,11 @@ Work that isn't Molehill Watch support - a migration, a review, a few days of ad
 
 **Rates.** `@DayRate` is the usual arrangement. `@BillingMode = 'Hourly'` with `@HourlyRate` bills by the hour instead. `@BillingMode = 'FixedPrice'` with `@FixedPrice` invoices the agreed price when you mark the work finished - log the days anyway, so you can see what it really cost. `@OutOfHoursRate` is optional: without it, evening and weekend work is billed at the day rate like anything else.
 
-**When it's invoiced.** At the end of each month, for the days logged in that month. Marking the engagement finished invoices the part-month straight away. Nothing is invoiced twice, and voiding a consultancy invoice puts its days back.
+**When it's invoiced.** Each engagement is billed in fortnights from its own start date: an engagement that started on Monday 6 July has periods 6-19 July, 20 July - 2 August, and so on. A period is invoiced once it has ended, dated its last day, and a period with no work in it raises nothing. Marking the engagement finished invoices the part period straight away, dated the day it finished.
+
+Change `ConsultancyBillingDays` in `dbo.Setting` if you want a different rhythm - `7` for weekly, `28` for four-weekly. It applies to every consultancy engagement, and to periods that have not been invoiced yet.
+
+Nothing is invoiced twice, and voiding a consultancy invoice puts its days back.
 
 A day logged against a support agreement is different: support time belongs to a ticket (`usp_Time_Log`), and `usp_Work_Log` will tell you so.
 
@@ -207,7 +211,7 @@ The daily task runs `usp_Billing_Run`, which covers every engagement: Molehill W
 * that cycle's monthly fees (in advance)
 * any chargeable support from earlier cycles (in arrears), with included hours and minimum charges applied
 
-For consultancy engagements it raises a separate draft invoice per engagement for each month that has ended, one line per day worked. Support and consultancy are never mixed on one invoice.
+For consultancy engagements it raises a separate draft invoice per engagement for each billing period that has ended (a fortnight from the engagement's start date), one line per day worked plus a line naming the period. Support and consultancy are never mixed on one invoice.
 
 Draft invoices are written to `Documents\Molehill Admin\Invoices\`. Open one in a browser and print it to PDF. A cycle with nothing covered and nothing owed gets no invoice, and the billing run tells you so. That usually means an instance's covered-from date is wrong.
 
@@ -264,7 +268,11 @@ The dashboard flags packages that are running low (20% or less left), used up (s
 
 **Time logged late.** If you log time for a cycle that has already been invoiced, it goes on a small separate invoice at the next billing run.
 
-**Starting a client's billing again from scratch.** Normally you'd void a wrong invoice (`usp_Invoice_Void`) and re-run billing. If you really need a client to look as though billing has never run - a botched go-live, a test client - run `Admin/Reset-ClientBilling.sql` in SSMS. It removes their invoices, invoice lines and billing cycles, releases their logged time and gives back any pre-paid hours those invoices drew; the client, agreement, instances, contacts, tickets, time entries and packages all stay. It prints what it would remove and ends in `ROLLBACK`, so the first run is a dry run - change that to `COMMIT` once the lists look right. The next billing run rebuilds the same cycles, invoice numbers and totals. It is deliberately a script rather than a button in Molehill Manager.
+**Starting a client's billing again from scratch.** Normally you'd void a wrong invoice (`usp_Invoice_SetStatus @Status = 'Void'`) and re-run billing. If you really need a client to look as though billing has never run - a botched go-live, a test client - run `Admin/Reset-ClientBilling.sql` in SSMS. It removes their invoices, invoice lines and billing cycles, releases their logged time and gives back any pre-paid hours those invoices drew; the client, engagements, agreements, instances, contacts, tickets, time entries and packages all stay. It prints what it would remove and ends in `ROLLBACK`, so the first run is a dry run - change that to `COMMIT` once the lists look right. The next billing run rebuilds the same cycles and periods, with the same dates and totals.
+
+Two things it keeps by default, because a billing run cannot rebuild them: the invoice that **sold** a pre-paid package, and invoices you **typed by hand**. Set `@KeepPackageInvoices` or `@KeepTypedInvoices` to `0` if you want those gone too - deleting them loses them for good, and only then do the rebuilt invoice numbers start again at 0001.
+
+It needs Molehill Admin 2.0 or later; on an older database it stops and tells you to upgrade first. It is deliberately a script rather than a button in Molehill Manager.
 
 ---
 

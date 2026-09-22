@@ -774,8 +774,12 @@ public static class SelfTest
             r => r.First is { Rows.Count: 1 } t && (decimal)t.Rows[0]["Total"] == 1500m ? null
                  : $"{r.First?.Rows.Count} invoice(s), total {r.First?.Rows.Cast<DataRow>().FirstOrDefault()?["Total"]}");
         var conInvoice = conBilled?.First?.Rows[0]["InvoiceNo"] as string ?? "?";
-        Step("one line per day worked", () => Queries.InvoiceLines(db, conInvoice),
-            t => t.Rows.Count == 3 && t.Rows.Cast<DataRow>().All(r => (string)r["Type"] == "Consultancy") ? null : $"{t.Rows.Count} lines");
+        Step("one line per day worked, plus the period it covers", () => Queries.InvoiceLines(db, conInvoice),
+            t => t.Rows.Cast<DataRow>().Count(r => (string)r["Type"] == "Consultancy") == 3
+                 && t.Rows.Cast<DataRow>().Any(r => (string)r["Type"] == "Info" && ((string)r["Description"]).StartsWith("Work done "))
+                 ? null : string.Join(", ", t.Rows.Cast<DataRow>().Select(r => (string)r["Type"])));
+        Step("it is dated the last day of the billing period", () => Queries.EngagementInvoices(db, conRef),
+            t => (DateTime)t.Rows[0]["Dated"] == lastMonth.AddDays(13) ? null : $"dated {t.Rows[0]["Dated"]}, expected {lastMonth.AddDays(13):d}");
         Step("the invoice names the engagement and the client's PO", () => AdminForms.SaveInvoiceHtml(db, conInvoice, Path.Combine(Path.GetTempPath(), "MolehillManager-selftest")),
             p => File.ReadAllText(p) is var h && h.Contains(conRef) && h.Contains("PO-1234") && h.Contains("Warehouse migration") ? null : "engagement not on the invoice");
         Step("billing again invoices nothing twice", () => Submit(AdminForms.RunBilling(db), ("Client", conChoice)),
@@ -785,8 +789,14 @@ public static class SelfTest
         Step("rate change applies to work not yet invoiced", () => Submit(AdminForms.EditEngagement(db, conRef), ("DayRate", "650")));
         Step("this month's work uses the new rate", () => { Submit(AdminForms.LogWork(db, conRef), ("WorkDate", D(DateTime.Today)), ("Days", "1"), ("Description", "Cutover")); return Queries.Engagement(db, conRef)!; },
             r => (decimal)r["UnbilledValue"] == 650m ? null : $"£{r["UnbilledValue"]}");
-        Step("this month is not invoiced until the month has ended", () => Submit(AdminForms.RunBilling(db), ("Client", conChoice)),
-            r => r.First is { Rows.Count: 0 } ? null : "invoiced too early");
+        var periodEnd = (DateTime)db.Scalar("""
+            SELECT DATEADD(day, -1, dbo.fn_ConsultancyPeriodStart(e.StartDate,
+                   dbo.fn_ConsultancyPeriod(e.StartDate, CAST(dbo.fn_UkNow() AS date)) + 1))
+            FROM dbo.Engagement e WHERE e.EngagementRef = @r;
+            """, ("@r", conRef))!;
+        Step($"the period running now (to {periodEnd:dd MMM}) is only invoiced once it ends", () => Submit(AdminForms.RunBilling(db), ("Client", conChoice)),
+            r => (r.First?.Rows.Count > 0) == (periodEnd <= DateTime.Today) ? null
+                 : $"{r.First?.Rows.Count} invoice(s) with the period ending {periodEnd:d}");
 
         // finishing: the form starts on the engagement's end date, and so does the procedure
         var conEnd = DateTime.Today.AddDays(-3);
@@ -797,8 +807,9 @@ public static class SelfTest
         Step("finishing with no date given uses it", () => Submit(AdminForms.CompleteEngagement(db, conRef)));
         Step("finished on the end date", () => Queries.Engagement(db, conRef)!,
             r => r["CompletedOn"] is DateTime c && c.Date == conEnd ? null : $"finished {r["CompletedOn"]}");
-        Step("the last days go out on an invoice dated then", () => Submit(AdminForms.RunBilling(db), ("Client", conChoice)),
-            r => r.First is { Rows.Count: 1 } t && (DateTime)t.Rows[0]["InvoiceDate"] == conEnd ? null : $"{r.First?.Rows.Count} invoice(s)");
+        Step("anything left goes out dated then, and nothing is left unbilled", () => Submit(AdminForms.RunBilling(db), ("Client", conChoice)),
+            r => r.First!.Rows.Cast<DataRow>().Any(x => (DateTime)x["InvoiceDate"] != conEnd) ? "invoice not dated on the finish date"
+                 : (decimal)Queries.Engagement(db, conRef)!["UnbilledDays"] == 0m ? null : "days left unbilled");
 
         // an invoice typed by hand
         var typed = Step("new invoice typed by hand", () => Submit(AdminForms.NewInvoice(db), ("ClientName", name)),

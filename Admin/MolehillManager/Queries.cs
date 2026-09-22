@@ -274,6 +274,10 @@ public static class Queries
                    (SELECT STRING_AGG(ct.FullName + ISNULL(N' <' + ct.Email + N'>', N' (no e-mail)'), N'; ') FROM dbo.Contact ct
                     WHERE ct.ClientId = c.ClientId AND ct.IsActive = 1 AND ct.IsBillingContact = 1) AS InvoicesTo,
                    ISNULL(u.Days, 0) AS UnbilledDays, ISNULL(u.Value, 0) AS UnbilledValue, u.LastWorked,
+                   CASE WHEN e.BillingMode = 'FixedPrice' THEN NULL
+                        ELSE DATEADD(day, -1, dbo.fn_ConsultancyPeriodStart(e.StartDate,
+                             dbo.fn_ConsultancyPeriod(e.StartDate, CAST(dbo.fn_UkNow() AS date)) + 1)) END AS PeriodEndsOn,
+                   dbo.fn_ConsultancyBillingDays() AS BillingEveryDays,
                    ISNULL(w.Days, 0) AS TotalDays,
                    ISNULL((SELECT SUM(i.Total) FROM dbo.Invoice i WHERE i.EngagementId = e.EngagementId AND i.Status <> 'Void'), 0) AS Invoiced
             FROM dbo.Engagement e JOIN dbo.Client c ON c.ClientId = e.ClientId

@@ -637,7 +637,7 @@ public static class AdminForms
     {
         Title = "Run billing",
         Intro = "Creates draft invoices: Molehill Watch fees in advance for each cycle that has started, support in arrears for cycles that " +
-                "have ended, and consultancy days for each month that has ended. Safe to run as often as you like; nothing is invoiced twice.",
+                "have ended, and consultancy days for each billing period that has ended. Safe to run as often as you like; nothing is invoiced twice.",
         Fields =
         {
             Field.Date("AsOfDate", "As of", help: "blank = today"),
@@ -673,7 +673,7 @@ public static class AdminForms
         {
             Title = "New consultancy engagement",
             Intro = "Work for a client that is not Molehill Watch support: a project, a review, advice. Log the days against it as you go, " +
-                    "and the billing run invoices each month once that month has ended. Fixed-price work is invoiced when you mark it finished.",
+                    "and the billing run invoices it every two weeks, counted from the day it starts. Fixed-price work is invoiced when you mark it finished.",
             Fields =
             {
                 Field.Choice("ClientName", "Client", clients.ToArray()),
@@ -762,7 +762,7 @@ public static class AdminForms
         return new FormSpec
         {
             Title = $"Log work - {engagementRef}",
-            Intro = hourly ? "Give the hours worked. They are invoiced at the end of the month."
+            Intro = hourly ? "Give the hours worked. They go on the invoice for the billing period they fall in."
                            : "Give days (1, 0.5) or the hours worked - hours become days using the rounding set on the engagement. "
                              + "Everything done on one day counts together as that day's work.",
             Fields =

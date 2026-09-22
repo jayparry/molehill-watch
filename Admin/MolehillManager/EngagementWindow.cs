@@ -52,7 +52,7 @@ public sealed class EngagementWindow
         _contacts = Table();
 
         var workView = new View { Width = Dim.Fill(), Height = Dim.Fill() };
-        workView.Add(new Label("A day's work is billed as one line. Everything logged on the same day counts together.")
+        workView.Add(new Label("A day's work is billed as one line. Everything logged on the same day counts together, and each billing period is invoiced once it has ended.")
             { X = 1, Y = 0, ColorScheme = Colors.Menu });
         _work.Y = 1;
         _work.Height = Dim.Fill();
@@ -129,7 +129,10 @@ public sealed class EngagementWindow
         sb.AppendLine($"Worked {e["TotalDays"]:N2} days in total; {e["UnbilledDays"]:N2} days (£{e["UnbilledValue"]:N2}) not invoiced yet"
                       + (e["LastWorked"] is DBNull ? "" : $"; last worked {F("LastWorked")}"));
         sb.AppendLine($"Invoiced so far: £{e["Invoiced"]:N2}"
-                      + (e["PurchaseOrder"] is DBNull ? "" : $"   PO: {F("PurchaseOrder")}"));
+                      + (e["PurchaseOrder"] is DBNull ? "" : $"   PO: {F("PurchaseOrder")}")
+                      + (mode == "FixedPrice" ? "   Invoiced when you mark it finished"
+                         : e["PeriodEndsOn"] is DateTime ends
+                           ? $"   Billed every {e["BillingEveryDays"]} days from the start: this period ends {ends:dd MMM yyyy}" : ""));
         sb.AppendLine($"Invoices to: {(e["InvoicesTo"] is DBNull ? "NO ONE - add a contact that receives invoices" : F("InvoicesTo"))}");
         if (e["Notes"] is not DBNull) sb.AppendLine($"Notes: {F("Notes")}");
 

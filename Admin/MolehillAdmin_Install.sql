@@ -1,7 +1,7 @@
 /*
 ===============================================================================
  Molehill Watch - SQL Server Support Package
- Molehill Admin: clients, engagements, tickets, time and billing  Version 2.0.1
+ Molehill Admin: clients, engagements, tickets, time and billing  Version 2.1.0
  Molehill Data Services  -  jay@jayparry.co.uk  -  molehilldataservices.com
 -------------------------------------------------------------------------------
  Runs on YOUR OWN SQL Server (Express is fine), not on client servers.
@@ -11,7 +11,8 @@
    * Monitoring  - a Molehill Watch support agreement, billed on its own cycle
                    (fees in advance, support in arrears) as set out below
    * Consultancy - project or advisory work for a client, billed at an agreed
-                   day rate (or hourly, or a fixed price) monthly in arrears
+                   day rate (or hourly, or a fixed price) every two weeks from
+                   the day the work started
  A client can have any number of both. Each engagement is invoiced separately;
  free-text invoices cover anything that fits neither.
 
@@ -555,6 +556,7 @@ FROM (VALUES
     ('BusinessHoursStart',  N'09:00',                          N'UK local time.'),
     ('BusinessHoursEnd',    N'17:30',                          N'UK local time.'),
     ('DayHours',            N'7.5',                            N'Hours in a consultancy day. Used to turn logged time into days and back.'),
+    ('ConsultancyBillingDays', N'14',                          N'How often consultancy work is invoiced, counted from the engagement''s start date. 14 = every two weeks.'),
     ('DayRateRounding',     N'HalfDay',                        N'How a day-rate engagement rounds each day worked: HalfDay, WholeDay or Exact.'),
     ('ConsultancyRefPrefix',N'CON',                            N'Consultancy engagement references look like CON-0001.'),
     ('CombineInvoicesPerClient', N'0',                         N'0 = one invoice per engagement (recommended). 1 = one invoice per client per run.'),
@@ -748,6 +750,33 @@ BEGIN
              WHEN 'WholeDay' THEN CAST(CEILING(@Exact) AS decimal(9,2))
              ELSE CAST(CEILING(@Exact * 2) / 2.0 AS decimal(9,2))   -- HalfDay
            END;
+END
+GO
+
+-- consultancy billing periods: fixed-length runs of days from the engagement's start
+-- date (a fortnight by default). Work dated before the start belongs to the first one.
+CREATE OR ALTER FUNCTION dbo.fn_ConsultancyBillingDays ()
+RETURNS int
+AS
+BEGIN
+    RETURN ISNULL(NULLIF(TRY_CONVERT(int, dbo.fn_Setting('ConsultancyBillingDays')), 0), 14);
+END
+GO
+
+CREATE OR ALTER FUNCTION dbo.fn_ConsultancyPeriod (@StartDate date, @WorkDate date)
+RETURNS int
+AS
+BEGIN
+    RETURN CASE WHEN @WorkDate <= @StartDate THEN 0
+                ELSE DATEDIFF(day, @StartDate, @WorkDate) / dbo.fn_ConsultancyBillingDays() END;
+END
+GO
+
+CREATE OR ALTER FUNCTION dbo.fn_ConsultancyPeriodStart (@StartDate date, @Period int)
+RETURNS date
+AS
+BEGIN
+    RETURN DATEADD(day, @Period * dbo.fn_ConsultancyBillingDays(), @StartDate);
 END
 GO
 
@@ -1520,7 +1549,14 @@ BEGIN
                                      ELSE N'per the agreement' END,
            OutOfHours = CASE WHEN e.OutOfHoursRate IS NULL THEN N'at the day rate' ELSE NCHAR(163) + FORMAT(e.OutOfHoursRate, 'N2') + N'/hour' END,
            e.Status, e.StartDate, e.EndDate, e.CompletedOn, e.PurchaseOrder,
-           DayRounding = ISNULL(e.DayRounding, dbo.fn_Setting('DayRateRounding')), e.Notes
+           DayRounding = ISNULL(e.DayRounding, dbo.fn_Setting('DayRateRounding')),
+           BillingPeriod = CASE WHEN e.BillingMode = 'FixedPrice' THEN N'on completion'
+                                ELSE N'every ' + CONVERT(nvarchar(10), dbo.fn_ConsultancyBillingDays()) + N' days from '
+                                     + CONVERT(nvarchar(11), e.StartDate, 106) END,
+           NextInvoiceOn = CASE WHEN e.BillingMode <> 'FixedPrice' AND e.Status IN ('Active', 'OnHold')
+                                THEN DATEADD(day, -1, dbo.fn_ConsultancyPeriodStart(e.StartDate,
+                                     dbo.fn_ConsultancyPeriod(e.StartDate, CAST(dbo.fn_UkNow() AS date)) + 1)) END,
+           e.Notes
     FROM dbo.Engagement e JOIN dbo.Client c ON c.ClientId = e.ClientId WHERE e.EngagementId = @Id;
 
     SELECT Worked = FORMAT(ISNULL(SUM(w.Days), 0), 'N2') + N' days',
@@ -2024,6 +2060,12 @@ BEGIN
     VALUES (@Id, NULL, DATEADD(hour, 9, CAST(@WorkDate AS datetime2(0))), @Mins, @RateType, @Description, @IsBillable);
 
     IF @Status = 'Completed' PRINT N'Note: this engagement is marked complete. The next billing run will invoice this time too.';
+    IF @Status <> 'Completed' AND @Mode IN ('DayRate', 'Hourly')
+    BEGIN
+        DECLARE @PerEnd date = DATEADD(day, -1, dbo.fn_ConsultancyPeriodStart(@Start, dbo.fn_ConsultancyPeriod(@Start, @WorkDate) + 1));
+        PRINT N'Invoiced after ' + CONVERT(nvarchar(11), @PerEnd, 106) + N' (every '
+            + CONVERT(nvarchar(10), dbo.fn_ConsultancyBillingDays()) + N' days from ' + CONVERT(nvarchar(11), @Start, 106) + N').';
+    END
     IF @WorkDate < @Start PRINT N'Note: that date is before the engagement started (' + CONVERT(nvarchar(11), @Start, 106) + N').';
     IF @End IS NOT NULL AND @WorkDate > @End PRINT N'Note: that date is after the engagement''s end date (' + CONVERT(nvarchar(11), @End, 106) + N').';
     IF @IsBillable = 0 PRINT N'Logged as non-billable, so it will not appear on an invoice.';
@@ -2570,32 +2612,36 @@ BEGIN
     CLOSE fin; DEALLOCATE fin;
 
     /*-------------------------------------------------------------------------
-      4. consultancy engagements: time invoiced in arrears once a month has
-         ended (or as soon as the work is marked complete); fixed prices are
-         invoiced on completion.
+      4. consultancy engagements: time invoiced in arrears at the end of each
+         billing period - a fortnight from the engagement's start date unless
+         ConsultancyBillingDays says otherwise - or as soon as the work is
+         marked complete; fixed prices are invoiced on completion.
     -------------------------------------------------------------------------*/
     DECLARE @Eid int, @Mode varchar(20), @Fixed decimal(10,2), @EStatus varchar(15), @EComp date,
-            @ERef varchar(30), @EName nvarchar(200), @MEnd date, @MStart date, @IDate date, @FpDays nvarchar(20);
+            @ERef varchar(30), @EName nvarchar(200), @EStart date, @Period int,
+            @PEnd date, @PStart date, @IDate date, @FpDays nvarchar(20);
     DECLARE con CURSOR LOCAL FAST_FORWARD FOR
-        SELECT e.EngagementId, e.BillingMode, e.FixedPrice, e.Status, e.CompletedOn, e.EngagementRef, e.Name
+        SELECT e.EngagementId, e.BillingMode, e.FixedPrice, e.Status, e.CompletedOn, e.EngagementRef, e.Name,
+               ISNULL(e.StartDate, (SELECT MIN(CAST(te.WorkStart AS date)) FROM dbo.TimeEntry te WHERE te.EngagementId = e.EngagementId))
         FROM dbo.Engagement e WHERE e.EngagementId IN (SELECT EngagementId FROM @Engs) ORDER BY e.EngagementRef;
     OPEN con;
-    FETCH NEXT FROM con INTO @Eid, @Mode, @Fixed, @EStatus, @EComp, @ERef, @EName;
+    FETCH NEXT FROM con INTO @Eid, @Mode, @Fixed, @EStatus, @EComp, @ERef, @EName, @EStart;
     WHILE @@FETCH_STATUS = 0
     BEGIN
-        IF @Mode IN ('DayRate', 'Hourly')
+        IF @Mode IN ('DayRate', 'Hourly') AND @EStart IS NOT NULL
         BEGIN
-            DECLARE mth CURSOR LOCAL FAST_FORWARD FOR
-                SELECT DISTINCT EOMONTH(te.WorkStart) FROM dbo.TimeEntry te
+            DECLARE per CURSOR LOCAL FAST_FORWARD FOR
+                SELECT DISTINCT dbo.fn_ConsultancyPeriod(@EStart, CAST(te.WorkStart AS date)) FROM dbo.TimeEntry te
                 WHERE te.EngagementId = @Eid AND te.IsBillable = 1 AND te.InvoiceId IS NULL ORDER BY 1;
-            OPEN mth;
-            FETCH NEXT FROM mth INTO @MEnd;
+            OPEN per;
+            FETCH NEXT FROM per INTO @Period;
             WHILE @@FETCH_STATUS = 0
             BEGIN
-                IF @MEnd <= @AsOfDate OR @EStatus = 'Completed'
+                SET @PStart = dbo.fn_ConsultancyPeriodStart(@EStart, @Period);
+                SET @PEnd = DATEADD(day, -1, dbo.fn_ConsultancyPeriodStart(@EStart, @Period + 1));
+                IF @PEnd <= @AsOfDate OR @EStatus = 'Completed'
                 BEGIN
-                    SET @MStart = DATEADD(day, 1, EOMONTH(@MEnd, -1));
-                    SET @IDate = CASE WHEN @MEnd <= @AsOfDate THEN @MEnd ELSE ISNULL(@EComp, @AsOfDate) END;
+                    SET @IDate = CASE WHEN @PEnd <= @AsOfDate THEN @PEnd ELSE ISNULL(@EComp, @AsOfDate) END;
                     BEGIN TRAN;
                     EXEC dbo.usp_Invoice_New @EngagementId = @Eid, @InvoiceDate = @IDate, @InvoiceId = @InvoiceId OUTPUT;
 
@@ -2605,20 +2651,24 @@ BEGIN
                            + CASE WHEN w.RateType = 'OutOfHours' THEN N' (out of hours)' ELSE N'' END,
                            w.Quantity, w.UnitPrice, CAST(w.Quantity * w.UnitPrice AS decimal(10,2))
                     FROM dbo.fn_ConsultancyWork(@Eid, 1) w
-                    WHERE w.WorkDate BETWEEN @MStart AND @MEnd
+                    WHERE dbo.fn_ConsultancyPeriod(@EStart, w.WorkDate) = @Period
                     ORDER BY w.WorkDate, w.RateType;
+
+                    INSERT dbo.InvoiceLine (InvoiceId, LineType, EngagementId, Description, Quantity, UnitPrice, Amount)
+                    VALUES (@InvoiceId, 'Info', @Eid, N'Work done ' + CONVERT(nvarchar(11), @PStart, 106) + N' - '
+                            + CONVERT(nvarchar(11), @PEnd, 106) + N' (' + @EName + N')', 0, 0, 0);
 
                     UPDATE dbo.TimeEntry SET InvoiceId = @InvoiceId
                     WHERE EngagementId = @Eid AND IsBillable = 1 AND InvoiceId IS NULL
-                      AND CAST(WorkStart AS date) BETWEEN @MStart AND @MEnd;
+                      AND dbo.fn_ConsultancyPeriod(@EStart, CAST(WorkStart AS date)) = @Period;
 
                     EXEC dbo.usp_Invoice_Recalculate @InvoiceId = @InvoiceId;
                     COMMIT;
                     INSERT @Created VALUES (@InvoiceId);
                 END
-                FETCH NEXT FROM mth INTO @MEnd;
+                FETCH NEXT FROM per INTO @Period;
             END
-            CLOSE mth; DEALLOCATE mth;
+            CLOSE per; DEALLOCATE per;
         END
         ELSE IF @Mode = 'FixedPrice' AND @EStatus = 'Completed'
              AND NOT EXISTS (SELECT 1 FROM dbo.Invoice i JOIN dbo.InvoiceLine l ON l.InvoiceId = i.InvoiceId
@@ -2640,7 +2690,7 @@ BEGIN
             COMMIT;
             INSERT @Created VALUES (@InvoiceId);
         END
-        FETCH NEXT FROM con INTO @Eid, @Mode, @Fixed, @EStatus, @EComp, @ERef, @EName;
+        FETCH NEXT FROM con INTO @Eid, @Mode, @Fixed, @EStatus, @EComp, @ERef, @EName, @EStart;
     END
     CLOSE con; DEALLOCATE con;
 
@@ -2990,7 +3040,8 @@ BEGIN
     INSERT #A
     SELECT 3, 'Consultancy', c.ClientName, N'Unbilled work: ' + e.EngagementRef + N' ' + e.Name,
            FORMAT(u.Days, 'N2') + N' days (' + NCHAR(163) + FORMAT(u.Value, 'N2') + N') logged up to ' + CONVERT(nvarchar(11), u.LastWorked, 106)
-           + N'. Invoiced at the end of the month by usp_Billing_Run.', NULL
+           + N'. The billing run invoices it after ' + CONVERT(nvarchar(11), DATEADD(day, -1,
+               dbo.fn_ConsultancyPeriodStart(e.StartDate, dbo.fn_ConsultancyPeriod(e.StartDate, @Today) + 1)), 106) + N'.', NULL
     FROM dbo.Engagement e JOIN dbo.Client c ON c.ClientId = e.ClientId
     CROSS APPLY (SELECT Days = SUM(w.Days), Value = SUM(w.Quantity * w.UnitPrice), LastWorked = MAX(w.WorkDate)
                  FROM dbo.fn_ConsultancyWork(e.EngagementId, 1) w) u
@@ -3228,6 +3279,6 @@ BEGIN
 END
 GO
 
-INSERT dbo.InstallHistory (Version) VALUES ('2.0.1');   -- bump with every schema change: Molehill Manager offers the upgrade
-PRINT N'Molehill Admin 2.0.1 installed.';
+INSERT dbo.InstallHistory (Version) VALUES ('2.1.0');   -- bump with every schema change: Molehill Manager offers the upgrade
+PRINT N'Molehill Admin 2.1.0 installed.';
 GO
