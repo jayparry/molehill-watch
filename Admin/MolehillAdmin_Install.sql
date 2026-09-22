@@ -137,7 +137,7 @@ CREATE TABLE dbo.Instance (
     Environment              varchar(20)   NOT NULL CONSTRAINT DF_Instance_Env DEFAULT 'Production'
                              CONSTRAINT CK_Instance_Env CHECK (Environment IN ('Production', 'NonProduction')),
     Role                     varchar(30)   NOT NULL CONSTRAINT DF_Instance_Role DEFAULT 'Standalone'
-                             CONSTRAINT CK_Instance_Role CHECK (Role IN ('Standalone', 'AGPrimary', 'AGSecondary', 'LogShippingSecondary', 'MirrorSecondary', 'FCI')),
+                             CONSTRAINT CK_Instance_Role CHECK (Role IN ('Standalone', 'AGPrimary', 'AGSecondary', 'LogShippingSecondary', 'MirrorSecondary', 'FCI', 'GeoReplica')),
     PricedAsFullInstance     bit           NOT NULL CONSTRAINT DF_Instance_Full DEFAULT 0,  -- busy readable secondary quoted as full
     AgreedMonthlyFee         decimal(9,2)  NULL,      -- bespoke price; required for non-production
     AvailabilityGroup        nvarchar(128) NULL,
@@ -154,6 +154,29 @@ CREATE TABLE dbo.Instance (
     MonitoringInstalledDate  date          NULL,
     Notes                    nvarchar(max) NULL,
     CONSTRAINT CK_Instance_NonProdFee CHECK (Environment = 'Production' OR AgreedMonthlyFee IS NOT NULL));
+
+-- Azure SQL (agreement update): platform, database count for Azure SQL Database units, geo-replica role
+IF COL_LENGTH(N'dbo.Instance', N'Platform') IS NULL
+    ALTER TABLE dbo.Instance ADD Platform varchar(40) NOT NULL CONSTRAINT DF_Instance_Platform DEFAULT 'SqlServer'
+        CONSTRAINT CK_Instance_Platform CHECK (Platform IN ('SqlServer', 'AzureSqlManagedInstance', 'AzureSqlDatabaseServer', 'AzureSqlDatabaseElasticPool'));
+IF COL_LENGTH(N'dbo.Instance', N'DatabaseCount') IS NULL
+    ALTER TABLE dbo.Instance ADD DatabaseCount int NULL;     -- Azure SQL Database logical server / elastic pool only
+IF EXISTS (SELECT 1 FROM sys.check_constraints WHERE name = N'CK_Instance_Role' AND definition NOT LIKE N'%GeoReplica%')
+BEGIN
+    ALTER TABLE dbo.Instance DROP CONSTRAINT CK_Instance_Role;
+    ALTER TABLE dbo.Instance ADD CONSTRAINT CK_Instance_Role
+        CHECK (Role IN ('Standalone', 'AGPrimary', 'AGSecondary', 'LogShippingSecondary', 'MirrorSecondary', 'FCI', 'GeoReplica'));
+END
+IF COL_LENGTH(N'dbo.PriceList', N'AzureSqlDbUnitFee') IS NULL
+    ALTER TABLE dbo.PriceList ADD
+        AzureSqlDbUnitFee           decimal(9,2) NOT NULL CONSTRAINT DF_PriceList_AzureUnit DEFAULT 300,   -- per logical server / elastic pool
+        AzureSqlDbIncludedDatabases int          NOT NULL CONSTRAINT DF_PriceList_AzureIncl DEFAULT 5,     -- databases covered by the unit fee
+        AzureSqlDbExtraDatabaseFee  decimal(9,2) NOT NULL CONSTRAINT DF_PriceList_AzureExtra DEFAULT 40;   -- each database beyond that
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.check_constraints WHERE name = N'CK_Instance_AzureDbCount')
+    ALTER TABLE dbo.Instance ADD CONSTRAINT CK_Instance_AzureDbCount
+        CHECK (Platform NOT IN ('AzureSqlDatabaseServer', 'AzureSqlDatabaseElasticPool') OR Role = 'GeoReplica' OR DatabaseCount >= 1);
+GO
 
 IF OBJECT_ID(N'dbo.OnboardingItem') IS NULL
 CREATE TABLE dbo.OnboardingItem (
@@ -483,31 +506,45 @@ BEGIN
 END
 GO
 
-/* Monthly fee for every instance covered on @AsOf, applying the multi-server tiers:
-   production standalone/primary/FCI instances ranked by coverage date - 1st & 2nd at ServerFee, then ServerFeeTiered;
-   AG / log shipping / mirroring secondaries at SecondaryReplicaFee (unless priced as a full instance);
-   an AgreedMonthlyFee overrides everything and does not count towards the tiers. */
+/* Monthly fee for everything covered on @AsOf:
+   - SQL Server instances and Azure SQL Managed Instances rank together for the multi-server tiers:
+     1st & 2nd at ServerFee, then ServerFeeTiered. An FCI is one instance whatever its node count.
+   - AG / log shipping / mirroring secondaries (and Managed Instance failover-group secondaries) at SecondaryReplicaFee,
+     unless priced as a full instance.
+   - Azure SQL Database, per logical server or elastic pool: AzureSqlDbUnitFee for up to AzureSqlDbIncludedDatabases
+     databases, plus AzureSqlDbExtraDatabaseFee for each one beyond. Failover-group secondaries / geo-replicas included.
+     These are flat rates and do not count towards the tiers.
+   - An AgreedMonthlyFee overrides everything and does not count towards the tiers. */
 CREATE OR ALTER FUNCTION dbo.fn_AgreementFees (@AgreementId int, @AsOf date)
 RETURNS TABLE
 AS
 RETURN
     WITH inst AS (
-        SELECT i.InstanceId, i.InstanceName, i.Role, i.Environment, i.AgreedMonthlyFee, i.CoveredFrom,
+        SELECT i.InstanceId, i.InstanceName, i.Role, i.Environment, i.AgreedMonthlyFee, i.CoveredFrom, i.Platform, i.DatabaseCount,
                p.ServerFee, p.ServerFeeTiered, p.TierFromServerNumber, p.SecondaryReplicaFee,
-               IsSecondary = CASE WHEN i.Role IN ('AGSecondary', 'LogShippingSecondary', 'MirrorSecondary') AND i.PricedAsFullInstance = 0 THEN 1 ELSE 0 END
+               p.AzureSqlDbUnitFee, p.AzureSqlDbIncludedDatabases, p.AzureSqlDbExtraDatabaseFee,
+               IsAzureDb   = CASE WHEN i.Platform IN ('AzureSqlDatabaseServer', 'AzureSqlDatabaseElasticPool') THEN 1 ELSE 0 END,
+               IsSecondary = CASE WHEN i.Role IN ('AGSecondary', 'LogShippingSecondary', 'MirrorSecondary', 'GeoReplica') AND i.PricedAsFullInstance = 0 THEN 1 ELSE 0 END
         FROM dbo.Instance i
         JOIN dbo.PriceList p ON p.PriceListId = dbo.fn_PriceListIdOn(@AgreementId, @AsOf)
         WHERE i.AgreementId = @AgreementId AND i.CoveredFrom <= @AsOf AND (i.CoveredTo IS NULL OR i.CoveredTo >= @AsOf)),
     ranked AS (
-        SELECT *, TierRank = ROW_NUMBER() OVER (PARTITION BY CASE WHEN AgreedMonthlyFee IS NULL AND IsSecondary = 0 THEN 1 ELSE 0 END
-                                                ORDER BY CoveredFrom, InstanceId)
+        SELECT *, TierRank = ROW_NUMBER() OVER (PARTITION BY CASE WHEN AgreedMonthlyFee IS NULL AND IsSecondary = 0 AND IsAzureDb = 0 THEN 1 ELSE 0 END
+                                                ORDER BY CoveredFrom, InstanceId),
+                  ExtraDatabases = CASE WHEN DatabaseCount > AzureSqlDbIncludedDatabases THEN DatabaseCount - AzureSqlDbIncludedDatabases ELSE 0 END
         FROM inst)
-    SELECT InstanceId, InstanceName, Role, Environment,
+    SELECT InstanceId, InstanceName, Role, Environment, Platform, DatabaseCount,
            PricingBasis = CASE WHEN AgreedMonthlyFee IS NOT NULL THEN 'Agreed fee'
-                               WHEN IsSecondary = 1 THEN 'Secondary replica'
-                               WHEN TierRank < TierFromServerNumber THEN 'Server ' + CONVERT(varchar(5), TierRank)
-                               ELSE 'Server ' + CONVERT(varchar(5), TierRank) + ', multi-server rate' END,
+                               WHEN IsAzureDb = 1 AND IsSecondary = 1 THEN 'Azure SQL Database geo-replica, included'
+                               WHEN IsAzureDb = 1 THEN 'Azure SQL Database ' + CASE WHEN Platform = 'AzureSqlDatabaseElasticPool' THEN 'elastic pool' ELSE 'logical server' END
+                                                       + ', ' + CONVERT(varchar(10), ISNULL(DatabaseCount, 0)) + ' database' + CASE WHEN DatabaseCount = 1 THEN '' ELSE 's' END
+                                                       + CASE WHEN ExtraDatabases > 0 THEN ' (' + CONVERT(varchar(10), ExtraDatabases) + ' beyond the ' + CONVERT(varchar(10), AzureSqlDbIncludedDatabases) + ' included)' ELSE '' END
+                               WHEN IsSecondary = 1 THEN 'Secondary replica' + CASE WHEN Platform = 'AzureSqlManagedInstance' THEN ', Azure SQL Managed Instance' ELSE '' END
+                               WHEN TierRank < TierFromServerNumber THEN 'Server ' + CONVERT(varchar(5), TierRank) + CASE WHEN Platform = 'AzureSqlManagedInstance' THEN ', Azure SQL Managed Instance' ELSE '' END
+                               ELSE 'Server ' + CONVERT(varchar(5), TierRank) + ', multi-server rate' + CASE WHEN Platform = 'AzureSqlManagedInstance' THEN ', Azure SQL Managed Instance' ELSE '' END END,
            MonthlyFee = CAST(CASE WHEN AgreedMonthlyFee IS NOT NULL THEN AgreedMonthlyFee
+                                  WHEN IsAzureDb = 1 AND IsSecondary = 1 THEN 0
+                                  WHEN IsAzureDb = 1 THEN AzureSqlDbUnitFee + ExtraDatabases * AzureSqlDbExtraDatabaseFee
                                   WHEN IsSecondary = 1 THEN SecondaryReplicaFee
                                   WHEN TierRank < TierFromServerNumber THEN ServerFee
                                   ELSE ServerFeeTiered END AS decimal(9,2))
@@ -609,7 +646,9 @@ GO
 CREATE OR ALTER PROCEDURE dbo.usp_Instance_Add
     @Client               nvarchar(200),            -- agreement ref or client name
     @InstanceName         nvarchar(128),
-    @Role                 varchar(30)   = 'Standalone', -- Standalone | AGPrimary | AGSecondary | LogShippingSecondary | MirrorSecondary | FCI
+    @Role                 varchar(30)   = 'Standalone', -- Standalone | AGPrimary | AGSecondary | LogShippingSecondary | MirrorSecondary | FCI | GeoReplica
+    @Platform             varchar(40)   = 'SqlServer',  -- SqlServer | AzureSqlManagedInstance | AzureSqlDatabaseServer | AzureSqlDatabaseElasticPool
+    @DatabaseCount        int           = NULL,         -- Azure SQL Database logical server / elastic pool: databases in it
     @Environment          varchar(20)   = 'Production',
     @SqlVersion           varchar(20)   = NULL,     -- e.g. '2019'
     @Edition              nvarchar(100) = NULL,
@@ -619,27 +658,49 @@ CREATE OR ALTER PROCEDURE dbo.usp_Instance_Add
     @FciNodes             nvarchar(400) = NULL,
     @PricedAsFullInstance bit           = 0,
     @AgreedMonthlyFee     decimal(9,2)  = NULL,
-    @CoveredFrom          date          = NULL      -- default: agreement start date, or today if already started
+    @CoveredFrom          date          = NULL      -- default: agreement start until its first invoice (onboarding), then today
 AS
 BEGIN
-    SET NOCOUNT ON;
+    SET NOCOUNT, XACT_ABORT ON;
     DECLARE @AgreementId int = dbo.fn_AgreementId(@Client);
     IF @AgreementId IS NULL BEGIN RAISERROR(N'Agreement or client "%s" not found.', 16, 1, @Client); RETURN; END
     IF EXISTS (SELECT 1 FROM dbo.Instance WHERE AgreementId = @AgreementId AND InstanceName = @InstanceName AND CoveredTo IS NULL)
     BEGIN RAISERROR(N'Instance "%s" is already covered on this agreement.', 16, 1, @InstanceName); RETURN; END
 
+    IF @Platform NOT IN ('SqlServer', 'AzureSqlManagedInstance', 'AzureSqlDatabaseServer', 'AzureSqlDatabaseElasticPool')
+    BEGIN RAISERROR(N'@Platform must be SqlServer, AzureSqlManagedInstance, AzureSqlDatabaseServer or AzureSqlDatabaseElasticPool.', 16, 1); RETURN; END
+    IF @Role = 'GeoReplica' AND @Platform = 'SqlServer'
+    BEGIN RAISERROR(N'GeoReplica is for Azure SQL failover-group secondaries and geo-replicas. Use AGSecondary, LogShippingSecondary or MirrorSecondary for SQL Server.', 16, 1); RETURN; END
+    IF @Platform IN ('AzureSqlDatabaseServer', 'AzureSqlDatabaseElasticPool') AND @Role <> 'GeoReplica' AND ISNULL(@DatabaseCount, 0) < 1
+    BEGIN RAISERROR(N'Azure SQL Database is billed per logical server or elastic pool: give @DatabaseCount (the number of databases in it).', 16, 1); RETURN; END
+    IF @Platform IN ('AzureSqlDatabaseServer', 'AzureSqlDatabaseElasticPool') AND @Role NOT IN ('Standalone', 'GeoReplica')
+    BEGIN RAISERROR(N'For Azure SQL Database use @Role = Standalone (the server or pool) or GeoReplica (a failover-group secondary).', 16, 1); RETURN; END
+    IF @Environment = 'NonProduction' AND @AgreedMonthlyFee IS NULL
+    BEGIN RAISERROR(N'Non-production instances are included at an agreed fee: give @AgreedMonthlyFee.', 16, 1); RETURN; END
+
     DECLARE @Start date = (SELECT StartDate FROM dbo.Agreement WHERE AgreementId = @AgreementId);
     DECLARE @Today date = CAST(dbo.fn_UkNow() AS date);
-    SET @CoveredFrom = ISNULL(@CoveredFrom, CASE WHEN @Start > @Today THEN @Start ELSE @Today END);
+    -- servers named while onboarding (before the first fee invoice) are covered from the start date;
+    -- later additions from today, so they are charged from the next cycle start (no pro-rata)
+    SET @CoveredFrom = ISNULL(@CoveredFrom,
+        CASE WHEN @Start > @Today THEN @Start
+             WHEN NOT EXISTS (SELECT 1 FROM dbo.BillingCycle WHERE AgreementId = @AgreementId AND FeeInvoiceId IS NOT NULL) THEN @Start
+             ELSE @Today END);
 
     DECLARE @PrimaryId int = (SELECT TOP (1) InstanceId FROM dbo.Instance WHERE AgreementId = @AgreementId AND InstanceName = @PrimaryInstanceName AND CoveredTo IS NULL);
     IF @PrimaryInstanceName IS NOT NULL AND @PrimaryId IS NULL
         PRINT N'Note: primary instance "' + @PrimaryInstanceName + N'" not found on this agreement; add it first to link the secondary.';
 
-    INSERT dbo.Instance (AgreementId, InstanceName, Environment, Role, PricedAsFullInstance, AgreedMonthlyFee, AvailabilityGroup, PrimaryInstanceId,
+    INSERT dbo.Instance (AgreementId, InstanceName, Environment, Role, Platform, DatabaseCount, PricedAsFullInstance, AgreedMonthlyFee, AvailabilityGroup, PrimaryInstanceId,
                          FciNodes, SqlVersion, Edition, OsVersion, CoveredFrom)
-    VALUES (@AgreementId, @InstanceName, @Environment, @Role, @PricedAsFullInstance, @AgreedMonthlyFee, @AvailabilityGroup, @PrimaryId,
+    VALUES (@AgreementId, @InstanceName, @Environment, @Role, @Platform, @DatabaseCount, @PricedAsFullInstance, @AgreedMonthlyFee, @AvailabilityGroup, @PrimaryId,
             @FciNodes, @SqlVersion, @Edition, @OsVersion, @CoveredFrom);
+    IF @Platform = 'AzureSqlManagedInstance'
+        PRINT N'Azure SQL Managed Instance: priced as a standard production instance and counts towards the multi-server tiers.';
+    IF @Platform IN ('AzureSqlDatabaseServer', 'AzureSqlDatabaseElasticPool') AND @Role = 'GeoReplica'
+        PRINT N'Azure SQL Database geo-replica / failover-group secondary: included at no charge.';
+    ELSE IF @Platform IN ('AzureSqlDatabaseServer', 'AzureSqlDatabaseElasticPool')
+        PRINT N'Azure SQL Database: flat rate per logical server or elastic pool; does not count towards the multi-server tiers. Update @DatabaseCount with usp_Instance_Update when databases are added or removed.';
 
     DECLARE @Ext date = (SELECT ExtendedEnd FROM dbo.ProductLifecycle WHERE VersionKey = @SqlVersion);
     IF @Ext < @Today
@@ -651,7 +712,7 @@ BEGIN
         PRINT N'Non-production instance included at the agreed fee.';
 
     PRINT N'Fee schedule from ' + CONVERT(nvarchar(11), @CoveredFrom, 106) + N' (applies from the next billing cycle start - no pro-rata):';
-    SELECT InstanceName, Role, Environment, PricingBasis, MonthlyFee FROM dbo.fn_AgreementFees(@AgreementId, @CoveredFrom) ORDER BY MonthlyFee DESC, InstanceName;
+    SELECT InstanceName, Platform, Role, Environment, PricingBasis, MonthlyFee FROM dbo.fn_AgreementFees(@AgreementId, @CoveredFrom) ORDER BY MonthlyFee DESC, InstanceName;
     SELECT TotalMonthlyFee = SUM(MonthlyFee) FROM dbo.fn_AgreementFees(@AgreementId, @CoveredFrom);
 END
 GO
@@ -678,14 +739,16 @@ CREATE OR ALTER PROCEDURE dbo.usp_Instance_Update
     @Edition                 nvarchar(100) = NULL,
     @OsVersion               nvarchar(100) = NULL,
     @MonitoringInstalledDate date          = NULL,
-    @Notes                   nvarchar(max) = NULL
+    @Notes                   nvarchar(max) = NULL,
+    @DatabaseCount           int           = NULL     -- Azure SQL Database: databases now in the server / pool
 AS
 BEGIN
     SET NOCOUNT ON;
     DECLARE @AgreementId int = dbo.fn_AgreementId(@Client);
     UPDATE dbo.Instance
     SET SqlVersion = ISNULL(@SqlVersion, SqlVersion), Edition = ISNULL(@Edition, Edition), OsVersion = ISNULL(@OsVersion, OsVersion),
-        MonitoringInstalledDate = ISNULL(@MonitoringInstalledDate, MonitoringInstalledDate), Notes = ISNULL(@Notes, Notes)
+        MonitoringInstalledDate = ISNULL(@MonitoringInstalledDate, MonitoringInstalledDate), Notes = ISNULL(@Notes, Notes),
+        DatabaseCount = ISNULL(@DatabaseCount, DatabaseCount)
     WHERE AgreementId = @AgreementId AND InstanceName = @InstanceName AND CoveredTo IS NULL;
     IF @@ROWCOUNT = 0 BEGIN RAISERROR(N'Covered instance "%s" not found.', 16, 1, @InstanceName); RETURN; END
 
@@ -1268,6 +1331,18 @@ BEGIN
         END
         CLOSE prev; DEALLOCATE prev;
 
+        IF NOT EXISTS (SELECT 1 FROM dbo.InvoiceLine WHERE InvoiceId = @InvoiceId)
+        BEGIN
+            -- nothing covered at the cycle start and nothing owed: no invoice (the cycle is looked at again next run)
+            DELETE dbo.Invoice WHERE InvoiceId = @InvoiceId;
+            COMMIT;
+            DECLARE @NoFeeMsg nvarchar(400) = N'No invoice for ' + (SELECT AgreementRef FROM dbo.Agreement WHERE AgreementId = @AgreementId)
+                + N' cycle ' + CONVERT(nvarchar(10), @CycleNo) + N' (' + CONVERT(nvarchar(11), @cs, 106)
+                + N'): no instances were covered at the cycle start. Check the instances'' Covered from dates.';
+            IF @cs >= DATEADD(day, -35, @AsOfDate) PRINT @NoFeeMsg;   -- only nag about recent cycles
+            FETCH NEXT FROM cyc INTO @CycleId, @AgreementId, @CycleNo, @cs, @ce;
+            CONTINUE;
+        END
         UPDATE dbo.BillingCycle SET FeeInvoiceId = @InvoiceId WHERE BillingCycleId = @CycleId;
         EXEC dbo.usp_Invoice_Recalculate @InvoiceId = @InvoiceId;
         COMMIT;
