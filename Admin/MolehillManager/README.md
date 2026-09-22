@@ -101,7 +101,7 @@ Running from source (`dotnet run`) needs the .NET 8 SDK and keeps its config nex
 - It has tabs for Instances, Onboarding, Contacts, Tickets and Weekly reports.
 - F2 adds to whichever tab is showing.
 - Enter on a row gives the actions for that row.
-- **Contacts:** removed contacts are listed too, with their status and dates.
+- **Contacts:** current contacts only. Tick **Show removed contacts** to see removed ones, with their dates. A note says how many are hidden.
   - Enter on a contact offers **Edit details**, **Remove** or **Add back**, plus **History**.
   - Remove is a soft delete: it ends the contact's current period, and the record, history and tickets are kept.
   - Adding a removed person again brings them back as the same contact, with a new start date.

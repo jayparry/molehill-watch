@@ -16,6 +16,12 @@ public sealed class AgreementWindow
     private TabView _tabs = null!;
     private TabView.Tab _instTab = null!, _onbTab = null!, _contactTab = null!, _ticketTab = null!, _weeklyTab = null!;
     private TableView _instances = null!, _onboarding = null!, _contacts = null!, _tickets = null!, _weekly = null!;
+    private CheckBox _showRemoved = null!;
+    private Label _removedNote = null!;
+
+    /// <summary>The contacts grid and its toggle (for the self-test).</summary>
+    internal TableView ContactsTable => _contacts;
+    internal string RemovedNote => _removedNote.Text.ToString() ?? "";
 
     public AgreementWindow(AdminDb db, string agreementRef)
     {
@@ -54,7 +60,15 @@ public sealed class AgreementWindow
 
         _instTab = new TabView.Tab("Instances", _instances);
         _onbTab = new TabView.Tab("Onboarding", _onboarding);
-        _contactTab = new TabView.Tab("Contacts", _contacts);
+        // removed contacts are hidden unless asked for
+        var contactView = new View { Width = Dim.Fill(), Height = Dim.Fill() };
+        _showRemoved = new CheckBox("Show removed contacts") { X = 1, Y = 0 };
+        _showRemoved.Toggled += _ => RefreshContacts();
+        _removedNote = new Label("") { X = Pos.Right(_showRemoved) + 3, Y = 0, Width = Dim.Fill(), ColorScheme = Colors.Menu };
+        _contacts.Y = 1;
+        _contacts.Height = Dim.Fill();
+        contactView.Add(_showRemoved, _removedNote, _contacts);
+        _contactTab = new TabView.Tab("Contacts", contactView);
         _ticketTab = new TabView.Tab("Tickets", _tickets);
         _weeklyTab = new TabView.Tab("Weekly reports", _weekly);
         _tabs.AddTab(_instTab, true);
@@ -93,9 +107,37 @@ public sealed class AgreementWindow
             _summary.Text = Summary(_db, _ref, includeInstances: false);
             Grid.Bind(_instances, Queries.Instances(_db, _ref));
             Grid.Bind(_onboarding, Queries.Onboarding(_db, _ref));
-            Grid.Bind(_contacts, Queries.Contacts(_db, _ref, includeRemoved: true));
+            RefreshContacts();
             Grid.Bind(_tickets, Queries.Tickets(_db, openOnly: false, _ref));
             Grid.Bind(_weekly, Queries.WeeklyReports(_db, _ref));
+        });
+    }
+
+    /// <summary>Shows or hides removed contacts (the tick box does the same).</summary>
+    public void SetShowRemoved(bool show)
+    {
+        _showRemoved.Checked = show;
+        RefreshContacts();
+    }
+
+    private void RefreshContacts()
+    {
+        Ui.Try("Contacts", () =>
+        {
+            var all = Queries.Contacts(_db, _ref, includeRemoved: true);
+            var removed = all.Rows.Cast<DataRow>().Count(r => (string)r["Status"] == "Removed");
+            if (_showRemoved.Checked)
+            {
+                Grid.Bind(_contacts, all);
+                _removedNote.Text = removed == 0 ? "" : $"{removed} removed - Enter on one to add them back";
+            }
+            else
+            {
+                var view = all.DefaultView;
+                view.RowFilter = "Status = 'Current'";
+                Grid.Bind(_contacts, view.ToTable());
+                _removedNote.Text = removed == 0 ? "" : $"{removed} removed contact{(removed == 1 ? "" : "s")} hidden - tick to see or add back";
+            }
         });
     }
 

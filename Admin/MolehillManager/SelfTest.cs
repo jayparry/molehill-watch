@@ -655,6 +655,16 @@ public static class SelfTest
         {
             Step("main window over the test data", () => { new MainWindow(db).CreateTop(); return 0; });
             Step("agreement window over the test data", () => new AgreementWindow(db, reference).Build());
+            Submit(AdminForms.RemoveContact(db, SamId()), ("Reason", "Toggle test"));
+            var win = new AgreementWindow(db, reference);
+            win.Build();
+            bool Listed(string who) => win.ContactsTable.Table.Rows.Cast<DataRow>().Any(r => (string)r["Name"] == who);
+            Check("contacts tab hides removed contacts by default", !Listed("Sam Second") && Listed("Pat Tester"), win.RemovedNote);
+            Check("and says how many are hidden", win.RemovedNote.StartsWith("1 removed contact hidden"), win.RemovedNote);
+            win.SetShowRemoved(true);
+            Check("ticking 'Show removed contacts' lists them", Listed("Sam Second") && Listed("Pat Tester"), win.RemovedNote);
+            win.SetShowRemoved(false);
+            Check("unticking hides them again", !Listed("Sam Second"));
         }
         finally
         {

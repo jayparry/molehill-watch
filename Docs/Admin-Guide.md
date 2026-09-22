@@ -106,7 +106,7 @@ Contacts are never deleted. Removing someone ends their current period as a cont
 * Removing the only contact who raises tickets, or the only one who receives invoices, prints a warning. The dashboard flags any agreement without a current contact who raises tickets, or without anyone who receives invoices.
 * A ticket logged for a removed contact is still linked to them, with a warning to check the request is authorised. When no contact is given, the default is a current named contact.
 
-In **Molehill Manager**: open the agreement and go to the **Contacts** tab. Removed contacts are listed with their dates. Enter on a contact offers Edit, Remove or Add back, plus History.
+In **Molehill Manager**: open the agreement and go to the **Contacts** tab. Removed contacts are hidden unless you tick **Show removed contacts**. Enter on a contact offers Edit, Remove or Add back, plus History.
 
 ---
 
