@@ -490,6 +490,8 @@ public static class SelfTest
         AdminForms.GiveNotice(db, reference), AdminForms.PauseSupport(db, reference, true), AdminForms.PauseSupport(db, reference, false),
         AdminForms.PriceChange(db), AdminForms.AddQuote(db, reference), AdminForms.OpenTicket(db, reference),
         AdminForms.RespondTicket(db, ticket), AdminForms.EstimateTicket(db, ticket), AdminForms.LogTime(db, ticket), AdminForms.SetTicketRate(db, ticket),
+        AdminForms.EditTimeEntry(db, db.Scalar("SELECT TOP (1) TimeEntryId FROM dbo.TimeEntry ORDER BY TimeEntryId;") is int te ? te : 0),
+        AdminForms.DeleteTimeEntry(db, db.Scalar("SELECT TOP (1) TimeEntryId FROM dbo.TimeEntry ORDER BY TimeEntryId;") is int te2 ? te2 : 0),
         AdminForms.CloseTicket(db, ticket),
         AdminForms.RunBilling(db), AdminForms.AdjustInvoice(db, invoice), AdminForms.SetInvoiceStatus(db, invoice, "Paid"),
         AdminForms.BusinessDetails(db), AdminForms.SellPrepaid(db, reference)
@@ -628,6 +630,28 @@ public static class SelfTest
         Step("defaults to out of hours", () => Queries.Ticket(db, planned?.First?.Rows[0]["TicketRef"] as string ?? "?")!,
             r => (string)r["RateType"] == "OutOfHours" ? null : (string)r["RateType"]);
         Step("close the planned ticket unworked", () => Submit(AdminForms.CloseTicket(db, planned?.First?.Rows[0]["TicketRef"] as string ?? "?"), ("Resolution", "Cancelled"), ("Status", "Closed")));
+
+        // time dated outside the agreement's billing period: never billed, and fixable
+        var strayDate = start.AddDays(-30).Date.AddHours(10);
+        var stray = Step("ticket with work dated before the agreement", () => Submit(AdminForms.OpenTicket(db, reference), ("Title", "Wrong date"),
+            ("RaisedAt", strayDate.ToString("yyyy-MM-dd HH:mm"))), r => r.First is { Rows.Count: 1 } ? null : "no ticket");
+        var strayRef = stray?.First?.Rows[0]["TicketRef"] as string ?? "MW-?";
+        Step("log 2 hours on the wrong date", () => Submit(AdminForms.LogTime(db, strayRef), ("Minutes", "120"), ("Description", "Dated wrongly"),
+            ("WorkStart", strayDate.ToString("yyyy-MM-dd HH:mm"))),
+            r => r.Messages.Any(m => m.Contains("NEVER be invoiced")) ? null : "no warning: " + string.Join(" | ", r.Messages));
+        Step("the entry says it will never be invoiced", () => Queries.TimeEntries(db, strayRef),
+            t => ((string)t.Rows[0]["Invoiced"]).StartsWith("NEVER") ? null : (string)t.Rows[0]["Invoiced"]);
+        Step("the dashboard flags it", () => db.Proc("dbo.usp_Dashboard", ("@AlertsOnly", true)),
+            r => r.First!.Rows.Cast<DataRow>().Any(a2 => ((string)a2["Item"]).StartsWith("Time logged outside the billing period: " + strayRef)) ? null : "not flagged");
+        var strayId = (int)Queries.TimeEntries(db, strayRef).Rows[0]["Id"];
+        Step("correct the date", () => Submit(AdminForms.EditTimeEntry(db, strayId), ("WorkStart", raised.AddDays(1).ToString("yyyy-MM-dd HH:mm"))));
+        Step("now waiting for the next billing run", () => Queries.TimeEntries(db, strayRef),
+            t => (string)t.Rows[0]["Invoiced"] == "at the next billing run" ? null : (string)t.Rows[0]["Invoiced"]);
+        Step("summary shows time not yet billed", () => AgreementWindow.Summary(db, reference, false),
+            s2 => s2.Contains("logged but not yet billed") ? null : "not shown");
+        Step("remove the entry again", () => Submit(AdminForms.DeleteTimeEntry(db, strayId)));
+        Step("it is gone", () => Queries.TimeEntries(db, strayRef), t => t.Rows.Count == 0 ? null : $"{t.Rows.Count} left");
+        Step("close that ticket", () => Submit(AdminForms.CloseTicket(db, strayRef), ("Resolution", "Logged in error"), ("Status", "Closed")));
         Step("close", () => Submit(AdminForms.CloseTicket(db, ticket), ("Resolution", "Added two indexes")));
         Step("ticket detail", () => TicketActions.Describe(db, ticket), s => s.Contains("Added two indexes") && s.Contains("Index review") ? null : "detail incomplete");
         Step("project quote", () => Submit(AdminForms.AddQuote(db, reference), ("Title", "Upgrade to 2022"), ("EstimatedHours", "12"), ("TicketRef", ticket)));

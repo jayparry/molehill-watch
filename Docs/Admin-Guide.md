@@ -130,6 +130,14 @@ In **Molehill Manager**: open the agreement and go to the **Contacts** tab. Remo
   * `EXEC dbo.usp_Ticket_SetRate @TicketRef = 'MW-00012', @RateType = 'OutOfHours';` changes a ticket's rate and re-rates its time not yet invoiced.
 * **Planned out-of-hours work** (patching, releases, and for Azure: service tier changes, migrations and failover tests): open the ticket with `@WorkType = 'PlannedOutOfHours'`.
 * **Non-billable time** (e.g. your own mistake): `@IsBillable = 0`.
+* **When time actually costs anything.** Logging time records it; nothing is charged, and no included or pre-paid hours are used, until the **arrears billing run** for that cycle (the daily task, F6 in Molehill Manager, or `usp_Billing_Run`). Until then the agreement shows it as "logged but not yet billed".
+* **Dates matter.** Only time dated inside the agreement's billing period is ever invoiced. Time dated before the start date (or after the agreement ends) is never billed and never touches included or pre-paid hours. Logging it prints a warning, and the dashboard lists it until it's fixed.
+* **Correcting time** (only while it hasn't been invoiced):
+  ```sql
+  EXEC dbo.usp_Time_Update @TimeEntryId = 42, @WorkStart = '2026-09-18 10:00';   -- also @Minutes, @Description, @RateType, @IsBillable
+  EXEC dbo.usp_Time_Delete @TimeEntryId = 42;
+  ```
+  In Molehill Manager: ticket actions > **Correct or remove logged time**. Once time is invoiced, void that invoice first.
 * **Project work** (health checks, upgrades, migrations): open with `@WorkType = 'Project'`, then `EXEC dbo.usp_Quote_Add ...`. Project time is never billed through the support invoices.
 
 ---
@@ -194,7 +202,7 @@ Pre-paid hours only ever cover business-hours work. Out-of-hours work is never t
 | Extend or remove the expiry | `EXEC dbo.usp_Prepaid_Update @PackageRef = 'PH-0001', @ExpiresOn = '2027-12-31';` (or `@NoExpiry = 1`) |
 | Cancel an unused package (voids its invoice if it hasn't been paid) | `EXEC dbo.usp_Prepaid_Cancel @PackageRef = 'PH-0001', @Reason = N'...';` |
 
-How the hours are used at each arrears billing:
+Nothing is deducted when time is logged. The hours come off at the arrears billing run for that cycle, and then in this order:
 
 1. The month's included hours are used first. They're free and don't roll over.
 2. Chargeable business-hours time, with the 1-hour minimum per ticket applied, comes out of pre-paid hours. The package that expires soonest is used first, and a package is only used for work done between its start and expiry dates.

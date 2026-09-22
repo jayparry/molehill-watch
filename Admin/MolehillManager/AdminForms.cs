@@ -560,6 +560,43 @@ public static class AdminForms
         };
     }
 
+    /// <summary>Correct time that has not been invoiced (wrong date, minutes, rate or description).</summary>
+    public static FormSpec EditTimeEntry(AdminDb db, int timeEntryId)
+    {
+        var row = Queries.TimeEntry(db, timeEntryId);
+        string Cur(string col) => row == null || row[col] is DBNull ? "" : row[col].ToString() ?? "";
+        var started = row?["WorkStart"] is DateTime d ? d.ToString("yyyy-MM-dd HH:mm") : "";
+        return new FormSpec
+        {
+            Title = $"Correct time - {Cur("TicketRef")}",
+            Intro = "Time is only billed when it falls inside the agreement's billing period, so a wrong date means it is never invoiced " +
+                    "and never uses included or pre-paid hours.",
+            Fields =
+            {
+                Field.DateTime("WorkStart", "Started at", def: started),
+                Field.Int("Minutes", "Minutes", def: Cur("Minutes")),
+                Field.Text("Description", "Work done", def: Cur("Description")),
+                Field.Choice("RateType", "Rate", new[] { "Business hours", "Out of hours" }, def: RateLabel(Cur("RateType"))),
+                Field.Bool("IsBillable", "Billable", def: row?["IsBillable"] is true)
+            },
+            Submit = v => db.Proc("dbo.usp_Time_Update", ("@TimeEntryId", timeEntryId), ("@WorkStart", v.DateTime("WorkStart")),
+                ("@Minutes", v.Int("Minutes")), ("@Description", v.Str("Description")), ("@RateType", RateValue(v["RateType"])),
+                ("@IsBillable", v.Bool("IsBillable")))
+        };
+    }
+
+    public static FormSpec DeleteTimeEntry(AdminDb db, int timeEntryId)
+    {
+        var row = Queries.TimeEntry(db, timeEntryId);
+        return new FormSpec
+        {
+            Title = $"Remove time - {(row == null ? "" : row["TicketRef"])}",
+            Intro = $"Remove {(row == null ? "this" : row["Minutes"])} minutes logged on {(row?["WorkStart"] is DateTime d ? d.ToString("dd MMM yyyy HH:mm") : "")}"
+                    + " from this ticket? Only time that has not been invoiced can be removed. Save to confirm.",
+            Submit = _ => db.Proc("dbo.usp_Time_Delete", ("@TimeEntryId", timeEntryId))
+        };
+    }
+
     /// <summary>Change the rate a ticket's time is charged at (business hours, out of hours or by time of work).</summary>
     public static FormSpec SetTicketRate(AdminDb db, string ticketRef)
     {

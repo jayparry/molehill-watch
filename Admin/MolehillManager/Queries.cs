@@ -195,11 +195,24 @@ public static class Queries
     }
 
     public static DataTable TimeEntries(AdminDb db, string ticketRef) => db.Query("""
-        SELECT e.WorkStart AS Started, e.Minutes, e.RateType AS Rate, CASE WHEN e.IsBillable = 1 THEN 'Yes' ELSE 'No' END AS Billable,
-               inv.InvoiceNo AS Invoiced, e.Description
+        SELECT e.TimeEntryId AS Id, e.WorkStart AS Started, e.Minutes, e.RateType AS Rate, CASE WHEN e.IsBillable = 1 THEN 'Yes' ELSE 'No' END AS Billable,
+               CASE WHEN inv.InvoiceNo IS NOT NULL THEN inv.InvoiceNo
+                    WHEN dbo.fn_IsBillablePeriod(t.AgreementId, e.WorkStart) = 0 THEN 'NEVER - outside the billing period'
+                    WHEN e.IsBillable = 0 THEN 'not billable'
+                    ELSE 'at the next billing run' END AS Invoiced,
+               e.Description
         FROM dbo.TimeEntry e JOIN dbo.Ticket t ON t.TicketId = e.TicketId LEFT JOIN dbo.Invoice inv ON inv.InvoiceId = e.InvoiceId
         WHERE t.TicketRef = @Ref ORDER BY e.WorkStart;
         """, ("@Ref", ticketRef));
+
+    public static DataRow? TimeEntry(AdminDb db, int timeEntryId)
+    {
+        var t = db.Query("""
+            SELECT e.*, t.TicketRef, inv.InvoiceNo FROM dbo.TimeEntry e JOIN dbo.Ticket t ON t.TicketId = e.TicketId
+            LEFT JOIN dbo.Invoice inv ON inv.InvoiceId = e.InvoiceId WHERE e.TimeEntryId = @Id;
+            """, ("@Id", timeEntryId));
+        return t.Rows.Count == 0 ? null : t.Rows[0];
+    }
 
     public static DataTable Invoices(AdminDb db, string filter) => db.Query("""
         DECLARE @Today date = CAST(dbo.fn_UkNow() AS date);

@@ -79,11 +79,28 @@ public static class TicketActions
         ("Record first response", () => Ui.Form(AdminForms.RespondTicket(db, ticketRef), refresh)),
         ("Log time", () => Ui.Try("Log time", () => Ui.Form(AdminForms.LogTime(db, ticketRef), refresh))),
         ("Change rate (business hours / out of hours)", () => Ui.Try("Rate", () => Ui.Form(AdminForms.SetTicketRate(db, ticketRef), refresh))),
+        ("Correct or remove logged time", () => Ui.Try("Time", () => EditTime(db, ticketRef, refresh))),
         ("Estimate / client approval", () => Ui.Form(AdminForms.EstimateTicket(db, ticketRef), refresh)),
         ("Resolve or close", () => Ui.Form(AdminForms.CloseTicket(db, ticketRef), refresh))
     };
 
     public static void Show(AdminDb db, string ticketRef, Action refresh) => Picker.Actions($"Ticket {ticketRef}", List(db, ticketRef, refresh).ToArray());
+
+    /// <summary>Pick one of the ticket's time entries, then correct or remove it.</summary>
+    private static void EditTime(AdminDb db, string ticketRef, Action refresh)
+    {
+        var entries = Queries.TimeEntries(db, ticketRef);
+        if (entries.Rows.Count == 0) { MessageBox.Query("Time", "No time has been logged on this ticket yet.", "Ok"); return; }
+        var labels = entries.Rows.Cast<DataRow>()
+            .Select(r => $"{Output.Format(r["Started"])}  {r["Minutes"]} min  {AdminForms.RateLabel(r["Rate"] as string)}  -  {Output.Format(r["Invoiced"])}")
+            .ToList();
+        var chosen = Picker.Choose($"{ticketRef} - which time entry?", labels);
+        if (chosen == null) return;
+        var id = (int)entries.Rows[labels.IndexOf(chosen)]["Id"];
+        Picker.Actions(chosen,
+            ("Correct it (date, minutes, rate, description)", () => Ui.Form(AdminForms.EditTimeEntry(db, id), refresh)),
+            ("Remove it", () => Ui.Form(AdminForms.DeleteTimeEntry(db, id), refresh)));
+    }
 
     public static string Describe(AdminDb db, string ticketRef)
     {

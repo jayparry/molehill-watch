@@ -73,7 +73,12 @@ public sealed class AgreementWindow
         _ticketTab = new TabView.Tab("Tickets", _tickets);
         _weeklyTab = new TabView.Tab("Weekly reports", _weekly);
         _prepaid = Table(RowActions);
-        _prepaidTab = new TabView.Tab("Pre-paid hours", _prepaid);
+        var prepaidView = new View { Width = Dim.Fill(), Height = Dim.Fill() };
+        prepaidView.Add(new Label("Hours come off a package when billing runs (F6), not when time is logged.") { X = 1, Y = 0, ColorScheme = Colors.Menu });
+        _prepaid.Y = 1;
+        _prepaid.Height = Dim.Fill();
+        prepaidView.Add(_prepaid);
+        _prepaidTab = new TabView.Tab("Pre-paid hours", prepaidView);
         _tabs.AddTab(_instTab, true);
         _tabs.AddTab(_onbTab, false);
         _tabs.AddTab(_contactTab, false);
@@ -170,7 +175,9 @@ public sealed class AgreementWindow
             sb.AppendLine($"This cycle ({Output.Format(r["CycleStart"])} - {Output.Format(r["CycleEnd"])}): " +
                           $"{Output.Format(r["BusinessHoursLogged"])} of {Output.Format(r["IncludedHours"])} included hours used, " +
                           $"{Output.Format(r["IncludedHoursRemaining"])} left; {Output.Format(r["OutOfHoursLogged"])} h out of hours"
-                          + (r.Table.Columns.Contains("PrepaidHoursLeft") && r["PrepaidHoursLeft"] is decimal left ? $"; pre-paid hours left: {Output.Format(left)}" : ""));
+                          + (r.Table.Columns.Contains("PrepaidHoursLeft") && r["PrepaidHoursLeft"] is decimal left ? $"; pre-paid hours left: {Output.Format(left)}" : "")
+                          + (r.Table.Columns.Contains("UnbilledHours") && r["UnbilledHours"] is decimal unbilled && unbilled > 0
+                             ? $"; {Output.Format(unbilled)} h logged but not yet billed" : ""));
         }
         else sb.AppendLine(usage.Messages.FirstOrDefault() ?? "");
 

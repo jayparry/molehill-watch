@@ -1,7 +1,7 @@
 /*
 ===============================================================================
  Molehill Watch - SQL Server Support Package
- Molehill Admin: contract, ticket, time and billing database     Version 1.5.0
+ Molehill Admin: contract, ticket, time and billing database     Version 1.6.0
  Molehill Data Services  -  jay@jayparry.co.uk  -  molehilldataservices.com
 -------------------------------------------------------------------------------
  Runs on YOUR OWN SQL Server (Express is fine), not on client servers.
@@ -578,6 +578,19 @@ BEGIN
         (SELECT AgreementId FROM dbo.Agreement WHERE AgreementRef = @Client),
         (SELECT TOP (1) a.AgreementId FROM dbo.Agreement a JOIN dbo.Client c ON c.ClientId = a.ClientId
          WHERE c.ClientName = @Client ORDER BY a.StartDate DESC));
+END
+GO
+
+-- Work is only ever billed if it falls inside one of the agreement's billing cycles: from the start date,
+-- and not after the agreement ends. Anything outside that is never invoiced.
+CREATE OR ALTER FUNCTION dbo.fn_IsBillablePeriod (@AgreementId int, @WorkStart datetime2(0))
+RETURNS bit
+AS
+BEGIN
+    DECLARE @Start date, @End date;
+    SELECT @Start = StartDate, @End = EndDate FROM dbo.Agreement WHERE AgreementId = @AgreementId;
+    IF @Start IS NULL RETURN 0;
+    RETURN CASE WHEN CAST(@WorkStart AS date) >= @Start AND (@End IS NULL OR CAST(@WorkStart AS date) <= @End) THEN 1 ELSE 0 END;
 END
 GO
 
@@ -1368,7 +1381,78 @@ BEGIN
         PRINT N'Logged as OUT OF HOURS (GBP ' + ISNULL(@OohRate, N'?') + N'/h). Pass @RateType = ''BusinessHours'' if that is wrong, or change the ticket''s rate (usp_Ticket_SetRate).';
     END
 
+    IF dbo.fn_IsBillablePeriod(@AgreementId, @WorkStart) = 0
+    BEGIN
+        DECLARE @AgStart date, @AgEnd date;
+        SELECT @AgStart = StartDate, @AgEnd = EndDate FROM dbo.Agreement WHERE AgreementId = @AgreementId;
+        PRINT N'WARNING: this time is dated ' + CONVERT(nvarchar(11), @WorkStart, 106) + N', outside the agreement''s billing period ('
+            + CONVERT(nvarchar(11), @AgStart, 106) + ISNULL(N' to ' + CONVERT(nvarchar(11), @AgEnd, 106), N' onwards')
+            + N'). It will NEVER be invoiced and will not use included or pre-paid hours. Correct the date with usp_Time_Update.';
+    END
+    ELSE IF CAST(@WorkStart AS date) > CAST(dbo.fn_UkNow() AS date)
+        PRINT N'Note: this time is dated in the future, so it is billed in a later cycle.';
+
     EXEC dbo.usp_Agreement_Usage @Client = NULL, @AgreementId = @AgreementId, @AsOfDate = @WorkStart;
+END
+GO
+
+-- Correct a time entry that has not been invoiced. NULL = leave as it is.
+CREATE OR ALTER PROCEDURE dbo.usp_Time_Update
+    @TimeEntryId int,
+    @WorkStart   datetime2(0)  = NULL,
+    @Minutes     int           = NULL,
+    @Description nvarchar(1000) = NULL,
+    @RateType    varchar(20)   = NULL,       -- BusinessHours | OutOfHours
+    @IsBillable  bit           = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @TicketId int, @InvoiceId int, @AgreementId int, @Ref varchar(20);
+    SELECT @TicketId = e.TicketId, @InvoiceId = e.InvoiceId, @AgreementId = t.AgreementId, @Ref = t.TicketRef
+    FROM dbo.TimeEntry e JOIN dbo.Ticket t ON t.TicketId = e.TicketId WHERE e.TimeEntryId = @TimeEntryId;
+    IF @TicketId IS NULL BEGIN RAISERROR(N'Time entry %d not found.', 16, 1, @TimeEntryId); RETURN; END
+    IF @InvoiceId IS NOT NULL
+    BEGIN
+        DECLARE @No varchar(30) = (SELECT InvoiceNo FROM dbo.Invoice WHERE InvoiceId = @InvoiceId);
+        RAISERROR(N'This time is already on invoice %s. Void that invoice first (usp_Invoice_SetStatus @Status = ''Void''), then change it.', 16, 1, @No);
+        RETURN;
+    END
+    IF @Minutes IS NOT NULL AND @Minutes <= 0 BEGIN RAISERROR(N'@Minutes must be more than 0 (use usp_Time_Delete to remove the entry).', 16, 1); RETURN; END
+    IF @RateType IS NOT NULL AND @RateType NOT IN ('BusinessHours', 'OutOfHours') BEGIN RAISERROR(N'@RateType must be BusinessHours or OutOfHours.', 16, 1); RETURN; END
+
+    UPDATE dbo.TimeEntry
+    SET WorkStart = ISNULL(@WorkStart, WorkStart), Minutes = ISNULL(@Minutes, Minutes),
+        Description = ISNULL(NULLIF(LTRIM(RTRIM(@Description)), N''), Description),
+        RateType = ISNULL(@RateType, RateType), IsBillable = ISNULL(@IsBillable, IsBillable)
+    WHERE TimeEntryId = @TimeEntryId;
+
+    DECLARE @NewStart datetime2(0) = (SELECT WorkStart FROM dbo.TimeEntry WHERE TimeEntryId = @TimeEntryId);
+    PRINT N'Updated the time on ' + @Ref + N'.';
+    IF dbo.fn_IsBillablePeriod(@AgreementId, @NewStart) = 0
+        PRINT N'WARNING: it is still dated outside the agreement''s billing period, so it will never be invoiced.';
+    SELECT e.TimeEntryId, t.TicketRef, e.WorkStart, e.Minutes, e.RateType, e.IsBillable, e.Description
+    FROM dbo.TimeEntry e JOIN dbo.Ticket t ON t.TicketId = e.TicketId WHERE e.TimeEntryId = @TimeEntryId;
+END
+GO
+
+-- Remove a time entry that has not been invoiced (logged against the wrong ticket, duplicate, and so on).
+CREATE OR ALTER PROCEDURE dbo.usp_Time_Delete
+    @TimeEntryId int
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @InvoiceId int, @Ref varchar(20), @Minutes int;
+    SELECT @InvoiceId = e.InvoiceId, @Ref = t.TicketRef, @Minutes = e.Minutes
+    FROM dbo.TimeEntry e JOIN dbo.Ticket t ON t.TicketId = e.TicketId WHERE e.TimeEntryId = @TimeEntryId;
+    IF @Ref IS NULL BEGIN RAISERROR(N'Time entry %d not found.', 16, 1, @TimeEntryId); RETURN; END
+    IF @InvoiceId IS NOT NULL
+    BEGIN
+        DECLARE @No varchar(30) = (SELECT InvoiceNo FROM dbo.Invoice WHERE InvoiceId = @InvoiceId);
+        RAISERROR(N'This time is already on invoice %s. Void that invoice first, then remove it.', 16, 1, @No);
+        RETURN;
+    END
+    DELETE dbo.TimeEntry WHERE TimeEntryId = @TimeEntryId;
+    PRINT N'Removed ' + CONVERT(nvarchar(10), @Minutes) + N' minutes from ' + @Ref + N'.';
 END
 GO
 
@@ -1520,6 +1604,10 @@ BEGIN
                                               ELSE @Included - ISNULL(SUM(CASE WHEN e.RateType = 'BusinessHours' THEN e.Minutes END), 0) / 60.0 END AS decimal(6,2)),
            OutOfHoursLogged = CAST(ISNULL(SUM(CASE WHEN e.RateType = 'OutOfHours' THEN e.Minutes END), 0) / 60.0 AS decimal(6,2)),
            PrepaidHoursLeft = (SELECT CAST(SUM(Remaining) AS decimal(9,2)) FROM dbo.fn_PrepaidPackages(@AgreementId, @AsOfDate) WHERE State IN ('Active', 'Not started')),
+           -- billable time not yet on an invoice: included and pre-paid hours are only used when billing runs
+           UnbilledHours = (SELECT CAST(ISNULL(SUM(x.Minutes), 0) / 60.0 AS decimal(9,2)) FROM dbo.TimeEntry x JOIN dbo.Ticket y ON y.TicketId = x.TicketId
+                            WHERE y.AgreementId = @AgreementId AND y.WorkType <> 'Project' AND x.IsBillable = 1 AND x.InvoiceId IS NULL
+                              AND dbo.fn_IsBillablePeriod(y.AgreementId, x.WorkStart) = 1),
            Note = N'Approximate - minimum charges are applied at invoicing. Unused included hours do not roll over.'
     FROM dbo.Ticket t
     LEFT JOIN dbo.TimeEntry e ON e.TicketId = t.TicketId AND e.IsBillable = 1 AND CAST(e.WorkStart AS date) BETWEEN @CycleStart AND @CycleEnd
@@ -2176,6 +2264,17 @@ BEGIN
     CROSS APPLY (SELECT Mins = SUM(Minutes) FROM dbo.TimeEntry e WHERE e.TicketId = t.TicketId AND e.IsBillable = 1) x
     WHERE x.Mins > @Threshold AND t.EstimateApprovedAt IS NULL AND t.Status NOT IN ('Resolved', 'Closed') AND t.WorkType = 'Support';
 
+    -- Time that can never be invoiced: dated outside the agreement's billing period
+    INSERT #A
+    SELECT 2, 'Billing', c.ClientName, N'Time logged outside the billing period: ' + t.TicketRef,
+           FORMAT(SUM(e.Minutes) / 60.0, 'N2') + N' h dated ' + CONVERT(nvarchar(11), MIN(e.WorkStart), 106)
+           + N', outside ' + a.AgreementRef + N' (' + CONVERT(nvarchar(11), a.StartDate, 106) + ISNULL(N' to ' + CONVERT(nvarchar(11), a.EndDate, 106), N' onwards')
+           + N'). It will never be invoiced and does not use included or pre-paid hours: correct the date (usp_Time_Update) or remove it.', NULL
+    FROM dbo.TimeEntry e JOIN dbo.Ticket t ON t.TicketId = e.TicketId
+    JOIN dbo.Agreement a ON a.AgreementId = t.AgreementId JOIN dbo.Client c ON c.ClientId = a.ClientId
+    WHERE e.IsBillable = 1 AND e.InvoiceId IS NULL AND t.WorkType <> 'Project' AND dbo.fn_IsBillablePeriod(t.AgreementId, e.WorkStart) = 0
+    GROUP BY c.ClientName, t.TicketRef, a.AgreementRef, a.StartDate, a.EndDate;
+
     -- Weekly reports
     IF DATEDIFF(day, @LastSunday, @Today) > @Grace
     INSERT #A
@@ -2402,6 +2501,6 @@ BEGIN
 END
 GO
 
-INSERT dbo.InstallHistory (Version) VALUES ('1.5.0');   -- bump with every schema change: Molehill Manager offers the upgrade
-PRINT N'Molehill Admin 1.5.0 installed.';
+INSERT dbo.InstallHistory (Version) VALUES ('1.6.0');   -- bump with every schema change: Molehill Manager offers the upgrade
+PRINT N'Molehill Admin 1.6.0 installed.';
 GO
