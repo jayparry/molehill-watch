@@ -614,9 +614,16 @@ public static class SelfTest
         Step("ticket detail", () => TicketActions.Describe(db, ticket), s => s.Contains("Added two indexes") && s.Contains("Index review") ? null : "detail incomplete");
         Step("project quote", () => Submit(AdminForms.AddQuote(db, reference), ("Title", "Upgrade to 2022"), ("EstimatedHours", "12"), ("TicketRef", ticket)));
 
-        // pre-paid hours, bought at the start: they pick up the chargeable out-of-hours time
+        // pre-paid hours, bought at the start; more business-hours work so some of it goes beyond the included hours
+        var more = raised.Date.AddDays(1).AddHours(10);
+        while (more.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) more = more.AddDays(1);
+        var tuning = Step("more business-hours work in the first cycle", () => Submit(AdminForms.OpenTicket(db, reference), ("Title", "Index tuning"),
+            ("RaisedAt", more.ToString("yyyy-MM-dd HH:mm"))), r => r.First is { Rows.Count: 1 } ? null : "no ticket");
+        var extraRef = tuning?.First?.Rows[0]["TicketRef"] as string ?? "MW-?";
+        Step("log 150 minutes (with the earlier 90, one hour past the included three)", () => Submit(AdminForms.LogTime(db, extraRef), ("Minutes", "150"),
+            ("Description", "Tuning"), ("WorkStart", more.ToString("yyyy-MM-dd HH:mm"))));
         Step("sell pre-paid hours", () => Submit(AdminForms.SellPrepaid(db, reference), ("Hours", "5"), ("HourlyRate", "60"), ("ValidMonths", "12"),
-            ("OutOfHoursRatio", "1"), ("PurchasedOn", D(start))),
+            ("PurchasedOn", D(start))),
             r => r.First is { Rows.Count: 1 } t && (decimal)t.Rows[0]["Price"] == 300m && t.Rows[0]["InvoiceNo"] is string ? null : "no package / invoice");
         var package = (string)Queries.Prepaid(db, reference).Rows[0]["Ref"];
         ExpectError("sell pre-paid hours: expiry and months together refused", () => Submit(AdminForms.SellPrepaid(db, reference), ("Hours", "5"), ("HourlyRate", "60"),
@@ -635,11 +642,16 @@ public static class SelfTest
             t => t.Rows.Cast<DataRow>().Count(r => (string)r["Type"] == "MonthlyFee") == 7 ? null : $"{t.Rows.Cast<DataRow>().Count(r => (string)r["Type"] == "MonthlyFee")} fee lines");
         Step("instance added after the first invoice is covered from today", () => { Submit(add(), ("InstanceName", "ST-SQL04")); return Queries.Instance(db, reference, "ST-SQL04")!; },
             r => (DateTime)r["CoveredFrom"] == DateTime.Today ? null : $"covered from {r["CoveredFrom"]}");
-        Step("the out-of-hours time came out of the pre-paid hours (1 h minimum)", () => Queries.Prepaid(db, reference),
+        Step("the hour past the included hours came out of the pre-paid hours", () => Queries.Prepaid(db, reference),
             t => t.Rows.Cast<DataRow>().Any(r => (string)r["Ref"] == package && (decimal)r["Left"] == 4m) ? null
                  : "left: " + string.Join(", ", t.Rows.Cast<DataRow>().Select(r => $"{r["Ref"]} {r["Left"]}")));
         Step("usage shows the ticket it went on", () => Queries.PrepaidUsage(db, package),
-            t => t.Rows.Count == 1 && (string)t.Rows[0]["Rate"] == "OutOfHours" && (decimal)t.Rows[0]["Pre-paid h"] == 1m ? null : $"{t.Rows.Count} rows");
+            t => t.Rows.Count == 1 && (string)t.Rows[0]["Ticket"] == extraRef && (decimal)t.Rows[0]["Hours"] == 1m ? null : $"{t.Rows.Count} rows");
+        Step("the out-of-hours time was billed at the out-of-hours rate, not taken from the package", () => db.Query("""
+                SELECT l.Quantity, l.UnitPrice FROM dbo.InvoiceLine l JOIN dbo.Invoice i ON i.InvoiceId = l.InvoiceId
+                JOIN dbo.Agreement a ON a.AgreementId = i.AgreementId WHERE a.AgreementRef = @r AND l.LineType = 'OutOfHours';
+                """, ("@r", reference)),
+            t => t.Rows.Count == 1 && (decimal)t.Rows[0]["Quantity"] == 1m && (decimal)t.Rows[0]["UnitPrice"] == 115m ? null : $"{t.Rows.Count} OOH lines");
         Step("extend the expiry", () => Submit(AdminForms.UpdatePrepaid(db, package), ("ExpiresOn", D(DateTime.Today.AddYears(2)))));
         ExpectError("cancel a package in use refused", () => Submit(AdminForms.CancelPrepaid(db, package)), "already been used");
         Step("summary shows pre-paid hours left", () => AgreementWindow.Summary(db, reference, false), s => s.Contains("pre-paid hours left: 4") ? null : "not shown");

@@ -183,15 +183,15 @@ public static class AdminForms
         return new FormSpec
         {
             Title = $"Sell pre-paid hours - {agreementRef}",
-            Intro = "Hours bought in advance. Each month's included hours are used first; after that, chargeable support comes out of " +
-                    "these hours (soonest-expiring package first) before anything is billed at the standard rates.",
+            Intro = "Business-hours support bought in advance at a reduced rate. Each month's included hours are used first; after that, " +
+                    "chargeable business-hours time comes out of these hours (soonest-expiring package first). Out-of-hours work is never " +
+                    "taken from them: it is always billed at the out-of-hours rate.",
             Fields =
             {
                 Field.Decimal("Hours", "Hours", required: true),
                 Field.Decimal("HourlyRate", "Rate per hour (£)", required: true, help: rateHelp),
                 Field.Int("ValidMonths", "Use within (months)", help: "blank = no expiry"),
                 Field.Date("ExpiresOn", "Or use by", help: "instead of months"),
-                Field.Decimal("OutOfHoursRatio", "Out-of-hours cover", help: "blank = none; 1 = hour for hour; 1.5 = 1.5 h each"),
                 Field.Date("PurchasedOn", "Bought on", help: "blank = today; also the invoice date"),
                 Field.Date("StartsOn", "Usable from", help: "blank = the day bought"),
                 Field.Bool("Invoice", "Invoice it now", def: true, help: "a draft invoice for hours x rate"),
@@ -199,31 +199,29 @@ public static class AdminForms
             },
             Submit = v => db.Proc("dbo.usp_Prepaid_Add", ("@Client", agreementRef), ("@Hours", v.Dec("Hours")), ("@HourlyRate", v.Dec("HourlyRate")),
                 ("@PurchasedOn", v.Date("PurchasedOn")), ("@StartsOn", v.Date("StartsOn")), ("@ExpiresOn", v.Date("ExpiresOn")),
-                ("@ValidMonths", v.Int("ValidMonths")), ("@OutOfHoursRatio", v.Dec("OutOfHoursRatio")), ("@Notes", v.Str("Notes")),
+                ("@ValidMonths", v.Int("ValidMonths")), ("@Notes", v.Str("Notes")),
                 ("@Invoice", v.Bool("Invoice")))
         };
     }
 
-    /// <summary>What can be renegotiated after purchase: the expiry and out-of-hours cover.</summary>
+    /// <summary>What can be changed after purchase: the expiry and notes.</summary>
     public static FormSpec UpdatePrepaid(AdminDb db, string packageRef)
     {
         var row = Queries.PrepaidPackage(db, packageRef);
         string Cur(string col) => row == null || row[col] is DBNull ? "" : row[col] is DateTime dt ? dt.ToString("yyyy-MM-dd") : row[col] is decimal m ? m.ToString("0.##") : row[col].ToString() ?? "";
         return new FormSpec
         {
-            Title = $"Change pre-paid hours - {packageRef}",
+            Title = $"Change expiry - {packageRef}",
             Intro = "Applies to support billed from now on; hours already taken are not changed. The hours and rate can't be changed once sold: " +
                     "cancel an unused package and sell a new one instead.",
             Fields =
             {
                 Field.Date("ExpiresOn", "Use by", def: Cur("ExpiresOn")),
                 Field.Bool("NoExpiry", "No expiry"),
-                Field.Decimal("OutOfHoursRatio", "Out-of-hours cover", def: Cur("OutOfHoursRatio"), help: "pre-paid h per out-of-hours hour"),
-                Field.Bool("BusinessHoursOnly", "Business hours only", help: "stop covering out of hours"),
                 Field.Text("Notes", "Notes", def: Cur("Notes"))
             },
             Submit = v => db.Proc("dbo.usp_Prepaid_Update", ("@PackageRef", packageRef), ("@ExpiresOn", v.Date("ExpiresOn")), ("@NoExpiry", v.Bool("NoExpiry")),
-                ("@OutOfHoursRatio", v.Dec("OutOfHoursRatio")), ("@BusinessHoursOnly", v.Bool("BusinessHoursOnly")), ("@Notes", v.Str("Notes")))
+                ("@Notes", v.Str("Notes")))
         };
     }
 

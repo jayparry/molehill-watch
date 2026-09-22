@@ -85,7 +85,6 @@ public static class Queries
         DECLARE @Today date = CAST(dbo.fn_UkNow() AS date);
         SELECT p.PackageRef AS Ref, p.PurchasedOn AS Bought, p.Hours, p.HourlyRate AS Rate, p.Price, p.Used, p.Remaining AS [Left],
                p.StartsOn AS [From], p.ExpiresOn AS [Use by],
-               CASE WHEN p.OutOfHoursRatio IS NULL THEN 'No' ELSE FORMAT(p.OutOfHoursRatio, '0.##') + ' h/h' END AS OOH,
                p.State, i.InvoiceNo AS Invoice, i.Status AS [Invoice status], p.Notes
         FROM dbo.fn_PrepaidPackages((SELECT AgreementId FROM dbo.Agreement WHERE AgreementRef = @Ref), @Today) p
         LEFT JOIN dbo.Invoice i ON i.InvoiceId = p.InvoiceId
@@ -93,7 +92,7 @@ public static class Queries
         """, ("@Ref", agreementRef));
 
     public static DataTable PrepaidUsage(AdminDb db, string packageRef) => db.Query("""
-        SELECT u.CreatedAt AS Recorded, t.TicketRef AS Ticket, t.Title, u.RateType AS Rate, u.WorkedHours AS [Support h], u.HoursUsed AS [Pre-paid h],
+        SELECT u.CreatedAt AS Recorded, t.TicketRef AS Ticket, t.Title, u.HoursUsed AS Hours,
                i.InvoiceNo AS Invoice
         FROM dbo.PrepaidUsage u JOIN dbo.PrepaidPackage p ON p.PackageId = u.PackageId
         JOIN dbo.Invoice i ON i.InvoiceId = u.InvoiceId LEFT JOIN dbo.Ticket t ON t.TicketId = u.TicketId

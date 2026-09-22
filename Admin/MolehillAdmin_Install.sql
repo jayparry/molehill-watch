@@ -1,7 +1,7 @@
 /*
 ===============================================================================
  Molehill Watch - SQL Server Support Package
- Molehill Admin: contract, ticket, time and billing database     Version 1.4.0
+ Molehill Admin: contract, ticket, time and billing database     Version 1.4.1
  Molehill Data Services  -  jay@jayparry.co.uk  -  molehilldataservices.com
 -------------------------------------------------------------------------------
  Runs on YOUR OWN SQL Server (Express is fine), not on client servers.
@@ -359,7 +359,8 @@ CREATE TABLE dbo.Quote (
     CreatedAt      datetime2(0)  NOT NULL CONSTRAINT DF_Quote_CreatedAt DEFAULT SYSDATETIME());
 GO
 
--- 1.4.0: pre-paid support hours, bought as an add-on at a negotiated rate
+-- 1.4.0: pre-paid support hours, bought as an add-on at a negotiated rate.
+-- They cover business-hours support only; out-of-hours work is always billed at the out-of-hours rate.
 IF OBJECT_ID(N'dbo.PrepaidPackage') IS NULL
 CREATE TABLE dbo.PrepaidPackage (
     PackageId       int IDENTITY(1,1) CONSTRAINT PK_PrepaidPackage PRIMARY KEY,
@@ -371,14 +372,19 @@ CREATE TABLE dbo.PrepaidPackage (
     Price           AS (CAST(Hours * HourlyRate AS decimal(10,2))) PERSISTED,
     StartsOn        date          NOT NULL,      -- first day the hours can be used
     ExpiresOn       date          NULL,          -- last day they can be used; NULL = no expiry
-    OutOfHoursRatio decimal(4,2)  NULL,          -- NULL = business hours only; 1.5 = an out-of-hours hour uses 1.5 pre-paid hours
     InvoiceId       int           NULL CONSTRAINT FK_PrepaidPackage_Invoice REFERENCES dbo.Invoice (InvoiceId),
     Status          varchar(10)   NOT NULL CONSTRAINT DF_PrepaidPackage_Status DEFAULT 'Active'
                     CONSTRAINT CK_PrepaidPackage_Status CHECK (Status IN ('Active', 'Cancelled')),
     Notes           nvarchar(1000) NULL,
     CreatedAt       datetime2(0)  NOT NULL CONSTRAINT DF_PrepaidPackage_CreatedAt DEFAULT SYSDATETIME(),
-    CONSTRAINT CK_PrepaidPackage_Dates CHECK (ExpiresOn IS NULL OR ExpiresOn >= StartsOn),
-    CONSTRAINT CK_PrepaidPackage_Ooh CHECK (OutOfHoursRatio IS NULL OR OutOfHoursRatio > 0));
+    CONSTRAINT CK_PrepaidPackage_Dates CHECK (ExpiresOn IS NULL OR ExpiresOn >= StartsOn));
+
+-- 1.4.1: packages never cover out-of-hours work (1.4.0 had an optional ratio)
+IF COL_LENGTH(N'dbo.PrepaidPackage', N'OutOfHoursRatio') IS NOT NULL
+BEGIN
+    IF OBJECT_ID(N'dbo.CK_PrepaidPackage_Ooh') IS NOT NULL ALTER TABLE dbo.PrepaidPackage DROP CONSTRAINT CK_PrepaidPackage_Ooh;
+    ALTER TABLE dbo.PrepaidPackage DROP COLUMN OutOfHoursRatio;
+END
 
 -- hours taken from a package by an arrears invoice (voiding that invoice gives them back)
 IF OBJECT_ID(N'dbo.PrepaidUsage') IS NULL
@@ -388,9 +394,9 @@ CREATE TABLE dbo.PrepaidUsage (
     InvoiceId      int          NOT NULL CONSTRAINT FK_PrepaidUsage_Invoice REFERENCES dbo.Invoice (InvoiceId),
     BillingCycleId int          NULL,
     TicketId       int          NULL CONSTRAINT FK_PrepaidUsage_Ticket REFERENCES dbo.Ticket (TicketId),
-    RateType       varchar(20)  NOT NULL,
+    RateType       varchar(20)  NOT NULL,        -- always BusinessHours
     WorkedHours    decimal(9,2) NOT NULL,        -- chargeable support time covered
-    HoursUsed      decimal(9,2) NOT NULL,        -- pre-paid hours taken (x the out-of-hours ratio)
+    HoursUsed      decimal(9,2) NOT NULL,        -- pre-paid hours taken (the same)
     CreatedAt      datetime2(0) NOT NULL CONSTRAINT DF_PrepaidUsage_CreatedAt DEFAULT SYSDATETIME());
 
 IF EXISTS (SELECT 1 FROM sys.check_constraints WHERE name = N'CK_InvoiceLine_Type' AND definition NOT LIKE N'%PrepaidDrawn%')
@@ -1423,7 +1429,7 @@ RETURNS TABLE
 AS
 RETURN
     SELECT p.PackageId, p.PackageRef, p.AgreementId, p.PurchasedOn, p.Hours, p.HourlyRate, p.Price, p.StartsOn, p.ExpiresOn,
-           p.OutOfHoursRatio, p.InvoiceId, p.Status, p.Notes,
+           p.InvoiceId, p.Status, p.Notes,
            Used      = CAST(ISNULL(u.Used, 0) AS decimal(9,2)),
            Remaining = CAST(p.Hours - ISNULL(u.Used, 0) AS decimal(9,2)),
            LastUsed  = u.LastUsed,
@@ -1497,7 +1503,6 @@ CREATE OR ALTER PROCEDURE dbo.usp_Prepaid_Add
     @StartsOn        date          = NULL,       -- default the purchase date
     @ExpiresOn       date          = NULL,       -- last day the hours can be used (or use @ValidMonths); NULL = no expiry
     @ValidMonths     int           = NULL,
-    @OutOfHoursRatio decimal(4,2)  = NULL,       -- NULL = business hours only; 1 = hour for hour; 1.5 = 1.5 pre-paid hours per out-of-hours hour
     @Notes           nvarchar(1000) = NULL,
     @Invoice         bit           = 1           -- 1 = draft invoice for the package now
 AS
@@ -1507,7 +1512,6 @@ BEGIN
     IF @AgreementId IS NULL BEGIN RAISERROR(N'Agreement or client "%s" not found.', 16, 1, @Client); RETURN; END
     IF ISNULL(@Hours, 0) <= 0 BEGIN RAISERROR(N'Give the number of hours (more than 0).', 16, 1); RETURN; END
     IF @HourlyRate IS NULL OR @HourlyRate < 0 BEGIN RAISERROR(N'Give the agreed hourly rate.', 16, 1); RETURN; END
-    IF @OutOfHoursRatio <= 0 BEGIN RAISERROR(N'@OutOfHoursRatio must be more than 0 (or NULL for business hours only).', 16, 1); RETURN; END
     IF @ExpiresOn IS NOT NULL AND @ValidMonths IS NOT NULL BEGIN RAISERROR(N'Give @ExpiresOn or @ValidMonths, not both.', 16, 1); RETURN; END
     SET @PurchasedOn = ISNULL(@PurchasedOn, CAST(dbo.fn_UkNow() AS date));
     SET @StartsOn = ISNULL(@StartsOn, @PurchasedOn);
@@ -1518,8 +1522,8 @@ BEGIN
 
     DECLARE @PackageId int, @InvoiceId int;
     BEGIN TRAN;
-    INSERT dbo.PrepaidPackage (AgreementId, PurchasedOn, Hours, HourlyRate, StartsOn, ExpiresOn, OutOfHoursRatio, Notes)
-    VALUES (@AgreementId, @PurchasedOn, @Hours, @HourlyRate, @StartsOn, @ExpiresOn, @OutOfHoursRatio, NULLIF(LTRIM(RTRIM(@Notes)), N''));
+    INSERT dbo.PrepaidPackage (AgreementId, PurchasedOn, Hours, HourlyRate, StartsOn, ExpiresOn, Notes)
+    VALUES (@AgreementId, @PurchasedOn, @Hours, @HourlyRate, @StartsOn, @ExpiresOn, NULLIF(LTRIM(RTRIM(@Notes)), N''));
     SET @PackageId = SCOPE_IDENTITY();
     IF @Invoice = 1
     BEGIN
@@ -1529,9 +1533,7 @@ BEGIN
                N'Pre-paid support hours (' + PackageRef + N'): ' + FORMAT(Hours, 'N2') + N' h, usable '
                + CASE WHEN ExpiresOn IS NULL THEN N'from ' + CONVERT(nvarchar(11), StartsOn, 106) + N' (no expiry)'
                       ELSE CONVERT(nvarchar(11), StartsOn, 106) + N' - ' + CONVERT(nvarchar(11), ExpiresOn, 106) END
-               + CASE WHEN OutOfHoursRatio IS NULL THEN N', business hours'
-                      WHEN OutOfHoursRatio = 1 THEN N', business and out of hours'
-                      ELSE N', business hours; out of hours at ' + FORMAT(OutOfHoursRatio, '0.##') + N' pre-paid h per hour' END,
+               + N', for business-hours support',
                Hours, HourlyRate, Price
         FROM dbo.PrepaidPackage WHERE PackageId = @PackageId;
         EXEC dbo.usp_Invoice_Recalculate @InvoiceId = @InvoiceId;
@@ -1548,18 +1550,16 @@ BEGIN
     IF @Invoice = 1 PRINT N'Draft invoice ' + @InvNo + N' created for the package.';
     ELSE PRINT N'No invoice created (@Invoice = 0): bill it yourself, e.g. with usp_Invoice_Adjust.';
 
-    SELECT p.PackageRef, p.Hours, p.HourlyRate, p.Price, p.StartsOn, p.ExpiresOn, p.OutOfHoursRatio, InvoiceNo = i.InvoiceNo
+    SELECT p.PackageRef, p.Hours, p.HourlyRate, p.Price, p.StartsOn, p.ExpiresOn, InvoiceNo = i.InvoiceNo
     FROM dbo.PrepaidPackage p LEFT JOIN dbo.Invoice i ON i.InvoiceId = p.InvoiceId WHERE p.PackageId = @PackageId;
 END
 GO
 
--- Change what can be renegotiated after purchase. NULL = unchanged.
+-- Change the expiry or notes after purchase. NULL = unchanged.
 CREATE OR ALTER PROCEDURE dbo.usp_Prepaid_Update
     @PackageRef        varchar(10),
     @ExpiresOn         date         = NULL,
     @NoExpiry          bit          = 0,       -- 1 = remove the expiry date
-    @OutOfHoursRatio   decimal(4,2) = NULL,
-    @BusinessHoursOnly bit          = 0,       -- 1 = stop covering out-of-hours time
     @Notes             nvarchar(1000) = NULL
 AS
 BEGIN
@@ -1569,14 +1569,12 @@ BEGIN
     IF @PackageId IS NULL BEGIN RAISERROR(N'Pre-paid package %s not found.', 16, 1, @PackageRef); RETURN; END
     IF @Status = 'Cancelled' BEGIN RAISERROR(N'%s is cancelled.', 16, 1, @PackageRef); RETURN; END
     IF @ExpiresOn < @StartsOn BEGIN RAISERROR(N'The expiry date is before the hours can be used.', 16, 1); RETURN; END
-    IF @OutOfHoursRatio <= 0 BEGIN RAISERROR(N'@OutOfHoursRatio must be more than 0.', 16, 1); RETURN; END
     UPDATE dbo.PrepaidPackage
     SET ExpiresOn = CASE WHEN @NoExpiry = 1 THEN NULL ELSE ISNULL(@ExpiresOn, ExpiresOn) END,
-        OutOfHoursRatio = CASE WHEN @BusinessHoursOnly = 1 THEN NULL ELSE ISNULL(@OutOfHoursRatio, OutOfHoursRatio) END,
         Notes = ISNULL(NULLIF(LTRIM(RTRIM(@Notes)), N''), Notes)
     WHERE PackageId = @PackageId;
     PRINT N'Updated ' + @PackageRef + N'. Changes apply to support billed from now on; hours already taken are unchanged.';
-    SELECT PackageRef, Hours, Used, Remaining, StartsOn, ExpiresOn, OutOfHoursRatio, State
+    SELECT PackageRef, Hours, Used, Remaining, StartsOn, ExpiresOn, State
     FROM dbo.fn_PrepaidPackages((SELECT AgreementId FROM dbo.PrepaidPackage WHERE PackageId = @PackageId), CAST(dbo.fn_UkNow() AS date))
     WHERE PackageId = @PackageId;
 END
@@ -1617,7 +1615,6 @@ BEGIN
     IF @AgreementId IS NULL BEGIN RAISERROR(N'Agreement or client "%s" not found.', 16, 1, @Client); RETURN; END
     DECLARE @Today date = CAST(dbo.fn_UkNow() AS date);
     SELECT p.PackageRef, p.PurchasedOn, p.Hours, p.HourlyRate, p.Price, p.Used, p.Remaining, p.StartsOn, p.ExpiresOn,
-           OutOfHours = CASE WHEN p.OutOfHoursRatio IS NULL THEN 'No' ELSE FORMAT(p.OutOfHoursRatio, '0.##') + ' h per h' END,
            p.State, Invoice = i.InvoiceNo, InvoiceStatus = i.Status, p.Notes
     FROM dbo.fn_PrepaidPackages(@AgreementId, @Today) p LEFT JOIN dbo.Invoice i ON i.InvoiceId = p.InvoiceId
     ORDER BY p.PurchasedOn, p.PackageId;
@@ -1629,42 +1626,40 @@ BEGIN
 END
 GO
 
--- Takes chargeable support hours from the agreement's packages (used by the arrears invoice).
+-- Takes chargeable business-hours support from the agreement's packages, hour for hour (used by the arrears invoice).
+-- Out-of-hours work never comes from a package.
 CREATE OR ALTER PROCEDURE dbo.usp_Prepaid_Draw
     @AgreementId    int,
     @OnDate         date,
-    @Hours          decimal(9,4),               -- chargeable support hours to cover
-    @RateType       varchar(20),                -- BusinessHours | OutOfHours
+    @Hours          decimal(9,4),               -- chargeable business-hours support to cover
     @InvoiceId      int,
     @BillingCycleId int = NULL,
     @TicketId       int = NULL,
-    @Covered        decimal(9,4) OUTPUT,        -- support hours covered
+    @Covered        decimal(9,4) OUTPUT,        -- hours covered
     @Refs           nvarchar(400) OUTPUT        -- e.g. 'PH-0001 2.00 h'
 AS
 BEGIN
     SET NOCOUNT ON;
     SELECT @Covered = 0, @Refs = NULL;
-    DECLARE @PackageId int, @Ref varchar(10), @Left decimal(9,4), @Ratio decimal(9,4), @Take decimal(9,4), @Worked decimal(9,4);
+    DECLARE @PackageId int, @Ref varchar(10), @Left decimal(9,4), @Take decimal(9,4);
     DECLARE p CURSOR LOCAL FAST_FORWARD FOR
-        SELECT PackageId, PackageRef, Remaining, CASE WHEN @RateType = 'OutOfHours' THEN OutOfHoursRatio ELSE 1 END
+        SELECT PackageId, PackageRef, Remaining
         FROM dbo.fn_PrepaidPackages(@AgreementId, @OnDate)
-        WHERE State = 'Active' AND (@RateType = 'BusinessHours' OR OutOfHoursRatio IS NOT NULL)
+        WHERE State = 'Active'
         ORDER BY CASE WHEN ExpiresOn IS NULL THEN 1 ELSE 0 END, ExpiresOn, StartsOn, PackageId;
     OPEN p;
-    FETCH NEXT FROM p INTO @PackageId, @Ref, @Left, @Ratio;
+    FETCH NEXT FROM p INTO @PackageId, @Ref, @Left;
     WHILE @@FETCH_STATUS = 0 AND ROUND(@Hours - @Covered, 2) > 0
     BEGIN
-        SET @Take = (@Hours - @Covered) * @Ratio;
-        IF @Take > @Left SET @Take = @Left;
-        SET @Worked = @Take / @Ratio;
-        IF ROUND(@Take, 2) > 0
+        SET @Take = ROUND(CASE WHEN @Hours - @Covered < @Left THEN @Hours - @Covered ELSE @Left END, 2);
+        IF @Take > 0
         BEGIN
             INSERT dbo.PrepaidUsage (PackageId, InvoiceId, BillingCycleId, TicketId, RateType, WorkedHours, HoursUsed)
-            VALUES (@PackageId, @InvoiceId, @BillingCycleId, @TicketId, @RateType, ROUND(@Worked, 2), ROUND(@Take, 2));
-            SET @Covered = @Covered + ROUND(@Worked, 2);
-            SET @Refs = ISNULL(@Refs + N', ', N'') + @Ref + N' ' + FORMAT(ROUND(@Take, 2), 'N2') + N' h';
+            VALUES (@PackageId, @InvoiceId, @BillingCycleId, @TicketId, 'BusinessHours', @Take, @Take);
+            SET @Covered = @Covered + @Take;
+            SET @Refs = ISNULL(@Refs + N', ', N'') + @Ref + N' ' + FORMAT(@Take, 'N2') + N' h';
         END
-        FETCH NEXT FROM p INTO @PackageId, @Ref, @Left, @Ratio;
+        FETCH NEXT FROM p INTO @PackageId, @Ref, @Left;
     END
     CLOSE p; DEALLOCATE p;
     IF @Covered > @Hours SET @Covered = @Hours;
@@ -1732,7 +1727,7 @@ BEGIN
             -- chargeable time comes out of pre-paid hours first
             SELECT @FromPack = 0, @PackRefs = NULL;
             IF ROUND(@Charged, 2) > 0
-                EXEC dbo.usp_Prepaid_Draw @AgreementId = @AgreementId, @OnDate = @FirstWork, @Hours = @Charged, @RateType = 'BusinessHours',
+                EXEC dbo.usp_Prepaid_Draw @AgreementId = @AgreementId, @OnDate = @FirstWork, @Hours = @Charged,
                      @InvoiceId = @InvoiceId, @BillingCycleId = @BillingCycleId, @TicketId = @TicketId, @Covered = @FromPack OUTPUT, @Refs = @PackRefs OUTPUT;
             SET @Billed = @Charged - @FromPack;
             IF ROUND(@FromPack, 2) > 0
@@ -1752,24 +1747,13 @@ BEGIN
         END
         IF @Ooh > 0
         BEGIN
+            -- out-of-hours work is always billed at the out-of-hours rate (never from pre-paid hours)
             SET @Charged = CASE WHEN @Ooh < @Min THEN @Min ELSE @Ooh END;
-            SELECT @FromPack = 0, @PackRefs = NULL;
-            EXEC dbo.usp_Prepaid_Draw @AgreementId = @AgreementId, @OnDate = @FirstWork, @Hours = @Charged, @RateType = 'OutOfHours',
-                 @InvoiceId = @InvoiceId, @BillingCycleId = @BillingCycleId, @TicketId = @TicketId, @Covered = @FromPack OUTPUT, @Refs = @PackRefs OUTPUT;
-            SET @Billed = @Charged - @FromPack;
-            IF ROUND(@FromPack, 2) > 0
-                INSERT dbo.InvoiceLine (InvoiceId, LineType, BillingCycleId, TicketId, Description, Quantity, UnitPrice, Amount)
-                VALUES (@InvoiceId, 'PrepaidDrawn', @BillingCycleId, @TicketId,
-                        N'Out-of-hours support from pre-paid hours: ' + @Label + N' (' + @PackRefs + N')'
-                        + CASE WHEN ROUND(@Billed, 2) <= 0 AND @Ooh < @Min THEN N', 1 h minimum charge applied' ELSE N'' END,
-                        ROUND(@FromPack, 2), 0, 0);
-            IF ROUND(@Billed, 2) > 0
-                INSERT dbo.InvoiceLine (InvoiceId, LineType, BillingCycleId, TicketId, Description, Quantity, UnitPrice, Amount)
-                VALUES (@InvoiceId, 'OutOfHours', @BillingCycleId, @TicketId,
-                        N'Out-of-hours support: ' + @Label + N' - ' + FORMAT(@Ooh, 'N2') + N' h worked'
-                        + CASE WHEN @FromPack > 0 THEN N', ' + FORMAT(@FromPack, 'N2') + N' h from pre-paid hours' ELSE N'' END
-                        + CASE WHEN @Ooh < @Min THEN N', 1 h minimum charge applied' ELSE N'' END,
-                        ROUND(@Billed, 2), @OohRate, ROUND(ROUND(@Billed, 2) * @OohRate, 2));
+            INSERT dbo.InvoiceLine (InvoiceId, LineType, BillingCycleId, TicketId, Description, Quantity, UnitPrice, Amount)
+            VALUES (@InvoiceId, 'OutOfHours', @BillingCycleId, @TicketId,
+                    N'Out-of-hours support: ' + @Label + N' - ' + FORMAT(@Ooh, 'N2') + N' h worked'
+                    + CASE WHEN @Ooh < @Min THEN N', 1 h minimum charge applied' ELSE N'' END,
+                    ROUND(@Charged, 2), @OohRate, ROUND(ROUND(@Charged, 2) * @OohRate, 2));
         END
         FETCH NEXT FROM c INTO @TicketId, @Ref, @Title, @Inst, @Bh, @Ooh, @FirstWork;
     END
@@ -2363,6 +2347,6 @@ BEGIN
 END
 GO
 
-INSERT dbo.InstallHistory (Version) VALUES ('1.4.0');   -- bump with every schema change: Molehill Manager offers the upgrade
-PRINT N'Molehill Admin 1.4.0 installed.';
+INSERT dbo.InstallHistory (Version) VALUES ('1.4.1');   -- bump with every schema change: Molehill Manager offers the upgrade
+PRINT N'Molehill Admin 1.4.1 installed.';
 GO

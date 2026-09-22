@@ -99,8 +99,8 @@ Running from source (`dotnet run`) needs the .NET 8 SDK and keeps its config nex
 **Agreement window** (Enter on a client):
 
 - It has tabs for Instances, Onboarding, Contacts, Tickets, Weekly reports and **Pre-paid hours**.
-  - On the Pre-paid hours tab, F2 sells a package (hours and rate negotiated, optional expiry and out-of-hours cover).
-  - Enter on a package shows where its hours went, or changes or cancels it.
+  - On the Pre-paid hours tab, F2 sells a package of business-hours support (hours and rate negotiated, optional expiry). Out-of-hours work is never taken from it.
+  - Enter on a package shows where its hours went, changes its expiry or cancels it.
 - F2 adds to whichever tab is showing.
 - Enter on a row gives the actions for that row.
 - **Contacts:** current contacts only. Tick **Show removed contacts** to see removed ones, with their dates. A note says how many are hidden.

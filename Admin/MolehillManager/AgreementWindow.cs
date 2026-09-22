@@ -257,7 +257,7 @@ public sealed class AgreementWindow
         };
         if (state != "Cancelled")
         {
-            actions.Add(("Change expiry or out-of-hours cover", () => Ui.Form(AdminForms.UpdatePrepaid(_db, reference), Refresh)));
+            actions.Add(("Change expiry", () => Ui.Form(AdminForms.UpdatePrepaid(_db, reference), Refresh)));
             if (Grid.Selected(_prepaid, "Used") is "0" or null) actions.Add(("Cancel (unused only)", () => Ui.Form(AdminForms.CancelPrepaid(_db, reference), Refresh)));
         }
         actions.Add(("Sell more pre-paid hours", () => Ui.Form(AdminForms.SellPrepaid(_db, _ref), Refresh)));
