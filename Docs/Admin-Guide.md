@@ -4,7 +4,7 @@ All commands run in SSMS against **MolehillAdmin**. Wherever a procedure takes `
 
 Times are UK local time. Leave date/time parameters out to mean "now".
 
-**Prefer not to type SQL?** Every step below can also be done in **Molehill Manager** (`Admin\MolehillManager`, `dotnet run`). It has tabs for Dashboard, Clients, Tickets and Billing. Press Enter on an agreement for its instances, onboarding, contacts, tickets and weekly reports. F2 adds, and Enter on a row offers what you can do with it. It calls the same procedures shown here, and shows any warnings they print.
+**Prefer not to type SQL?** Every step below can also be done in **Molehill Manager** (`MolehillManager.exe`; the first run asks for the connection and saves it to `MolehillManager.config.json`). It has tabs for Dashboard, Clients, Tickets and Billing. Press Enter on an agreement for its instances, onboarding, contacts, tickets and weekly reports. F2 adds, and Enter on a row offers what you can do with it. It calls the same procedures shown here, and shows any warnings they print.
 
 ---
 

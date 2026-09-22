@@ -1,37 +1,35 @@
+using System.Text.Json;
 using MolehillManager;
 using Terminal.Gui;
 
 // Molehill Manager - Molehill Data Services
 // Terminal front end for the MolehillAdmin database: clients, agreements, instances, tickets and billing.
+// Settings live in MolehillManager.config.json (next to the .exe, or in %APPDATA%\MolehillManager);
+// anything missing is asked for on start-up and written back to the file.
 
-string? connectionString = null;
-string? server = null, database = null;
-var selfTest = false;
-var selfTestWrite = false;
-var allowWrites = false;
+string? configArg = null, connectionOverride = null;
+bool forceSetup = false, selfTest = false, selfTestWrite = false, selfTestConfig = false, allowWrites = false;
 
 for (var i = 0; i < args.Length; i++)
 {
     switch (args[i].ToLowerInvariant())
     {
-        case "-c" or "--connection-string":
-            if (++i < args.Length) connectionString = args[i];
+        case "--config":
+            if (++i < args.Length) configArg = args[i];
             break;
-        case "-s" or "--server":
-            if (++i < args.Length) server = args[i];
+        case "--setup":
+            forceSetup = true;
             break;
-        case "-d" or "--database":
-            if (++i < args.Length) database = args[i];
+        case "-c" or "--connection-string":            // self-tests only: bypass the config file
+            if (++i < args.Length) connectionOverride = args[i];
             break;
-        case "--selftest":
-            selfTest = true;
+        case "--selftest": selfTest = true; break;
+        case "--selftest-write": selfTestWrite = true; break;
+        case "--selftest-config": selfTestConfig = true; break;
+        case "--selftest-setup":                        // drives the first-run settings screen against this server
+            if (++i < args.Length) return SelfTest.Setup(args[i]);
             break;
-        case "--selftest-write":
-            selfTestWrite = true;
-            break;
-        case "--allow-writes":
-            allowWrites = true;
-            break;
+        case "--allow-writes": allowWrites = true; break;
         case "-h" or "--help" or "/?":
             Help();
             return 0;
@@ -41,20 +39,44 @@ for (var i = 0; i < args.Length; i++)
     }
 }
 
-var settingsPath = ConnectionSettings.DefaultPath;
-var settings = ConnectionSettings.Load(settingsPath) ?? new ConnectionSettings();
-if (server != null || database != null)
+if (selfTestConfig) return SelfTest.Config();
+
+var path = ConfigStore.Resolve(configArg);
+AppConfig config;
+bool existed;
+string? loadProblem = null;
+try
 {
-    if (server != null) settings.Server = server;
-    if (database != null) settings.Database = database;
-    settings.Authentication = "Windows";
-    connectionString = settings.Build(null);
+    config = ConfigStore.Load(path, out existed);
+}
+catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
+{
+    config = new AppConfig { OutputFolder = AppConfig.DefaultOutputFolder };
+    existed = false;
+    loadProblem = $"{path} could not be read ({ex.Message.Split('\n')[0]}).";
 }
 
+// a password typed into the file by hand is encrypted straight away
+if (loadProblem == null && config.PlainTextSecretFound)
+{
+    try { ConfigStore.Save(path, config); }
+    catch (Exception ex) { Console.Error.WriteLine($"Warning: could not rewrite {path} to encrypt the password: {ex.Message}"); }
+}
+
+// ---------------------------------------------------------------- self-tests (no screen)
 if (selfTest || selfTestWrite)
 {
-    if (connectionString == null) { Console.Error.WriteLine("The self-tests need -c \"connection string\" (or -s server -d database)."); return 64; }
-    var problem = ConnectionSettings.Check(connectionString);
+    string connectionString;
+    if (connectionOverride != null) connectionString = connectionOverride;
+    else if (loadProblem != null) { Console.Error.WriteLine(loadProblem); return 1; }
+    else if (config.Missing().Count > 0 || config.NeedsSecretPrompt)
+    {
+        Console.Error.WriteLine($"The config file {path} is incomplete; run the app once to fill it in, or pass -c \"connection string\".");
+        return 64;
+    }
+    else connectionString = config.BuildConnectionString();
+
+    var problem = ConfigStore.Check(connectionString);
     if (problem != null) { Console.Error.WriteLine(problem); return 1; }
     if (selfTestWrite && !allowWrites)
     {
@@ -65,37 +87,39 @@ if (selfTest || selfTestWrite)
     return selfTestWrite ? SelfTest.Write(new AdminDb(connectionString)) : SelfTest.Ui(new AdminDb(connectionString));
 }
 
+// ---------------------------------------------------------------- the app
 try
 {
     Application.Init();
 }
 catch (Exception ex)
 {
-    Console.Error.WriteLine("This needs a real terminal window (Windows Terminal, conhost or an SSH session).");
+    Console.Error.WriteLine("Molehill Manager needs a real terminal window (Windows Terminal, conhost or an SSH session).");
     Console.Error.WriteLine(ex.Message);
     return 1;
 }
 
 try
 {
-    // a connection string from the command line is tried first; otherwise (or if it fails) ask
-    if (connectionString != null)
+    if (loadProblem != null)
     {
-        var problem = ConnectionSettings.Check(connectionString);
-        if (problem != null)
-        {
-            MessageBox.ErrorQuery("Connect", problem, "Ok");
-            connectionString = null;
-        }
+        var backup = path + ".bak";
+        if (MessageBox.ErrorQuery("Settings", $"{loadProblem}\n\nStart again with new settings? The old file is kept as\n{backup}", "New settings", "Quit") != 0) return 1;
+        try { File.Copy(path, backup, overwrite: true); } catch { /* unreadable or locked: nothing to keep */ }
     }
-    connectionString ??= ConnectionSettings.Prompt(settings, settingsPath);
-    if (connectionString == null) return 0;
 
-    var main = new MainWindow(new AdminDb(connectionString), () =>
+    var connectionString = Startup.Connect(config, path, existed, forceSetup, loadProblem != null);
+    if (connectionString == null) return 0;
+    AdminForms.OutputFolder = config.OutputFolder;
+
+    var main = new MainWindow(new AdminDb(connectionString), path, () =>
     {
-        var cs = ConnectionSettings.Prompt(settings, settingsPath);
-        return cs == null ? null : new AdminDb(cs);
-    });
+        // File > Settings: edit, save, reconnect
+        var cs = Startup.Connect(config, path, existed: true, forceSetup: true, loadFailed: false);
+        if (cs == null) return null;
+        AdminForms.OutputFolder = config.OutputFolder;
+        return new AdminDb(cs);
+    }, () => config.AutoRefreshMinutes);
     main.Build(Application.Top);
     Application.Run();
 }
@@ -105,22 +129,29 @@ finally
 }
 return 0;
 
-static void Help() => Console.WriteLine("""
+static void Help() => Console.WriteLine($"""
 Molehill Manager - Molehill Data Services
 
 Terminal front end for the MolehillAdmin database: clients, agreements, instances
 (SQL Server, Azure SQL Managed Instance, Azure SQL Database), onboarding, tickets,
 time, billing and invoices.
 
-  MolehillManager                           connect (remembers the server; never the password)
-  MolehillManager -s SQL01 -d MolehillAdmin Windows authentication to that server
-  MolehillManager -c "Server=...;..."       any connection string
+Just run it. Settings are kept in {ConfigStore.FileName}:
+  next to MolehillManager.exe (if that folder is writable), otherwise
+  {ConfigStore.AppDataPath}
+Anything missing is asked for on start-up and saved. Passwords and client secrets are
+only saved if you tick "Remember it", and then encrypted for your Windows account.
 
-  MolehillManager -c "..." --selftest       build every screen and form against the database
-                                            (read-only) and report
-  MolehillManager -c "..." --selftest-write --allow-writes
-                                            scripted run of every form against a TEST copy:
-                                            adds a client, instances, tickets and invoices
+  MolehillManager                       start (first run asks for the settings)
+  MolehillManager --setup               open the settings screen first
+  MolehillManager --config D:\x.json    use a different config file (one per environment)
+
+  MolehillManager --selftest            build every screen and form against the configured
+                                        database (read-only) and report
+  MolehillManager --selftest-write --allow-writes
+                                        scripted run of every form against a TEST copy
+  MolehillManager --selftest-config     check the config file handling (no database needed)
+  (-c "connection string" points a self-test somewhere other than the config file)
 
 Keys: F2 new, F3/Enter open or actions, F5 refresh, F6 run billing, Ctrl+Q quit.
 """);

@@ -53,6 +53,172 @@ public static class SelfTest
         return _fail == 0 ? 0 : 2;
     }
 
+    /// <summary>The config file: missing values, plain-text migration, DPAPI encryption, dialogs. No database needed.</summary>
+    public static int Config()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "MolehillManager-configtest-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(folder);
+        var path = Path.Combine(folder, ConfigStore.FileName);
+        const string pw = "S3cret-Pa55word!";
+        try
+        {
+            Step("explicit --config path is used", () => ConfigStore.Resolve(path), r => r == path ? null : r);
+
+            var fresh = ConfigStore.Load(path, out var existed);
+            Check("no file: first run, server missing", !existed && fresh.Missing().Contains("server"), string.Join(", ", fresh.Missing()));
+            Check("no file: output folder defaulted", fresh.OutputFolder == AppConfig.DefaultOutputFolder, fresh.OutputFolder);
+
+            // hand-edited file: comments, trailing comma, plain-text password
+            File.WriteAllText(path, """
+                {
+                  // edited by hand
+                  "Connection": { "Server": "SQL01", "Database": "MolehillAdmin", "Authentication": "SqlLogin", "User": "mm", "Password": "S3cret-Pa55word!", },
+                  "OutputFolder": "D:/Invoices",
+                }
+                """);
+            var c1 = ConfigStore.Load(path, out _);
+            Check("comments and trailing commas accepted", c1.Connection.Server == "SQL01");
+            Check("plain-text password picked up", c1.Secret == pw && c1.PlainTextSecretFound);
+            Check("complete config has nothing missing", c1.Missing().Count == 0 && !c1.NeedsSecretPrompt, string.Join(", ", c1.Missing()));
+            ConfigStore.Save(path, c1);
+            var text = File.ReadAllText(path);
+            Check("saved file has no plain-text password", !text.Contains(pw) && !text.Contains("\"Password\""));
+            Check("saved file has the encrypted password", text.Contains("\"PasswordEncrypted\":"));
+            var c2 = ConfigStore.Load(path, out _);
+            Check("encrypted password reads back", c2.Secret == pw && !c2.PlainTextSecretFound && !c2.SecretUnreadable);
+            Check("connection string carries it", c2.BuildConnectionString().Contains(pw));
+
+            // Windows names typed with single backslashes
+            File.WriteAllText(path, """{ "Connection": { "Server": "SQL01\INST", "Authentication": "Windows" }, "OutputFolder": "D:\reports\new" }""");
+            var cb = ConfigStore.Load(path, out _);
+            Check("single backslashes taken literally", cb.Connection.Server == @"SQL01\INST" && cb.OutputFolder == @"D:\reports\new", cb.Connection.Server + " " + cb.OutputFolder);
+            ConfigStore.Save(path, cb);
+            var cb2 = ConfigStore.Load(path, out _);
+            Check("and survive a save and reload", cb2.Connection.Server == @"SQL01\INST" && cb2.OutputFolder == @"D:\reports\new", cb2.Connection.Server + " " + cb2.OutputFolder);
+            File.WriteAllText(path, text);
+
+            // someone else's (or a corrupted) encrypted password
+            File.WriteAllText(path, text.Replace(c2.Connection.PasswordEncrypted!, Convert.ToBase64String(new byte[64])));
+            var c3 = ConfigStore.Load(path, out _);
+            Check("unreadable encrypted password: asked for again", c3.SecretUnreadable && c3.NeedsSecretPrompt);
+
+            // not remembered
+            c2.Connection.SavePassword = false;
+            ConfigStore.Save(path, c2);
+            var c4 = ConfigStore.Load(path, out _);
+            Check("'remember' off: nothing stored, asked each time", !File.ReadAllText(path).Contains("\"PasswordEncrypted\":") && c4.NeedsSecretPrompt);
+
+            // Windows sign-in never stores a secret
+            c2.Connection.Authentication = "Windows"; c2.Connection.SavePassword = true; c2.Secret = "ignored";
+            ConfigStore.Save(path, c2);
+            Check("Windows sign-in stores no secret", !File.ReadAllText(path).Contains("\"PasswordEncrypted\":"));
+
+            // what gets asked for
+            var c5 = new AppConfig { OutputFolder = "x", Connection = { Server = "SQL01", Authentication = "SqlLogin" } };
+            Check("SQL login without user: user name asked for", c5.Missing().Contains("user name"));
+            c5.Connection.Authentication = "EntraServicePrincipal";
+            Check("service principal without id: client id asked for", c5.Missing().Contains("client id"));
+            c5.Connection.Authentication = "Bogus";
+            Check("unknown sign-in method: asked for", c5.Missing().Contains("sign-in method"));
+            c5.Connection.Authentication = "EntraServicePrincipal"; c5.Connection.User = "app-id";
+            Check("secret needed but not saved: password prompt", c5.Missing().Count == 0 && c5.NeedsSecretPrompt);
+
+            foreach (var method in AppConfig.AuthMethods)
+                Step($"connection string builds: {method}", () =>
+                {
+                    var c = new AppConfig { Secret = "x", Connection = { Server = "SQL01", Authentication = method, User = "u" } };
+                    return c.BuildConnectionString();
+                });
+
+            Application.Init(new FakeDriver(), null);
+            try
+            {
+                foreach (var method in AppConfig.AuthMethods)
+                    Step($"settings dialog builds: {method}", () =>
+                    {
+                        var c = new AppConfig { OutputFolder = "x", Connection = { Server = "SQL01", Authentication = method } };
+                        using var d = SetupDialog.Create(c, path, "Self test", out _);
+                        return 0;
+                    });
+            }
+            finally { Application.Shutdown(); }
+        }
+        finally
+        {
+            try { Directory.Delete(folder, true); } catch { }
+        }
+        return Finish();
+    }
+
+    /// <summary>
+    /// The real start-up path on a fake console: a config file without a server, so the settings screen opens,
+    /// explains what is missing, is filled in and saved, and the app connects with what was written.
+    /// </summary>
+    public static int Setup(string server)
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "MolehillManager-setuptest-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(folder);
+        var path = Path.Combine(folder, ConfigStore.FileName);
+        File.WriteAllText(path, "{ \"Connection\": { \"Database\": \"MolehillAdmin\", \"Authentication\": \"Windows\" } }");
+        var shownReason = "";
+        var others = new List<string>();
+        Application.Init(new FakeDriver(), null);
+        try
+        {
+            var config = ConfigStore.Load(path, out var existed);
+            Check("config without a server is incomplete", config.Missing().SequenceEqual(new[] { "server", "output folder" }), string.Join(", ", config.Missing()));
+
+            View? handled = null;
+            Application.Iteration += () =>
+            {
+                var current = Application.Current;
+                if (current == null || current == handled) return;
+                handled = current;
+                if (current is Dialog d && d.Title.ToString() == "Molehill Manager settings")
+                {
+                    var labels = All<Label>(d).ToList();
+                    shownReason = labels.First().Text.ToString() ?? "";
+                    var fields = All<TextField>(d).ToList();          // server, database, user, password, timeout, output, refresh
+                    fields[0].Text = server;
+                    fields[5].Text = Path.Combine(folder, "out");
+                    All<Button>(d).First(b => b.Text.ToString()!.Contains("Save")).OnClicked();
+                }
+                else
+                {
+                    others.Add(All<Label>(current).Select(l => l.Text.ToString()).FirstOrDefault(t => !string.IsNullOrWhiteSpace(t)) ?? "(dialog)");
+                    Application.RequestStop(current);
+                }
+            };
+
+            var cs = Step("start-up asks, saves and connects", () => Startup.Connect(config, path, existed, forceSetup: false, loadFailed: false),
+                r => r != null ? null : "gave up: " + string.Join(" | ", others));
+            Check("settings screen said what was missing", shownReason.Contains("server"), shownReason);
+            Check("no other prompts on the way", others.Count == 0, string.Join(" | ", others));
+            var saved = ConfigStore.Load(path, out _);
+            Check("server written to the config file", saved.Connection.Server == server, saved.Connection.Server);
+            Check("output folder written and created", saved.OutputFolder == Path.Combine(folder, "out") && Directory.Exists(saved.OutputFolder), saved.OutputFolder);
+            Check("saved config is complete", saved.Missing().Count == 0 && !saved.NeedsSecretPrompt, string.Join(", ", saved.Missing()));
+            Check("the file connects", ConfigStore.Check(saved.BuildConnectionString()) == null);
+            Console.WriteLine();
+            Console.WriteLine(File.ReadAllText(path));
+        }
+        finally
+        {
+            Application.Shutdown();
+            try { Directory.Delete(folder, true); } catch { }
+        }
+        return Finish();
+    }
+
+    private static IEnumerable<T> All<T>(View root) where T : View
+    {
+        foreach (var v in root.Subviews)
+        {
+            if (v is T t) yield return t;
+            foreach (var x in All<T>(v)) yield return x;
+        }
+    }
+
     /// <summary>Builds the main window, every agreement window and every form. Read-only.</summary>
     public static int Ui(AdminDb db)
     {

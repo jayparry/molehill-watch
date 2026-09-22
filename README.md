@@ -31,8 +31,11 @@ For everyday use, **Molehill Manager** is a terminal front end for clients, agre
 
 ```powershell
 cd Admin\MolehillManager
-dotnet run -- -s .\SQLEXPRESS -d MolehillAdmin     # F2 new, Enter to open or act, F6 run billing
+dotnet publish -c Release -r win-x64 -o publish    # one self-contained MolehillManager.exe
+.\publish\MolehillManager.exe                      # first run asks for the server and sign-in, saves them to MolehillManager.config.json
 ```
+
+Passwords are only saved if you ask, and then encrypted for your Windows account (DPAPI).
 
 ### 2. Per client: install Molehill Watch on each covered SQL Server
 

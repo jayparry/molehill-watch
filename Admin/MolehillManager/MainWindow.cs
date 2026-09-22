@@ -9,6 +9,9 @@ public sealed class MainWindow
 {
     private AdminDb _db;
     private readonly Func<AdminDb?>? _reconnect;
+    private readonly string? _configPath;
+    private readonly Func<int>? _autoRefreshMinutes;
+    private int _minutesSinceRefresh;
 
     private TabView _tabs = null!;
     private TabView.Tab _dashTab = null!, _clientsTab = null!, _ticketsTab = null!, _billingTab = null!;
@@ -18,10 +21,12 @@ public sealed class MainWindow
     private RadioGroup _invoiceFilter = null!;
     private Label _status = null!;
 
-    public MainWindow(AdminDb db, Func<AdminDb?>? reconnect = null)
+    public MainWindow(AdminDb db, string? configPath = null, Func<AdminDb?>? reconnect = null, Func<int>? autoRefreshMinutes = null)
     {
         _db = db;
+        _configPath = configPath;
         _reconnect = reconnect;
+        _autoRefreshMinutes = autoRefreshMinutes;
     }
 
     public void Build(Toplevel top)
@@ -30,8 +35,8 @@ public sealed class MainWindow
         {
             new MenuBarItem("_File", new[]
             {
-                new MenuItem("_Connect...", "", Reconnect),
-                new MenuItem("Save dashboard _HTML...", "", () => Ui.Try("Dashboard", () => Ui.Saved("Dashboard", AdminForms.SaveDashboardHtml(_db, AdminForms.DefaultOutputFolder)))),
+                new MenuItem("_Settings...", "", Reconnect),
+                new MenuItem("Save dashboard _HTML...", "", () => Ui.Try("Dashboard", () => Ui.Saved("Dashboard", AdminForms.SaveDashboardHtml(_db, AdminForms.OutputFolder)))),
                 null!,
                 new MenuItem("_Quit", "", () => Application.RequestStop(), null, null, Key.CtrlMask | Key.Q)
             }),
@@ -57,7 +62,8 @@ public sealed class MainWindow
             {
                 new MenuItem("_Keys", "", Keys),
                 new MenuItem("_About", "", () => MessageBox.Query("About",
-                    "Molehill Manager\n\nClients, agreements, tickets and billing for the\nMolehill Watch SQL Server Support Package.\n\nAll the rules live in the MolehillAdmin database;\nthis app is a front end to its procedures.", "Ok"))
+                    "Molehill Manager\n\nClients, agreements, tickets and billing for the\nMolehill Watch SQL Server Support Package.\n\nAll the rules live in the MolehillAdmin database;\nthis app is a front end to its procedures.\n\n"
+                    + $"Settings: {_configPath ?? "(none)"}\nOutput:   {AdminForms.OutputFolder}", "Ok"))
             })
         });
 
@@ -86,6 +92,15 @@ public sealed class MainWindow
 
         top.Add(menu, win, statusBar);
         RefreshAll();
+
+        // auto refresh: checked every minute, so a changed setting takes effect without a restart
+        if (_autoRefreshMinutes != null && Application.MainLoop != null)
+            Application.MainLoop.AddTimeout(TimeSpan.FromMinutes(1), _ =>
+            {
+                var every = _autoRefreshMinutes();
+                if (every > 0 && ++_minutesSinceRefresh >= every) RefreshAll();
+                return true;
+            });
     }
 
     // ------------------------------------------------------------------ tabs
@@ -169,7 +184,9 @@ public sealed class MainWindow
             RefreshTickets();
             RefreshBilling();
             var b = new Microsoft.Data.SqlClient.SqlConnectionStringBuilder(_db.ConnectionString);
-            _status.Text = $" {b.DataSource} / {b.InitialCatalog}   refreshed {DateTime.Now:HH:mm:ss}";
+            _minutesSinceRefresh = 0;
+            _status.Text = $" {b.DataSource} / {b.InitialCatalog}   refreshed {DateTime.Now:HH:mm:ss}"
+                         + (_autoRefreshMinutes?.Invoke() is > 0 and var m ? $" (auto every {m} min)" : "");
         });
     }
 
@@ -282,7 +299,7 @@ public sealed class MainWindow
         var no = Grid.Selected(_invoices, "Invoice");
         if (no == null) return;
         Picker.Actions($"Invoice {no}",
-            ("Save as HTML (and open)", () => Ui.Try("Invoice", () => Ui.Saved("Invoice", AdminForms.SaveInvoiceHtml(_db, no, AdminForms.DefaultOutputFolder)))),
+            ("Save as HTML (and open)", () => Ui.Try("Invoice", () => Ui.Saved("Invoice", AdminForms.SaveInvoiceHtml(_db, no, AdminForms.OutputFolder)))),
             ("Mark sent", () => Ui.Form(AdminForms.SetInvoiceStatus(_db, no, "Sent"), RefreshAll)),
             ("Mark paid", () => Ui.Form(AdminForms.SetInvoiceStatus(_db, no, "Paid"), RefreshAll)),
             ("Add an adjustment or credit (draft only)", () => Ui.Form(AdminForms.AdjustInvoice(_db, no), RefreshAll)),

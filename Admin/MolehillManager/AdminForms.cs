@@ -451,6 +451,6 @@ public static class AdminForms
         return path;
     }
 
-    public static string DefaultOutputFolder =>
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "Molehill", "Invoices");
+    /// <summary>Where invoice and dashboard HTML is saved (OutputFolder in the config file).</summary>
+    public static string OutputFolder { get; set; } = AppConfig.DefaultOutputFolder;
 }

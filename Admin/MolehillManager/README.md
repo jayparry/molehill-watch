@@ -6,18 +6,69 @@ Every change goes through the MolehillAdmin stored procedures, so the rules are 
 
 ## Running it
 
+Run `MolehillManager.exe`. That's all. It's a single self-contained file (about 38 MB) with nothing to install. Build it with:
+
 ```powershell
 cd Admin\MolehillManager
-dotnet run                                   # asks where MolehillAdmin is (remembered; the password never is)
-dotnet run -- -s SQL01 -d MolehillAdmin      # Windows authentication
-dotnet run -- -c "Server=...;Database=MolehillAdmin;..."
+dotnet publish -c Release -r win-x64 -o publish     # -> publish\MolehillManager.exe
 ```
 
-Sign-in can be Windows, SQL login or Entra ID (interactive/MFA). Running from source needs the .NET 8 SDK or newer. To get a single exe that needs nothing installed:
+The first time it runs, it asks where MolehillAdmin is and how to sign in. It tests the connection, then saves the answers to its config file. After that it starts straight into the dashboard. If the file is missing something later (for example you delete a line, or change the sign-in to one that needs a user name), it asks only for that. **File > Settings** changes anything and reconnects.
+
+### The config file: `MolehillManager.config.json`
+
+It's found in this order:
+
+1. `--config <path>`, if given.
+2. Next to `MolehillManager.exe`. This is portable: keep the exe and its settings together, for example on a USB stick or in a synced folder.
+3. `%APPDATA%\MolehillManager\`.
+
+A new file goes next to the exe when that folder is writable, otherwise in `%APPDATA%`. **Help > About** shows which file is in use.
+
+```json
+{
+  "Connection": {
+    "Server": "SQL01\\SQLEXPRESS",
+    "Database": "MolehillAdmin",
+    "Authentication": "SqlLogin",
+    "User": "molehill_admin",
+    "PasswordEncrypted": "AQAAANCMnd8BFdERjHoAwE/Cl+sB...",
+    "SavePassword": true,
+    "Encrypt": "Mandatory",
+    "TrustServerCertificate": true,
+    "ConnectTimeoutSeconds": 15
+  },
+  "OutputFolder": "C:\\Users\\you\\Documents\\Molehill\\Invoices",
+  "AutoRefreshMinutes": 5
+}
+```
+
+| Setting | Values |
+|---|---|
+| `Authentication` | `Windows`, `SqlLogin`, `EntraInteractive` (browser/MFA), `EntraPassword`, `EntraServicePrincipal` (User = client id, password = client secret), `EntraManagedIdentity` (User = client id for a user-assigned identity), `EntraDefault` (az login, environment, managed identity) |
+| `Encrypt` | `Mandatory`, `Optional`, `Strict` |
+| `OutputFolder` | Where invoice and dashboard HTML is saved |
+| `AutoRefreshMinutes` | `0` = only on F5 |
+
+**Passwords and client secrets:**
+
+* **Remember it ticked:** the secret is stored only as `PasswordEncrypted`, encrypted with Windows DPAPI for your Windows account on that machine. Copied to another PC or read by another user, the file gives the password to no one, and the app just asks for it again.
+* **Remember it not ticked:** nothing is stored, and the app asks for the password each time it starts.
+* **Typed in by hand:** you can add `"Password": "..."` in plain text. The app encrypts it and removes the plain text the moment it starts.
+* **Never stored:** Windows and Entra interactive, managed identity and default sign-in don't keep a secret.
+
+Editing the file by hand is fine:
+
+* Comments and trailing commas are allowed.
+* Windows names can be typed with single backslashes (`SQL01\INST`, `D:\Reports`).
+* An unreadable file is kept as `.bak` and the settings screen opens.
 
 ```powershell
-dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o publish
+MolehillManager.exe --setup                  # open the settings screen first
+MolehillManager.exe --config D:\test.json    # a separate file, e.g. for a test copy of MolehillAdmin
 ```
+
+Running from source (`dotnet run`) needs the .NET 8 SDK and keeps its config next to the build output.
 
 ## Screens
 
@@ -74,10 +125,11 @@ Covered from:
 
 ## Self-tests
 
-```powershell
-# read-only: builds every screen, agreement window and form against a MolehillAdmin
-dotnet run -- -c "..." --selftest
+They use the database in the config file, or pass `-c "connection string"` to point one somewhere else.
 
-# writes a test client, instances, tickets and invoices through every form. Use a TEST copy only.
-dotnet run -- -c "..." --selftest-write --allow-writes
+```powershell
+MolehillManager.exe --selftest                      # read-only: every screen, agreement window and form
+MolehillManager.exe --selftest-write --allow-writes # submits every form: a TEST copy of MolehillAdmin only
+MolehillManager.exe --selftest-config               # config file handling and encryption (no database)
+MolehillManager.exe --selftest-setup SQL01          # the first-run settings screen, driven headlessly
 ```

@@ -10,3 +10,7 @@ PatchStatus_*.html
 bin/
 obj/
 publish/
+
+# Molehill Manager settings (server names, encrypted secrets)
+MolehillManager.config.json
+MolehillManager.config.json.bak
