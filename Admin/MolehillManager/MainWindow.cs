@@ -55,8 +55,9 @@ public sealed class MainWindow
             new MenuBarItem("_Clients", new[]
             {
                 new MenuItem("_New client...", "", NewClient),
-                new MenuItem("New _agreement for an existing client...", "", () => Ui.Form(AdminForms.NewAgreement(_db), RefreshAll)),
-                new MenuItem("_Open selected agreement", "", OpenAgreement),
+                new MenuItem("New Molehill Watch _agreement for an existing client...", "", () => Ui.Form(AdminForms.NewAgreement(_db), RefreshAll)),
+                new MenuItem("New _consultancy engagement...", "", () => Ui.Form(AdminForms.NewEngagement(_db), RefreshAll)),
+                new MenuItem("_Open selected", "", OpenSelected),
                 null!,
                 new MenuItem("Schedule a _price change...", "", () => Ui.Form(AdminForms.PriceChange(_db), RefreshAll))
             }),
@@ -68,6 +69,7 @@ public sealed class MainWindow
             new MenuBarItem("_Billing", new[]
             {
                 new MenuItem("_Run billing...", "", () => Ui.Form(AdminForms.RunBilling(_db), RefreshAll)),
+                new MenuItem("_New invoice typed by hand...", "", () => Ui.Form(AdminForms.NewInvoice(_db), RefreshAll)),
                 new MenuItem("_Actions on selected invoice...", "", () => { _tabs.SelectedTab = _billingTab; ShowActions(); })
             }),
             new MenuBarItem("_Help", new[]
@@ -134,12 +136,12 @@ public sealed class MainWindow
     private View BuildClients()
     {
         var view = new View { Width = Dim.Fill(), Height = Dim.Fill() };
-        _showEnded = new CheckBox("Show ended agreements") { X = 1, Y = 0 };
+        _showEnded = new CheckBox("Show finished work") { X = 1, Y = 0 };
         _showEnded.Toggled += _ => RefreshClients();
-        var hint = new Label("Enter: open the agreement (instances, onboarding, contacts, notice...)   F2: new client") { X = 30, Y = 0, ColorScheme = Colors.Menu };
-        var listFrame = new FrameView("Agreements") { X = 0, Y = 1, Width = Dim.Fill(), Height = Dim.Percent(50) };
+        var hint = new Label("Enter: open it (support: instances, contacts, notice; consultancy: days worked)   F2: new") { X = 30, Y = 0, ColorScheme = Colors.Menu };
+        var listFrame = new FrameView("Work") { X = 0, Y = 1, Width = Dim.Fill(), Height = Dim.Percent(50) };
         _agreements = Grid.Make();
-        _agreements.CellActivated += _ => OpenAgreement();
+        _agreements.CellActivated += _ => OpenSelected();
         _agreements.SelectedCellChanged += _ => ShowClientDetail();
         listFrame.Add(_agreements);
         var detailFrame = new FrameView("Details") { X = 0, Y = Pos.Bottom(listFrame), Width = Dim.Fill(), Height = Dim.Fill() };
@@ -207,11 +209,15 @@ public sealed class MainWindow
         var r = _db.Proc("dbo.usp_Dashboard");
         if (r.Tables.Count > 0) Grid.Bind(_alerts, r.Tables[0]);
         var sb = new StringBuilder();
-        if (r.Tables.Count > 3 && r.Tables[3].Rows.Count > 0)
+        // the last result set is the money summary, whatever else the dashboard returns
+        var money = r.Tables.LastOrDefault(t => t.Columns.Contains("MonthlyRecurringRevenue"));
+        if (money is { Rows.Count: > 0 })
         {
-            var m = r.Tables[3].Rows[0];
+            var m = money.Rows[0];
             sb.AppendLine($" Monthly recurring revenue £{m["MonthlyRecurringRevenue"]:N2}     Draft invoices £{m["DraftInvoicesTotal"]:N2}");
             sb.AppendLine($" Sent, unpaid £{m["UnpaidSentTotal"]:N2}     Overdue £{m["OverdueTotal"]:N2}     Paid this year £{m["PaidThisYear"]:N2}");
+            if (m.Table.Columns.Contains("UnbilledConsultancy"))
+                sb.AppendLine($" Consultancy logged but not yet invoiced £{m["UnbilledConsultancy"]:N2}");
         }
         if (r.Tables.Count > 1) sb.AppendLine($" Open tickets: {r.Tables[1].Rows.Count}");
         _money.Text = sb.ToString();
@@ -219,7 +225,7 @@ public sealed class MainWindow
 
     private void RefreshClients()
     {
-        Grid.Bind(_agreements, Queries.Agreements(_db, _showEnded.Checked));
+        Grid.Bind(_agreements, Queries.Engagements(_db, _showEnded.Checked));
         ShowClientDetail();
     }
 
@@ -238,9 +244,14 @@ public sealed class MainWindow
     private void ShowClientDetail()
     {
         var reference = Grid.Selected(_agreements, "Ref");
-        if (reference == null) { _clientDetail.Text = "No agreements yet. F2 (or Clients > New client) adds one."; return; }
-        Ui.Try("Client", () => _clientDetail.Text = AgreementWindow.Summary(_db, reference, includeInstances: true));
+        if (reference == null) { _clientDetail.Text = "Nothing here yet. F2 (or Clients > New client) adds a client."; return; }
+        Ui.Try("Client", () => _clientDetail.Text = IsConsultancy()
+            ? EngagementWindow.Summary(_db, reference, includeWork: true)
+            : AgreementWindow.Summary(_db, reference, includeInstances: true));
     }
+
+    /// <summary>Is the selected row on the Clients tab consultancy work rather than a support agreement?</summary>
+    private bool IsConsultancy() => Grid.Selected(_agreements, "Type") == "Consultancy";
 
     private void ShowTicketDetail()
     {
@@ -267,8 +278,18 @@ public sealed class MainWindow
     {
         if (_tabs.SelectedTab == _ticketsTab) Ui.Form(AdminForms.OpenTicket(_db), RefreshAll);
         else if (_tabs.SelectedTab == _billingTab) Ui.Form(AdminForms.RunBilling(_db), RefreshAll);
+        else if (_tabs.SelectedTab == _clientsTab)
+            Picker.Actions("New", NewItems().ToArray());
         else NewClient();
     }
+
+    /// <summary>What F2 offers on the Clients tab.</summary>
+    private List<(string Label, Action Run)> NewItems() => new()
+    {
+        ("New client (with their Molehill Watch agreement)", NewClient),
+        ("New consultancy engagement", () => Ui.Form(AdminForms.NewEngagement(_db, Grid.Selected(_agreements, "Client")), RefreshAll)),
+        ("New Molehill Watch agreement for an existing client", () => Ui.Form(AdminForms.NewAgreement(_db), RefreshAll))
+    };
 
     /// <summary>F4: the actions for the tab showing and its selected row.</summary>
     private (string Title, List<(string Label, Action Run)> Items) ContextActions()
@@ -285,21 +306,13 @@ public sealed class MainWindow
         if (_tabs.SelectedTab == _billingTab)
         {
             var run = ("Run billing", (Action)(() => Ui.Form(AdminForms.RunBilling(_db), RefreshAll)));
+            var typed = ("New invoice typed by hand", (Action)(() => Ui.Form(AdminForms.NewInvoice(_db), RefreshAll)));
             var no = Grid.Selected(_invoices, "Invoice");
-            if (no == null) return ("Billing", new() { run });
-            return ($"Invoice {no}", new()
-            {
-                ("Save as HTML (and open)", () => Ui.Try("Invoice", () => Ui.Saved("Invoice", AdminForms.SaveInvoiceHtml(_db, no, AdminForms.OutputFolder)))),
-                ("Mark sent", () => Ui.Form(AdminForms.SetInvoiceStatus(_db, no, "Sent"), RefreshAll)),
-                ("Mark paid", () => Ui.Form(AdminForms.SetInvoiceStatus(_db, no, "Paid"), RefreshAll)),
-                ("Add an adjustment or credit (draft only)", () => Ui.Form(AdminForms.AdjustInvoice(_db, no), RefreshAll)),
-                ("Void", () =>
-                {
-                    if (MessageBox.Query("Void", $"Void {no}? Any time it billed becomes billable again.", "Void", "Cancel") == 0)
-                        Ui.Form(AdminForms.SetInvoiceStatus(_db, no, "Void"), RefreshAll);
-                }),
-                run
-            });
+            if (no == null) return ("Billing", new() { run, typed });
+            var list = InvoiceActions.List(_db, no, RefreshAll);
+            list.Add(run);
+            list.Add(typed);
+            return ($"Invoice {no}", list);
         }
         if (_tabs.SelectedTab == _dashTab)
         {
@@ -319,24 +332,38 @@ public sealed class MainWindow
             list.Add(("Save the dashboard as HTML", () => Ui.Try("Dashboard", () => Ui.Saved("Dashboard", AdminForms.SaveDashboardHtml(_db, AdminForms.OutputFolder)))));
             return ("Dashboard", list);
         }
-        // Clients
-        var newClient = ("New client", (Action)NewClient);
-        var agreement = Grid.Selected(_agreements, "Ref");
-        if (agreement == null) return ("Clients", new() { newClient });
+        // Clients: support agreements and consultancy have different actions
+        var reference2 = Grid.Selected(_agreements, "Ref");
+        if (reference2 == null) return ("Clients", NewItems());
         var name = Grid.Selected(_agreements, "Client");
-        return ($"{name} ({agreement})", new()
+        var billing = ($"Run billing for {reference2}", (Action)(() => Ui.Try("Billing", () =>
         {
-            ("Open the agreement (instances, contacts, onboarding, pre-paid hours...)", OpenAgreement),
-            ("Open a ticket", () => Ui.Form(AdminForms.OpenTicket(_db, agreement), RefreshAll)),
-            ("Sell pre-paid hours", () => Ui.Form(AdminForms.SellPrepaid(_db, agreement), RefreshAll)),
-            ("Run billing for this agreement", () => Ui.Try("Billing", () =>
+            var r = _db.Proc("dbo.usp_Billing_Run", ("@Client", reference2));
+            if (r.First is { Rows.Count: 0 }) r.Messages.Add("Nothing new to invoice.");
+            Output.Show("Billing", r);
+            RefreshAll();
+        })));
+
+        if (IsConsultancy())
+            return ($"{name} ({reference2})", new()
             {
-                var r = _db.Proc("dbo.usp_Billing_Run", ("@Client", agreement));
-                if (r.First is { Rows.Count: 0 }) r.Messages.Add("Nothing new to invoice.");
-                Output.Show("Billing", r);
-                RefreshAll();
-            })),
-            newClient
+                ("Open it (days worked, invoices, contacts)", OpenSelected),
+                ("Log work", () => Ui.Form(AdminForms.LogWork(_db, reference2), RefreshAll)),
+                ("Change it (rate, name, PO, dates)", () => Ui.Form(AdminForms.EditEngagement(_db, reference2), RefreshAll)),
+                ("Finished - invoice what is left", () => Ui.Form(AdminForms.CompleteEngagement(_db, reference2), RefreshAll)),
+                ("New invoice typed by hand", () => Ui.Form(AdminForms.NewInvoice(_db, reference2), RefreshAll)),
+                billing,
+                ("New consultancy engagement", () => Ui.Form(AdminForms.NewEngagement(_db, name), RefreshAll))
+            });
+
+        return ($"{name} ({reference2})", new()
+        {
+            ("Open the agreement (instances, contacts, onboarding, pre-paid hours...)", OpenSelected),
+            ("Open a ticket", () => Ui.Form(AdminForms.OpenTicket(_db, reference2), RefreshAll)),
+            ("Sell pre-paid hours", () => Ui.Form(AdminForms.SellPrepaid(_db, reference2), RefreshAll)),
+            ("New consultancy engagement for this client", () => Ui.Form(AdminForms.NewEngagement(_db, name), RefreshAll)),
+            billing,
+            ("New client", NewClient)
         });
     }
 
@@ -367,11 +394,13 @@ public sealed class MainWindow
         RefreshAll();
     }
 
-    private void OpenAgreement()
+    /// <summary>Opens whatever is selected on the Clients tab: the agreement window, or the consultancy one.</summary>
+    private void OpenSelected()
     {
         var reference = Grid.Selected(_agreements, "Ref");
         if (reference == null) return;
-        new AgreementWindow(_db, reference).Run();
+        if (IsConsultancy()) new EngagementWindow(_db, reference).Run();
+        else new AgreementWindow(_db, reference).Run();
         RefreshAll();
     }
 

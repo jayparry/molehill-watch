@@ -92,9 +92,9 @@ Running from source (`dotnet run`) needs the .NET 8 SDK and keeps its config nex
 | Tab | What's there | Enter / F3 |
 |---|---|---|
 | **Dashboard** | The daily to-do list (SLA, onboarding, versions, billing, reviews), plus money totals | Full alert text |
-| **Clients** | Agreements, with status, instances, monthly fee, open tickets and onboarding left | Opens the agreement |
+| **Clients** | Everything being billed: Molehill Watch agreements and consultancy engagements, with status, rate and anything not yet invoiced | Opens the agreement, or the engagement |
 | **Tickets** | Open tickets (or all), with SLA due times and hours logged | Respond, log time, estimate or approve, close |
-| **Billing** | Outstanding or all invoices, with their lines | Save as HTML, mark sent or paid, adjust, void |
+| **Billing** | Outstanding or all invoices, with what each is for and its lines | Save as HTML, mark sent or paid, add or remove a line, adjust, void |
 
 **Agreement window** (Enter on a client):
 
@@ -110,11 +110,19 @@ Running from source (`dotnet run`) needs the .NET 8 SDK and keeps its config nex
   - Adding a removed person again brings them back as the same contact, with a new start date.
 - F4 lists everything else: record the initial review, notice (preview or record), pause or resume support, usage this cycle, project quote, and run billing for this agreement.
 
+**Engagement window** (Enter on consultancy work):
+
+- Tabs for **Days worked**, **Everything logged**, **Invoices** and **Contacts**.
+- F2 logs work: give days (1, 0.5) or hours, and what you did. Everything logged on one date is billed as that day's work, rounded up to the nearest half day.
+- Days worked shows what each day will be charged, or what it was invoiced at if it has already been billed.
+- Everything logged is the raw entries, including non-billable ones; Enter on one corrects or removes it (once invoiced, void the invoice first).
+- F4 also offers: change the rate, PO, dates or put it on hold; mark it finished (which invoices what's left); cancel it; raise an invoice by hand; run billing for it.
+
 ## Keys
 
 | Key | Action |
 |---|---|
-| F2 | New client, ticket or billing run, depending on the tab |
+| F2 | New (on Clients: client, consultancy engagement or another agreement), ticket, or billing run, depending on the tab |
 | F4 / Enter | Actions for the selected row on this tab (on Clients, Enter opens the agreement). In an agreement, F4 also offers the agreement actions. |
 | F5 | Refresh |
 | F6 | Run billing |

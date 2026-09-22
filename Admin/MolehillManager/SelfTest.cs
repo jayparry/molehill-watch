@@ -376,21 +376,31 @@ public static class SelfTest
     private static void RunUi(AdminDb db)
     {
         Step("main window builds and loads every tab", () => { new MainWindow(db).CreateTop(); return 0; });
-        Step("dashboard returns its 4 result sets", () => db.Proc("dbo.usp_Dashboard"), r => r.Tables.Count == 4 ? null : $"{r.Tables.Count} sets");
+        Step("dashboard returns its 5 result sets", () => db.Proc("dbo.usp_Dashboard"), r => r.Tables.Count == 5 ? null : $"{r.Tables.Count} sets");
 
-        var agreements = Queries.Agreements(db, includeEnded: true);
-        Check("agreements query", true, $"{agreements.Rows.Count} agreement(s)");
-        foreach (DataRow a in agreements.Rows)
+        var engagements = Queries.Engagements(db, includeEnded: true);
+        Check("engagements query", true, $"{engagements.Rows.Count} engagement(s)");
+        foreach (DataRow a in engagements.Rows)
         {
             var reference = (string)a["Ref"];
-            Step($"agreement window {reference}", () => new AgreementWindow(db, reference).Build());
-            Step($"summary {reference}", () => AgreementWindow.Summary(db, reference, includeInstances: true), s => s.Contains("not found") ? s : null);
+            if ((string)a["Type"] == "Consultancy")
+            {
+                Step($"engagement window {reference}", () => new EngagementWindow(db, reference).Build());
+                Step($"summary {reference}", () => EngagementWindow.Summary(db, reference, includeWork: true), s => s.Contains("not found") ? s : null);
+            }
+            else
+            {
+                Step($"agreement window {reference}", () => new AgreementWindow(db, reference).Build());
+                Step($"summary {reference}", () => AgreementWindow.Summary(db, reference, includeInstances: true), s => s.Contains("not found") ? s : null);
+            }
         }
 
         // every form builds as a dialog, using real data where the form needs a selection
-        var anyRef = agreements.Rows.Count > 0 ? (string)agreements.Rows[0]["Ref"] : "MWA-0000";
-        var anyClient = agreements.Rows.Count > 0 ? (string)agreements.Rows[0]["Client"] : "Client";
-        var anyInstance = agreements.Rows.Count > 0 ? Queries.InstanceNames(db, anyRef).FirstOrDefault() ?? "SQL01" : "SQL01";
+        var agreements = engagements.Rows.Cast<DataRow>().Where(r => (string)r["Type"] != "Consultancy").ToList();
+        var consultancy = engagements.Rows.Cast<DataRow>().FirstOrDefault(r => (string)r["Type"] == "Consultancy");
+        var anyRef = agreements.Count > 0 ? (string)agreements[0]["Ref"] : "MWA-0000";
+        var anyClient = agreements.Count > 0 ? (string)agreements[0]["Client"] : "Client";
+        var anyInstance = agreements.Count > 0 ? Queries.InstanceNames(db, anyRef).FirstOrDefault() ?? "SQL01" : "SQL01";
         var tickets = Queries.Tickets(db, openOnly: false);
         var anyTicket = tickets.Rows.Count > 0 ? (string)tickets.Rows[0]["Ticket"] : "MW-00001";
         var invoices = Queries.Invoices(db, "All");
@@ -398,6 +408,14 @@ public static class SelfTest
 
         foreach (var spec in AllForms(db, anyRef, anyClient, anyInstance, anyTicket, anyInvoice))
             Step($"form '{spec.Title}' builds", () => { using var d = FormDialog.Create(spec, out _); return 0; });
+
+        if (consultancy != null)
+        {
+            var conRef = (string)consultancy["Ref"];
+            foreach (var spec in new[] { AdminForms.LogWork(db, conRef), AdminForms.EditEngagement(db, conRef),
+                                         AdminForms.CompleteEngagement(db, conRef), AdminForms.CancelEngagement(db, conRef), AdminForms.NewInvoice(db, conRef) })
+                Step($"form '{spec.Title}' builds", () => { using var d = FormDialog.Create(spec, out _); return 0; });
+        }
 
         if (tickets.Rows.Count > 0) Step($"ticket detail {anyTicket}", () => TicketActions.Describe(db, anyTicket));
         if (invoices.Rows.Count > 0) Step($"invoice lines {anyInvoice}", () => Queries.InvoiceLines(db, anyInvoice));
@@ -455,6 +473,19 @@ public static class SelfTest
             Render(agreement);
             sb.AppendLine($"===== agreement: {tab.Text}").AppendLine(Screen());
         }
+        if (Queries.Engagements(db, includeEnded: true).Rows.Cast<DataRow>().FirstOrDefault(r => (string)r["Type"] == "Consultancy") is { } con)
+        {
+            var window = new EngagementWindow(db, (string)con["Ref"]).Build();
+            window.X = 0; window.Y = 0; window.Width = 131; window.Height = 39;
+            var conTabs = FindAll<TabView>(window).First();
+            foreach (var tab in conTabs.Tabs.ToList())
+            {
+                conTabs.SelectedTab = tab;
+                window.Frame = new Rect(0, 0, 131, 39);
+                Render(window);
+                sb.AppendLine($"===== engagement: {tab.Text}").AppendLine(Screen());
+            }
+        }
         foreach (var spec in forms)
         {
             var d = FormDialog.Create(spec, out _);
@@ -494,7 +525,9 @@ public static class SelfTest
         AdminForms.DeleteTimeEntry(db, db.Scalar("SELECT TOP (1) TimeEntryId FROM dbo.TimeEntry ORDER BY TimeEntryId;") is int te2 ? te2 : 0),
         AdminForms.CloseTicket(db, ticket),
         AdminForms.RunBilling(db), AdminForms.AdjustInvoice(db, invoice), AdminForms.SetInvoiceStatus(db, invoice, "Paid"),
-        AdminForms.BusinessDetails(db), AdminForms.SellPrepaid(db, reference)
+        AdminForms.BusinessDetails(db), AdminForms.SellPrepaid(db, reference),
+        AdminForms.NewEngagement(db, client), AdminForms.NewInvoice(db), AdminForms.AddInvoiceLine(db, invoice),
+        AdminForms.RemoveInvoiceLine(db, invoice, 0, "a line")
     }).Concat(db.Scalar("SELECT TOP (1) PackageRef FROM dbo.PrepaidPackage;") is string pk
         ? new[] { AdminForms.UpdatePrepaid(db, pk), AdminForms.CancelPrepaid(db, pk) } : Array.Empty<FormSpec>());
     }
@@ -677,7 +710,7 @@ public static class SelfTest
 
         // billing
         var billed = Step("run billing for the agreement", () => Submit(AdminForms.RunBilling(db),
-                ("Client", Queries.AgreementChoices(db).First(c => Queries.RefFromChoice(c) == reference))),
+                ("Client", Queries.EngagementChoices(db, consultancyOnly: false).First(c => Queries.RefFromChoice(c) == reference))),
             r => r.First is { Rows.Count: > 0 } ? null : "no invoices created");
         var invoice = billed?.First?.Rows[0]["InvoiceNo"] as string ?? "?";
         Step("first invoice charges the first month (instances named during onboarding)", () => Queries.InvoiceLines(db, invoice),
@@ -690,15 +723,15 @@ public static class SelfTest
         Step("usage shows the ticket it went on", () => Queries.PrepaidUsage(db, package),
             t => t.Rows.Count == 1 && (string)t.Rows[0]["Ticket"] == extraRef && (decimal)t.Rows[0]["Hours"] == 1m ? null : $"{t.Rows.Count} rows");
         Step("the out-of-hours time was billed at the out-of-hours rate, not taken from the package", () => db.Query("""
-                SELECT l.Quantity, l.UnitPrice FROM dbo.InvoiceLine l JOIN dbo.Invoice i ON i.InvoiceId = l.InvoiceId
-                JOIN dbo.Agreement a ON a.AgreementId = i.AgreementId WHERE a.AgreementRef = @r AND l.LineType = 'OutOfHours';
+                SELECT l.Quantity, l.UnitPrice FROM dbo.InvoiceLine l JOIN dbo.vw_Invoice i ON i.InvoiceId = l.InvoiceId
+                WHERE i.AgreementRef = @r AND l.LineType = 'OutOfHours';
                 """, ("@r", reference)),
             t => t.Rows.Count == 1 && (decimal)t.Rows[0]["Quantity"] == 1m && (decimal)t.Rows[0]["UnitPrice"] == 115m ? null : $"{t.Rows.Count} OOH lines");
         Step("extend the expiry", () => Submit(AdminForms.UpdatePrepaid(db, package), ("ExpiresOn", D(DateTime.Today.AddYears(2)))));
         ExpectError("cancel a package in use refused", () => Submit(AdminForms.CancelPrepaid(db, package)), "already been used");
         Step("summary shows pre-paid hours left", () => AgreementWindow.Summary(db, reference, false), s => s.Contains("pre-paid hours left: 4") ? null : "not shown");
         Step("billing again creates nothing", () => Submit(AdminForms.RunBilling(db),
-                ("Client", Queries.AgreementChoices(db).First(c => Queries.RefFromChoice(c) == reference))),
+                ("Client", Queries.EngagementChoices(db, consultancyOnly: false).First(c => Queries.RefFromChoice(c) == reference))),
             r => r.First is { Rows.Count: 0 } ? null : $"{r.First?.Rows.Count} more invoice(s)");
         Step("adjustment", () => Submit(AdminForms.AdjustInvoice(db, invoice), ("Description", "Goodwill credit"), ("Amount", "-10")));
         Step("invoice lines include the credit", () => Queries.InvoiceLines(db, invoice),
@@ -712,6 +745,64 @@ public static class SelfTest
         Step("mark paid", () => Submit(AdminForms.SetInvoiceStatus(db, invoice, "Paid")));
         Step("invoice is paid", () => Queries.Invoices(db, "All"), t => t.Rows.Cast<DataRow>().Any(r => (string)r["Invoice"] == invoice && (string)r["Status"] == "Paid") ? null : "not paid");
         ExpectError("adjusting a paid invoice is refused", () => Submit(AdminForms.AdjustInvoice(db, invoice), ("Description", "x"), ("Amount", "1")), "draft");
+
+        // consultancy: a day-rate engagement for the same client, invoiced monthly in arrears
+        var lastMonth = new DateTime(DateTime.Today.Year, DateTime.Today.Month, 1).AddMonths(-1);
+        var conRef = $"CST-{stamp}";
+        Step("new consultancy engagement", () => Submit(AdminForms.NewEngagement(db, name), ("ClientName", name), ("Name", "Warehouse migration"),
+                ("BillingMode", "Day rate"), ("DayRate", "600"), ("StartDate", D(lastMonth)), ("PurchaseOrder", "PO-1234"), ("EngagementRef", conRef)),
+            r => r.First is { Rows.Count: 1 } t && (string)t.Rows[0]["EngagementRef"] == conRef ? null : "engagement not returned");
+        Step("log a full day", () => Submit(AdminForms.LogWork(db, conRef), ("WorkDate", D(lastMonth.AddDays(1))), ("Days", "1"), ("Description", "Discovery")));
+        Step("log three hours the next day", () => Submit(AdminForms.LogWork(db, conRef), ("WorkDate", D(lastMonth.AddDays(2))), ("Hours", "3"), ("Description", "Schema review")));
+        Step("log two hours and three more the day after", () =>
+        {
+            Submit(AdminForms.LogWork(db, conRef), ("WorkDate", D(lastMonth.AddDays(3))), ("Hours", "2"), ("Description", "ETL rewrite"));
+            return Submit(AdminForms.LogWork(db, conRef), ("WorkDate", D(lastMonth.AddDays(3))), ("Hours", "3"), ("Description", "ETL testing"));
+        });
+        Step("three hours bills as half a day; two plus three on one day bills as a whole one", () => Queries.ConsultancyWork(db, conRef),
+            t => t.Rows.Count == 3 && t.Rows.Cast<DataRow>().Sum(r => (decimal)r["Days"]) == 2.5m ? null
+                 : string.Join(", ", t.Rows.Cast<DataRow>().Select(r => $"{Output.Format(r["Date"])} {r["Days"]}")));
+        Step("non-billable work is logged but not charged", () => Submit(AdminForms.LogWork(db, conRef),
+            ("WorkDate", D(lastMonth.AddDays(4))), ("Hours", "1"), ("Description", "Internal write-up"), ("IsBillable", "0")));
+        Step("summary counts 2.5 days waiting to be invoiced", () => EngagementWindow.Summary(db, conRef, includeWork: false),
+            s2 => s2.Contains("2.50 days (£1,500.00) not invoiced") ? null : s2.Split('\n').FirstOrDefault(l => l.Contains("not invoiced")) ?? "no line");
+        var conChoice = Queries.EngagementChoices(db).First(c => Queries.RefFromChoice(c) == conRef);
+        var conBilled = Step("run billing for the engagement", () => Submit(AdminForms.RunBilling(db), ("Client", conChoice)),
+            r => r.First is { Rows.Count: 1 } t && (decimal)t.Rows[0]["Total"] == 1500m ? null
+                 : $"{r.First?.Rows.Count} invoice(s), total {r.First?.Rows.Cast<DataRow>().FirstOrDefault()?["Total"]}");
+        var conInvoice = conBilled?.First?.Rows[0]["InvoiceNo"] as string ?? "?";
+        Step("one line per day worked", () => Queries.InvoiceLines(db, conInvoice),
+            t => t.Rows.Count == 3 && t.Rows.Cast<DataRow>().All(r => (string)r["Type"] == "Consultancy") ? null : $"{t.Rows.Count} lines");
+        Step("the invoice names the engagement and the client's PO", () => AdminForms.SaveInvoiceHtml(db, conInvoice, Path.Combine(Path.GetTempPath(), "MolehillManager-selftest")),
+            p => File.ReadAllText(p) is var h && h.Contains(conRef) && h.Contains("PO-1234") && h.Contains("Warehouse migration") ? null : "engagement not on the invoice");
+        Step("billing again invoices nothing twice", () => Submit(AdminForms.RunBilling(db), ("Client", conChoice)),
+            r => r.First is { Rows.Count: 0 } ? null : $"{r.First?.Rows.Count} more invoice(s)");
+        Step("nothing left unbilled", () => Queries.Engagement(db, conRef)!, r => (decimal)r["UnbilledDays"] == 0m ? null : $"{r["UnbilledDays"]} days");
+        ExpectError("an invoiced engagement cannot be cancelled", () => Submit(AdminForms.CancelEngagement(db, conRef), ("Reason", "Self-test")), "cannot be cancelled");
+        Step("rate change applies to work not yet invoiced", () => Submit(AdminForms.EditEngagement(db, conRef), ("DayRate", "650")));
+        Step("this month's work uses the new rate", () => { Submit(AdminForms.LogWork(db, conRef), ("WorkDate", D(DateTime.Today)), ("Days", "1"), ("Description", "Cutover")); return Queries.Engagement(db, conRef)!; },
+            r => (decimal)r["UnbilledValue"] == 650m ? null : $"£{r["UnbilledValue"]}");
+        Step("this month is not invoiced until the month has ended", () => Submit(AdminForms.RunBilling(db), ("Client", conChoice)),
+            r => r.First is { Rows.Count: 0 } ? null : "invoiced too early");
+
+        // an invoice typed by hand
+        var typed = Step("new invoice typed by hand", () => Submit(AdminForms.NewInvoice(db), ("ClientName", name)),
+            r => r.First is { Rows.Count: 1 } ? null : "no invoice");
+        var typedNo = typed?.First?.Rows[0]["InvoiceNo"] as string ?? "?";
+        Step("add a quantity x price line", () => Submit(AdminForms.AddInvoiceLine(db, typedNo), ("Description", "SQL Server licence"), ("Quantity", "3"), ("UnitPrice", "120")));
+        Step("add a flat amount", () => Submit(AdminForms.AddInvoiceLine(db, typedNo), ("Description", "Courier"), ("Amount", "40")));
+        Step("it totals 400", () => Queries.Invoices(db, "All"),
+            t => t.Rows.Cast<DataRow>().Any(r => (string)r["Invoice"] == typedNo && (decimal)r["Total"] == 400m) ? null : "wrong total");
+        Step("remove the courier line", () =>
+        {
+            var line = Queries.InvoiceLines(db, typedNo).Rows.Cast<DataRow>().First(r => (string)r["Description"] == "Courier");
+            return Submit(AdminForms.RemoveInvoiceLine(db, typedNo, (int)line["Id"], "Courier"));
+        }, r => r.First is { Rows.Count: 1 } t && (decimal)t.Rows[0]["Total"] == 360m ? null : "still there");
+        ExpectError("a line the billing run made cannot be picked off", () =>
+        {
+            var day = Queries.InvoiceLines(db, conInvoice).Rows.Cast<DataRow>().First(r => (string)r["Type"] == "Consultancy");
+            Submit(AdminForms.RemoveInvoiceLine(db, conInvoice, (int)day["Id"], "a day of work"));
+        }, "billing run");
 
         // agreement lifecycle
         Step("pause support", () => Submit(AdminForms.PauseSupport(db, reference, true)));

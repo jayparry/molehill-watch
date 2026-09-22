@@ -29,6 +29,7 @@ public static class AdminForms
         "BusinessHours" => "Business hours", "OutOfHours" => "Out of hours", "ByTimeOfWork" => "By time of work", _ => value ?? ""
     };
     private const string AllClients = "(all clients)";
+    private const string NoEngagement = "(nothing in particular)";
     private const string LatestStandard = "(latest standard price list)";
 
     private static ProcResult Merge(params ProcResult?[] results)
@@ -181,7 +182,11 @@ public static class AdminForms
             ("@StartDate", v.Date("StartDate")))
     };
 
-    private static string Cur(DataRow? row, string col) => row == null || row[col] is DBNull ? "" : row[col].ToString() ?? "";
+    /// <summary>A value from the database as a form field shows it: dates as yyyy-mm-dd, money without trailing zeros.</summary>
+    private static string Cur(DataRow? row, string col) => row == null || row[col] is DBNull ? ""
+        : row[col] is DateTime dt ? (dt.TimeOfDay == TimeSpan.Zero ? dt.ToString("yyyy-MM-dd") : dt.ToString("yyyy-MM-dd HH:mm"))
+        : row[col] is decimal m ? m.ToString("0.##")
+        : row[col].ToString() ?? "";
 
     // ------------------------------------------------------------------ pre-paid hours
 
@@ -631,12 +636,12 @@ public static class AdminForms
     public static FormSpec RunBilling(AdminDb db) => new()
     {
         Title = "Run billing",
-        Intro = "Creates draft invoices: monthly fees in advance for each cycle that has started, and additional hours in arrears " +
-                "for cycles that have ended. Safe to run as often as you like; nothing is invoiced twice.",
+        Intro = "Creates draft invoices: Molehill Watch fees in advance for each cycle that has started, support in arrears for cycles that " +
+                "have ended, and consultancy days for each month that has ended. Safe to run as often as you like; nothing is invoiced twice.",
         Fields =
         {
             Field.Date("AsOfDate", "As of", help: "blank = today"),
-            Field.Choice("Client", "Agreement", new[] { AllClients }.Concat(Queries.AgreementChoices(db)).ToArray())
+            Field.Choice("Client", "For", new[] { AllClients }.Concat(Queries.EngagementChoices(db, consultancyOnly: false)).ToArray())
         },
         Submit = v =>
         {
@@ -645,6 +650,178 @@ public static class AdminForms
             if (r.First is { Rows.Count: 0 }) r.Messages.Add("Nothing new to invoice.");
             return r;
         }
+    };
+
+    // ------------------------------------------------------------------ consultancy engagements
+
+    public static readonly (string Label, string Value)[] BillingModes =
+    {
+        ("Day rate", "DayRate"), ("Hourly", "Hourly"), ("Fixed price", "FixedPrice")
+    };
+    public static readonly (string Label, string? Value)[] Roundings =
+    {
+        ("Standard (half days)", null), ("Half days", "HalfDay"), ("Whole days", "WholeDay"), ("Exact hours", "Exact")
+    };
+
+    /// <summary>A piece of consultancy work for a client: day rate, hourly or fixed price.</summary>
+    public static FormSpec NewEngagement(AdminDb db, string? clientName = null)
+    {
+        var clients = Queries.ClientNames(db);
+        if (clients.Count == 0) clients.Add("");
+        if (clientName != null && clients.Contains(clientName)) clients = clients.OrderBy(c => c == clientName ? 0 : 1).ToList();
+        return new FormSpec
+        {
+            Title = "New consultancy engagement",
+            Intro = "Work for a client that is not Molehill Watch support: a project, a review, advice. Log the days against it as you go, " +
+                    "and the billing run invoices each month once that month has ended. Fixed-price work is invoiced when you mark it finished.",
+            Fields =
+            {
+                Field.Choice("ClientName", "Client", clients.ToArray()),
+                Field.Text("Name", "What is it?", required: true, help: "e.g. Data warehouse migration"),
+                Field.Choice("BillingMode", "Billed as", BillingModes.Select(m => m.Label).ToArray()),
+                Field.Decimal("DayRate", "Day rate (£)", help: "day-rate work"),
+                Field.Decimal("HourlyRate", "Hourly rate (£)", help: "hourly work"),
+                Field.Decimal("FixedPrice", "Fixed price (£)", help: "fixed-price work"),
+                Field.Decimal("OutOfHoursRate", "Out-of-hours rate (£/h)", help: "blank = out-of-hours work is billed at the day rate"),
+                Field.Choice("DayRounding", "Rounding", Roundings.Select(r => r.Label).ToArray()),
+                Field.Date("StartDate", "Starts", def: DateTime.Today.ToString("yyyy-MM-dd")),
+                Field.Date("EndDate", "Expected to end", help: "blank = open ended"),
+                Field.Text("PurchaseOrder", "Client PO", help: "printed on the invoice"),
+                Field.Text("EngagementRef", "Reference", help: "blank = next CON-0000 number"),
+                Field.Memo("Notes", "Notes")
+            },
+            Submit = v => db.Proc("dbo.usp_Engagement_Add",
+                ("@Client", v.Str("ClientName") ?? throw new FormatException("Add a client first.")),
+                ("@Name", v.Str("Name")),
+                ("@BillingMode", BillingModes.First(m => m.Label == v["BillingMode"]).Value),
+                ("@DayRate", v.Dec("DayRate")), ("@HourlyRate", v.Dec("HourlyRate")), ("@FixedPrice", v.Dec("FixedPrice")),
+                ("@OutOfHoursRate", v.Dec("OutOfHoursRate")),
+                ("@DayRounding", Roundings.First(r => r.Label == v["DayRounding"]).Value),
+                ("@StartDate", v.Date("StartDate")), ("@EndDate", v.Date("EndDate")),
+                ("@PurchaseOrder", v.Str("PurchaseOrder")), ("@EngagementRef", v.Str("EngagementRef")), ("@Notes", v.Str("Notes")))
+        };
+    }
+
+    public static FormSpec EditEngagement(AdminDb db, string engagementRef)
+    {
+        var row = Queries.Engagement(db, engagementRef);
+        string Now(string col) => Cur(row, col);
+        return new FormSpec
+        {
+            Title = $"Change {engagementRef}",
+            Intro = "A new rate applies to every day that has not been invoiced yet, including work already logged.",
+            Fields =
+            {
+                Field.Text("Name", "What is it?", def: Now("Name")),
+                Field.Decimal("DayRate", "Day rate (£)", def: Now("DayRate")),
+                Field.Decimal("HourlyRate", "Hourly rate (£)", def: Now("HourlyRate")),
+                Field.Decimal("FixedPrice", "Fixed price (£)", def: Now("FixedPrice")),
+                Field.Decimal("OutOfHoursRate", "Out-of-hours rate (£/h)", def: Now("OutOfHoursRate")),
+                Field.Date("StartDate", "Starts", def: Now("StartDate")),
+                Field.Date("EndDate", "Expected to end", def: Now("EndDate")),
+                Field.Text("PurchaseOrder", "Client PO", def: Now("PurchaseOrder")),
+                Field.Choice("Status", "Status", new[] { "Active", "OnHold" }, def: Now("Status") == "OnHold" ? "OnHold" : "Active"),
+                Field.Memo("Notes", "Notes", def: Now("Notes"))
+            },
+            Submit = v => db.Proc("dbo.usp_Engagement_Update", ("@Engagement", engagementRef), ("@Name", v.Str("Name")),
+                ("@DayRate", v.Dec("DayRate")), ("@HourlyRate", v.Dec("HourlyRate")), ("@FixedPrice", v.Dec("FixedPrice")),
+                ("@OutOfHoursRate", v.Dec("OutOfHoursRate")), ("@StartDate", v.Date("StartDate")), ("@EndDate", v.Date("EndDate")),
+                ("@PurchaseOrder", v.Str("PurchaseOrder")), ("@Status", v.Str("Status")), ("@Notes", v.Str("Notes")))
+        };
+    }
+
+    public static FormSpec CompleteEngagement(AdminDb db, string engagementRef) => new()
+    {
+        Title = $"Finish {engagementRef}",
+        Intro = "Marks the work finished. The next billing run invoices whatever is left - and, for fixed-price work, the agreed price.",
+        Fields = { Field.Date("CompletedOn", "Finished on", help: "blank = today") },
+        Submit = v => db.Proc("dbo.usp_Engagement_Complete", ("@Engagement", engagementRef), ("@CompletedOn", v.Date("CompletedOn")))
+    };
+
+    public static FormSpec CancelEngagement(AdminDb db, string engagementRef) => new()
+    {
+        Title = $"Cancel {engagementRef}",
+        Intro = "For work that never happened. Anything already invoiced stops it being cancelled - finish it instead.",
+        Fields = { Field.Text("Reason", "Reason") },
+        Submit = v => db.Proc("dbo.usp_Engagement_Cancel", ("@Engagement", engagementRef), ("@Reason", v.Str("Reason")))
+    };
+
+    /// <summary>A day (or part of one) worked on a consultancy engagement.</summary>
+    public static FormSpec LogWork(AdminDb db, string engagementRef)
+    {
+        var row = Queries.Engagement(db, engagementRef);
+        var hourly = Cur(row, "BillingMode") == "Hourly";
+        var ooh = row != null && row["OutOfHoursRate"] is decimal;
+        return new FormSpec
+        {
+            Title = $"Log work - {engagementRef}",
+            Intro = hourly ? "Give the hours worked. They are invoiced at the end of the month."
+                           : "Give days (1, 0.5) or the hours worked - hours become days using the rounding set on the engagement. "
+                             + "Everything done on one day counts together as that day's work.",
+            Fields =
+            {
+                Field.Date("WorkDate", "Day", required: true, def: DateTime.Today.ToString("yyyy-MM-dd")),
+                Field.Decimal("Days", "Days", help: hourly ? "or use hours" : "1 = a full day, 0.5 = half a day"),
+                Field.Decimal("Hours", "or hours", help: "whichever is easier"),
+                Field.Text("Description", "What you did", required: true),
+                Field.Choice("RateType", "Rate", ooh ? new[] { "Business hours", "Out of hours" } : new[] { "Business hours" }),
+                Field.Bool("IsBillable", "Billable", def: true, help: "untick for work you are not charging for")
+            },
+            Submit = v => db.Proc("dbo.usp_Work_Log", ("@Engagement", engagementRef), ("@Description", v.Str("Description")),
+                ("@Days", v.Dec("Days")), ("@Hours", v.Dec("Hours")), ("@WorkDate", v.Date("WorkDate")),
+                ("@RateType", v["RateType"] == "Out of hours" ? "OutOfHours" : "BusinessHours"),
+                ("@IsBillable", v.Bool("IsBillable")))
+        };
+    }
+
+    // ------------------------------------------------------------------ invoices typed by hand
+
+    public static FormSpec NewInvoice(AdminDb db, string? engagementRef = null)
+    {
+        var clients = Queries.ClientNames(db);
+        if (clients.Count == 0) clients.Add("");
+        var engagements = new[] { NoEngagement }.Concat(Queries.EngagementChoices(db, consultancyOnly: false)).ToArray();
+        var against = engagementRef == null ? NoEngagement : engagements.FirstOrDefault(e => e.StartsWith(engagementRef + " ")) ?? NoEngagement;
+        return new FormSpec
+        {
+            Title = "New invoice (typed by hand)",
+            Intro = "For anything the billing run does not produce: licences bought for a client, a one-off charge, expenses re-charged. " +
+                    "It starts empty - add the lines to it afterwards.",
+            Fields =
+            {
+                Field.Choice("ClientName", "Client", clients.ToArray()),
+                Field.Date("InvoiceDate", "Invoice date", help: "blank = today"),
+                Field.Choice("Engagement", "Against", engagements, def: against),
+                Field.Text("Notes", "Note on the invoice")
+            },
+            Submit = v => db.Proc("dbo.usp_Invoice_Create", ("@Client", v.Str("ClientName") ?? throw new FormatException("Add a client first.")),
+                ("@InvoiceDate", v.Date("InvoiceDate")),
+                ("@Engagement", v["Engagement"] == NoEngagement ? null : Queries.RefFromChoice(v["Engagement"])),
+                ("@Notes", v.Str("Notes")))
+        };
+    }
+
+    public static FormSpec AddInvoiceLine(AdminDb db, string invoiceNo) => new()
+    {
+        Title = $"Add a line to {invoiceNo}",
+        Intro = "Either an amount on its own, or a quantity and a unit price.",
+        Fields =
+        {
+            Field.Text("Description", "Description", required: true),
+            Field.Decimal("Amount", "Amount (£)", help: "or fill in the two below"),
+            Field.Decimal("Quantity", "Quantity"),
+            Field.Decimal("UnitPrice", "Unit price (£)")
+        },
+        Submit = v => db.Proc("dbo.usp_Invoice_AddLine", ("@InvoiceNo", invoiceNo), ("@Description", v.Str("Description")),
+            ("@Amount", v.Dec("Amount")), ("@Quantity", v.Dec("Quantity")), ("@UnitPrice", v.Dec("UnitPrice")))
+    };
+
+    public static FormSpec RemoveInvoiceLine(AdminDb db, string invoiceNo, int invoiceLineId, string description) => new()
+    {
+        Title = $"Remove a line from {invoiceNo}",
+        Intro = $"Removing: {description}",
+        Fields = { },
+        Submit = _ => db.Proc("dbo.usp_Invoice_RemoveLine", ("@InvoiceLineId", invoiceLineId))
     };
 
     public static FormSpec AdjustInvoice(AdminDb db, string invoiceNo) => new()

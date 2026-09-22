@@ -70,6 +70,46 @@ public static class Ui
     }
 }
 
+/// <summary>The actions on an invoice, shared by the Billing tab and the engagement window.</summary>
+public static class InvoiceActions
+{
+    public static List<(string Label, Action Run)> List(AdminDb db, string invoiceNo, Action refresh)
+    {
+        var draft = db.Scalar("SELECT 1 FROM dbo.Invoice WHERE InvoiceNo = @n AND Status = 'Draft';", ("@n", invoiceNo)) != null;
+        var list = new List<(string, Action)>
+        {
+            ("Save as HTML (and open)", () => Ui.Try("Invoice", () => Ui.Saved("Invoice", AdminForms.SaveInvoiceHtml(db, invoiceNo, AdminForms.OutputFolder)))),
+            ("Mark sent", () => Ui.Form(AdminForms.SetInvoiceStatus(db, invoiceNo, "Sent"), refresh)),
+            ("Mark paid", () => Ui.Form(AdminForms.SetInvoiceStatus(db, invoiceNo, "Paid"), refresh))
+        };
+        if (draft)
+        {
+            list.Add(("Add a line", () => Ui.Form(AdminForms.AddInvoiceLine(db, invoiceNo), refresh)));
+            list.Add(("Remove a line", () => Ui.Try("Invoice", () => RemoveLine(db, invoiceNo, refresh))));
+            list.Add(("Add an adjustment or credit", () => Ui.Form(AdminForms.AdjustInvoice(db, invoiceNo), refresh)));
+        }
+        list.Add(("Void", () =>
+        {
+            if (MessageBox.Query("Void", $"Void {invoiceNo}? Any time it billed becomes billable again.", "Void", "Cancel") == 0)
+                Ui.Form(AdminForms.SetInvoiceStatus(db, invoiceNo, "Void"), refresh);
+        }));
+        return list;
+    }
+
+    /// <summary>Pick a line off a draft invoice and take it away (billing-run lines are refused by the database).</summary>
+    private static void RemoveLine(AdminDb db, string invoiceNo, Action refresh)
+    {
+        var lines = Queries.InvoiceLines(db, invoiceNo);
+        if (lines.Rows.Count == 0) { MessageBox.Query("Invoice", "This invoice has no lines yet.", "Ok"); return; }
+        var labels = lines.Rows.Cast<DataRow>()
+            .Select(r => $"{Output.Format(r["Description"])}  -  {Output.Format(r["Amount"])}").ToList();
+        var chosen = Picker.Choose($"{invoiceNo} - which line?", labels);
+        if (chosen == null) return;
+        var row = lines.Rows[labels.IndexOf(chosen)];
+        Ui.Form(AdminForms.RemoveInvoiceLine(db, invoiceNo, (int)row["Id"], chosen), refresh);
+    }
+}
+
 /// <summary>The actions on a ticket, shared by the Tickets tab and the agreement window.</summary>
 public static class TicketActions
 {

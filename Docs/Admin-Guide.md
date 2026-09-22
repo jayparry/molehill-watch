@@ -1,10 +1,12 @@
 # Molehill Admin – day-to-day guide
 
-All commands run in SSMS against **MolehillAdmin**. Wherever a procedure takes `@Client`, you can pass the **client name** (`N'Contoso Ltd'`) or the **agreement ref** (`'MWA-0001'`).
+All commands run in SSMS against **MolehillAdmin**. Wherever a procedure takes `@Client`, you can pass the **client name** (`N'Contoso Ltd'`), the **agreement ref** (`'MWA-0001'`) or a **consultancy engagement ref** (`'CON-0001'`).
+
+Everything the business invoices belongs to an **engagement**. A Molehill Watch support agreement is one kind, billed on its own cycle; consultancy work is another, billed at an agreed day rate. A client can have any number of both, and each is invoiced separately.
 
 Times are UK local time. Leave date/time parameters out to mean "now".
 
-**Prefer not to type SQL?** Every step below can also be done in **Molehill Manager** (`MolehillManager.exe`; the first run asks for the connection and saves it to `MolehillManager.config.json`). It has tabs for Dashboard, Clients, Tickets and Billing. Press Enter on an agreement for its instances, onboarding, contacts, tickets and weekly reports. F2 adds, and Enter on a row offers what you can do with it. It calls the same procedures shown here, and shows any warnings they print.
+**Prefer not to type SQL?** Every step below can also be done in **Molehill Manager** (`MolehillManager.exe`; the first run asks for the connection and saves it to `MolehillManager.config.json`). It has tabs for Dashboard, Clients, Tickets and Billing. The Clients tab lists support agreements and consultancy side by side: press Enter on a support agreement for its instances, onboarding, contacts, tickets and weekly reports, or on a consultancy engagement for the days worked and its invoices. F2 adds, and Enter on a row offers what you can do with it. It calls the same procedures shown here, and shows any warnings they print.
 
 ---
 
@@ -171,12 +173,41 @@ If a client's Molehill Watch lives in their own DBA database, add `-Database <na
 
 ---
 
+## Consultancy and other work
+
+Work that isn't Molehill Watch support - a migration, a review, a few days of advice - is a **consultancy engagement**. You agree a day rate (or an hourly rate, or a fixed price), log the days as you work, and the billing run invoices each month once that month has ended.
+
+| Step | Command |
+|---|---|
+| Start one | `EXEC dbo.usp_Engagement_Add @Client = N'Contoso Ltd', @Name = N'Data warehouse migration', @DayRate = 650, @PurchaseOrder = N'PO-4471';` |
+| Log a day | `EXEC dbo.usp_Work_Log @Engagement = 'CON-0001', @Days = 1, @Description = N'Discovery workshop';` |
+| Log part of a day | `EXEC dbo.usp_Work_Log @Engagement = 'CON-0001', @Hours = 3, @Description = N'Schema review', @WorkDate = '2026-08-04';` |
+| Log something you won't charge for | `... @Hours = 1, @Description = N'Internal write-up', @IsBillable = 0;` |
+| Where it stands | `EXEC dbo.usp_Engagement_Show @Engagement = 'CON-0001';` |
+| Everything on the go | `EXEC dbo.usp_Engagement_List;` |
+| Change the rate, PO, dates or name | `EXEC dbo.usp_Engagement_Update @Engagement = 'CON-0001', @DayRate = 700;` |
+| Put it on hold | `EXEC dbo.usp_Engagement_Update @Engagement = 'CON-0001', @Status = 'OnHold';` |
+| Finish it (invoices what's left) | `EXEC dbo.usp_Engagement_Complete @Engagement = 'CON-0001';` |
+| Cancel one that never happened | `EXEC dbo.usp_Engagement_Cancel @Engagement = 'CON-0002', @Reason = N'Client pulled the project';` |
+
+**How days are worked out.** A day is 7.5 hours (`DayHours`) and each day worked rounds up to the nearest half day (`DayRateRounding`: `HalfDay`, `WholeDay` or `Exact`; an engagement can override it). Everything logged on the same date counts together, so 2 hours in the morning and 3 in the afternoon is one day, not two half days. Each day worked becomes one invoice line, with what you did on it.
+
+**Rates.** `@DayRate` is the usual arrangement. `@BillingMode = 'Hourly'` with `@HourlyRate` bills by the hour instead. `@BillingMode = 'FixedPrice'` with `@FixedPrice` invoices the agreed price when you mark the work finished - log the days anyway, so you can see what it really cost. `@OutOfHoursRate` is optional: without it, evening and weekend work is billed at the day rate like anything else.
+
+**When it's invoiced.** At the end of each month, for the days logged in that month. Marking the engagement finished invoices the part-month straight away. Nothing is invoiced twice, and voiding a consultancy invoice puts its days back.
+
+A day logged against a support agreement is different: support time belongs to a ticket (`usp_Time_Log`), and `usp_Work_Log` will tell you so.
+
+---
+
 ## Billing
 
-The daily task runs `usp_Billing_Run`. On each client's cycle start date it creates a **draft invoice** containing:
+The daily task runs `usp_Billing_Run`, which covers every engagement: Molehill Watch agreements and consultancy alike. On each client's cycle start date it creates a **draft invoice** containing:
 
 * that cycle's monthly fees (in advance)
 * any chargeable support from earlier cycles (in arrears), with included hours and minimum charges applied
+
+For consultancy engagements it raises a separate draft invoice per engagement for each month that has ended, one line per day worked. Support and consultancy are never mixed on one invoice.
 
 Draft invoices are written to `Documents\Molehill Admin\Invoices\`. Open one in a browser and print it to PDF. A cycle with nothing covered and nothing owed gets no invoice, and the billing run tells you so. That usually means an instance's covered-from date is wrong.
 
@@ -188,6 +219,20 @@ Draft invoices are written to `Documents\Molehill Admin\Invoices\`. Open one in 
 | Mark paid | `EXEC dbo.usp_Invoice_SetStatus @InvoiceNo = 'MDS-2026-0004', @Status = 'Paid';` |
 | Void, so the next billing run rebuilds it | `EXEC dbo.usp_Invoice_SetStatus @InvoiceNo = 'MDS-2026-0004', @Status = 'Void';` |
 | Pause support for late payment | `EXEC dbo.usp_Agreement_PauseSupport @Client = N'Contoso Ltd';` (lifted automatically once paid) |
+
+### Invoices you type yourself
+
+For anything the billing run doesn't produce - licences bought on a client's behalf, a one-off charge, expenses being re-charged - raise an invoice by hand and put the lines on it.
+
+| Step | Command |
+|---|---|
+| Start one | `EXEC dbo.usp_Invoice_Create @Client = N'Contoso Ltd';` (add `@Engagement = 'CON-0001'` to put it against a piece of work) |
+| Add a quantity and price | `EXEC dbo.usp_Invoice_AddLine @InvoiceNo = 'MDS-2026-0009', @Description = N'SQL Server Standard core licence', @Quantity = 4, @UnitPrice = 120;` |
+| Add a flat amount | `EXEC dbo.usp_Invoice_AddLine @InvoiceNo = 'MDS-2026-0009', @Description = N'Travel to site', @Amount = 68.40;` |
+| See it | `EXEC dbo.usp_Invoice_Show @InvoiceNo = 'MDS-2026-0009';` |
+| Take a line off | `EXEC dbo.usp_Invoice_RemoveLine @InvoiceLineId = 42;` |
+
+Lines the billing run produced can't be picked off an invoice - void the invoice, correct the time or the fees, and run billing again.
 
 ### Pre-paid hours (add-on)
 

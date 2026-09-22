@@ -350,6 +350,7 @@ CREATE TABLE dbo.InvoiceLine (
     LineType       varchar(20)   NOT NULL CONSTRAINT CK_InvoiceLine_Type CHECK (LineType IN ('MonthlyFee', 'BusinessHours', 'OutOfHours', 'Project', 'Adjustment', 'Info', 'PrepaidPurchase', 'PrepaidDrawn', 'Consultancy', 'FixedFee', 'Other')),
     BillingCycleId int           NULL,
     WorkDate       date          NULL,          -- consultancy lines: the day the work was done
+    RateType       varchar(20)   NULL,          -- consultancy lines: BusinessHours | OutOfHours
     InstanceId     int           NULL,
     TicketId       int           NULL,
     Description    nvarchar(500) NOT NULL,
@@ -467,6 +468,9 @@ IF COL_LENGTH(N'dbo.Agreement', N'EngagementId') IS NULL
 
 IF COL_LENGTH(N'dbo.InvoiceLine', N'WorkDate') IS NULL
     ALTER TABLE dbo.InvoiceLine ADD WorkDate date NULL;
+
+IF COL_LENGTH(N'dbo.InvoiceLine', N'RateType') IS NULL
+    ALTER TABLE dbo.InvoiceLine ADD RateType varchar(20) NULL;
 
 IF COL_LENGTH(N'dbo.InvoiceLine', N'EngagementId') IS NULL
     ALTER TABLE dbo.InvoiceLine ADD EngagementId int NULL CONSTRAINT FK_InvoiceLine_Engagement REFERENCES dbo.Engagement (EngagementId);
@@ -2590,8 +2594,8 @@ BEGIN
                     BEGIN TRAN;
                     EXEC dbo.usp_Invoice_New @EngagementId = @Eid, @InvoiceDate = @IDate, @InvoiceId = @InvoiceId OUTPUT;
 
-                    INSERT dbo.InvoiceLine (InvoiceId, LineType, EngagementId, WorkDate, Description, Quantity, UnitPrice, Amount)
-                    SELECT @InvoiceId, 'Consultancy', @Eid, w.WorkDate,
+                    INSERT dbo.InvoiceLine (InvoiceId, LineType, EngagementId, WorkDate, RateType, Description, Quantity, UnitPrice, Amount)
+                    SELECT @InvoiceId, 'Consultancy', @Eid, w.WorkDate, w.RateType,
                            CONVERT(nvarchar(11), w.WorkDate, 106) + N' - ' + w.WorkDone
                            + CASE WHEN w.RateType = 'OutOfHours' THEN N' (out of hours)' ELSE N'' END,
                            w.Quantity, w.UnitPrice, CAST(w.Quantity * w.UnitPrice AS decimal(10,2))
@@ -2713,7 +2717,8 @@ BEGIN
     DECLARE @InvoiceId int = (SELECT l.InvoiceId FROM dbo.InvoiceLine l JOIN dbo.Invoice i ON i.InvoiceId = l.InvoiceId
                               WHERE l.InvoiceLineId = @InvoiceLineId AND i.Status = 'Draft');
     IF @InvoiceId IS NULL BEGIN RAISERROR(N'Line %d not found on a draft invoice.', 16, 1, @InvoiceLineId); RETURN; END
-    IF EXISTS (SELECT 1 FROM dbo.InvoiceLine WHERE InvoiceLineId = @InvoiceLineId AND LineType IN ('MonthlyFee', 'BusinessHours', 'OutOfHours', 'PrepaidDrawn', 'PrepaidPurchase'))
+    IF EXISTS (SELECT 1 FROM dbo.InvoiceLine WHERE InvoiceLineId = @InvoiceLineId
+               AND LineType IN ('MonthlyFee', 'BusinessHours', 'OutOfHours', 'PrepaidDrawn', 'PrepaidPurchase', 'Consultancy', 'FixedFee'))
     BEGIN RAISERROR(N'That line was produced by the billing run. Void the invoice instead, correct the time or fees, and run billing again.', 16, 1); RETURN; END
     DELETE dbo.InvoiceLine WHERE InvoiceLineId = @InvoiceLineId;
     EXEC dbo.usp_Invoice_Recalculate @InvoiceId = @InvoiceId;

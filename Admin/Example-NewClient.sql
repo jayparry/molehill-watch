@@ -82,10 +82,22 @@ EXEC dbo.usp_WeeklyReport_Log @Client = @Client, @InstanceName = N'EXSQL01', @Ov
 EXEC dbo.usp_Billing_Run @AsOfDate = '2026-11-01', @Client = @Client;
 EXEC dbo.usp_Agreement_Usage @Client = @Client, @AsOfDate = '2026-11-05';
 
-/* 8. What notice would mean today -----------------------------------------------*/
+/* 8. Consultancy alongside the support agreement ---------------------------------
+   Work that isn't Molehill Watch support: agreed at a day rate, logged as you go,
+   invoiced at the end of each month on its own invoice. */
+EXEC dbo.usp_Engagement_Add @Client = @Client, @Name = N'Data warehouse migration', @DayRate = 650,
+     @StartDate = '2026-10-12', @PurchaseOrder = N'PO-4471';
+DECLARE @Engagement varchar(30) = (SELECT MAX(EngagementRef) FROM dbo.Engagement WHERE EngagementType = 'Consultancy');
+EXEC dbo.usp_Work_Log @Engagement = @Engagement, @Days = 1, @Description = N'Discovery workshop', @WorkDate = '2026-10-13';
+EXEC dbo.usp_Work_Log @Engagement = @Engagement, @Hours = 3, @Description = N'Schema review', @WorkDate = '2026-10-14';
+EXEC dbo.usp_Work_Log @Engagement = @Engagement, @Hours = 2, @Description = N'Load testing', @WorkDate = '2026-10-14';
+EXEC dbo.usp_Engagement_Show @Engagement = @Engagement;
+EXEC dbo.usp_Billing_Run @AsOfDate = '2026-11-01', @Client = @Engagement;
+
+/* 9. What notice would mean today -----------------------------------------------*/
 EXEC dbo.usp_Notice_Give @Client = @Client, @NoticeDate = '2026-12-10', @WhatIf = 1;
 
-/* 9. Dashboard -------------------------------------------------------------------*/
+/* 10. Dashboard ------------------------------------------------------------------*/
 EXEC dbo.usp_Dashboard;
 
 ROLLBACK;   -- change to COMMIT to keep the data
