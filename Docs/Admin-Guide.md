@@ -219,6 +219,8 @@ The dashboard flags packages that are running low (20% or less left), used up (s
 
 **Time logged late.** If you log time for a cycle that has already been invoiced, it goes on a small separate invoice at the next billing run.
 
+**Starting a client's billing again from scratch.** Normally you'd void a wrong invoice (`usp_Invoice_Void`) and re-run billing. If you really need a client to look as though billing has never run - a botched go-live, a test client - run `Admin/Reset-ClientBilling.sql` in SSMS. It removes their invoices, invoice lines and billing cycles, releases their logged time and gives back any pre-paid hours those invoices drew; the client, agreement, instances, contacts, tickets, time entries and packages all stay. It prints what it would remove and ends in `ROLLBACK`, so the first run is a dry run - change that to `COMMIT` once the lists look right. The next billing run rebuilds the same cycles, invoice numbers and totals. It is deliberately a script rather than a button in Molehill Manager.
+
 ---
 
 ## Term, notice and prices
