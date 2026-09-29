@@ -198,3 +198,4 @@ section.tight{padding:54px 0}
 .hp{position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden}
 .contact-split{display:grid;gap:40px 46px;grid-template-columns:minmax(0,.88fr) minmax(0,1.12fr);align-items:start}
 @media (max-width:820px){.contact-split{grid-template-columns:1fr}}
+.site-foot .legal{margin-top:10px;font-size:.82rem;color:#8C8686;max-width:52ch}
