@@ -52,6 +52,15 @@ past that, both services offer a captcha you can turn on.
 **What arrives.** Name, company, e-mail, phone, how many instances, what would help most, the
 message - plus which page it came from, so you know whether they were reading about Molehill Watch.
 
+## Company details in the footer
+
+Both footers carry the line a limited company owes anyone reading its website: registered name,
+where it is registered and the number. The registered office is deliberately not there yet - the
+company is registered at a private address. Strictly, the disclosure rules expect the registered
+office on the site too, so the tidy fix is a service address (an accountant's, or a registered
+office service) at Companies House, and then adding it to the same line. There is a comment in both
+footers showing where it goes.
+
 ## Editing
 
 - Prices live in one place: the tables under `<section id="pricing">` in `molehill-watch.html`.

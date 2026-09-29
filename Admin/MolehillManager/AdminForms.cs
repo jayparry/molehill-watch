@@ -47,8 +47,13 @@ public static class AdminForms
 
     private static readonly (string Name, string Label, bool Memo, string Help)[] BusinessSettings =
     {
-        ("BusinessName", "Business name", false, ""),
-        ("BusinessTradingName", "Trading as", false, "the line under your name on invoices"),
+        ("BusinessName", "Business name", false, "the name at the top of an invoice"),
+        ("BusinessTradingName", "Trading as", false, "only if you trade under another name"),
+        ("BusinessRegisteredName", "Registered name", false, "as at Companies House, e.g. ending Ltd"),
+        ("BusinessCompanyNumber", "Company number", false, "printed in the small print, as a limited company must"),
+        ("BusinessRegisteredIn", "Registered in", false, "England and Wales, Scotland, Northern Ireland"),
+        ("BusinessRegisteredOffice", "Registered office", true, "left blank, nothing is printed"),
+        ("BusinessVatNumber", "VAT number", false, "printed once you are VAT registered"),
         ("BusinessContact", "Contact name", false, "who the client should ask for"),
         ("BusinessEmail", "E-mail", false, ""),
         ("BusinessPhone", "Phone", false, ""),

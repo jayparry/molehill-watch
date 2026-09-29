@@ -1,7 +1,7 @@
 /*
 ===============================================================================
  Molehill Watch - SQL Server Support Package
- Molehill Admin: clients, engagements, tickets, time and billing  Version 2.4.0
+ Molehill Admin: clients, engagements, tickets, time and billing  Version 2.5.0
  Molehill Data Services  -  jay@jayparry.co.uk  -  molehilldataservices.com
 -------------------------------------------------------------------------------
  Runs on YOUR OWN SQL Server (Express is fine), not on client servers.
@@ -569,7 +569,12 @@ FROM (VALUES
     ('BusinessWebsite',     N'molehilldataservices.com',       N'Shown on invoices.'),
     ('BusinessAddress',     N'',                               N'Your postal address for invoices.'),
     ('PaymentDetails',      N'',                               N'Bank / payment details printed on invoices, one per line as "Label: value" (account name, sort code, account number, bank).'),
-    ('BusinessTradingName', N'',                               N'The "trading as" line under your name on invoices.'),
+    ('BusinessTradingName', N'',                               N'A trading name, if you trade under something other than your registered name. Printed under it on invoices.'),
+    ('BusinessRegisteredName', N'',                            N'The registered company name, if it differs from the name at the top of invoices (e.g. the one ending Ltd). Used in the small print.'),
+    ('BusinessCompanyNumber', N'',                             N'Company registration number, printed on invoices as a limited company must.'),
+    ('BusinessRegisteredIn', N'England and Wales',             N'Where the company is registered, for the line on invoices.'),
+    ('BusinessRegisteredOffice', N'',                          N'Registered office address, printed on invoices when set. Nothing is printed while it is blank.'),
+    ('BusinessVatNumber',    N'',                              N'VAT registration number, printed once VatRegistered is 1.'),
     ('BusinessContact',     N'',                               N'Who to ask for - printed with your details on invoices.'),
     ('BusinessPhone',       N'',                               N'Printed with your details on invoices.'),
     ('LogoDataUri',         N'',                               N'Your logo for invoices, as a data: URI. Set it in Molehill Manager (File > Business and invoice details).'),
@@ -3170,6 +3175,25 @@ BEGIN
     DECLARE @Logo nvarchar(max) = NULLIF(dbo.fn_Setting('LogoDataUri'), N'');
     DECLARE @Name nvarchar(200) = dbo.fn_Html(dbo.fn_Setting('BusinessName'));
 
+    /* What a limited company has to say on its invoices: registered name, where it is
+       registered, its number, and the registered office. Each part prints only when it is
+       set - the registered office is never guessed from the postal address, so a home
+       address cannot end up on an invoice by accident. */
+    DECLARE @CoNo nvarchar(60) = NULLIF(LTRIM(RTRIM(dbo.fn_Setting('BusinessCompanyNumber'))), N'');
+    DECLARE @RegOffice nvarchar(500) = NULLIF(LTRIM(RTRIM(dbo.fn_Setting('BusinessRegisteredOffice'))), N'');
+    DECLARE @VatNo nvarchar(60) = NULLIF(LTRIM(RTRIM(dbo.fn_Setting('BusinessVatNumber'))), N'');
+    DECLARE @RegIn nvarchar(100) = ISNULL(NULLIF(dbo.fn_Setting('BusinessRegisteredIn'), N''), N'England and Wales');
+    DECLARE @RegName nvarchar(200) = dbo.fn_Html(ISNULL(NULLIF(LTRIM(RTRIM(dbo.fn_Setting('BusinessRegisteredName'))), N''),
+                                                        dbo.fn_Setting('BusinessName')));
+    -- fn_Html returns '' rather than NULL, so each part is guarded on the setting itself
+    DECLARE @Legal nvarchar(max) =
+          CASE WHEN @CoNo IS NULL THEN N''
+               ELSE @RegName + N' is a company registered in ' + dbo.fn_Html(@RegIn) + N', number ' + dbo.fn_Html(@CoNo) + N'.' END
+        + CASE WHEN @RegOffice IS NULL THEN N''
+               ELSE N' Registered office: ' + dbo.fn_Html(REPLACE(@RegOffice, CHAR(10), N', ')) + N'.' END
+        + CASE WHEN @Vat = 1 AND @VatNo IS NOT NULL THEN N' VAT registration number ' + dbo.fn_Html(@VatNo) + N'.' ELSE N'' END;
+    DECLARE @LegalHtml nvarchar(max) = CASE WHEN @Legal = N'' THEN N'' ELSE N'<div class="legal">' + LTRIM(@Legal) + N'</div>' END;
+
     SELECT @Html = N'<!doctype html><html lang="en-GB"><head><meta charset="utf-8" /><title>Invoice ' + i.InvoiceNo + N'</title><style>
 /* Molehill. dataServices - brand colours: #231F20, #44C8F5, white; titles in Krungthep where it is installed */
 :root{--ink:#231F20;--cyan:#44C8F5;--muted:#6F6A69;--line:#E2DEDD;--tint:#F2FBFE}
@@ -3224,6 +3248,7 @@ h2 .dot{color:var(--cyan)}
 .thanks{margin-top:16px;font-weight:700;color:var(--ink)}
 .thanks:after{content:"";display:block;width:54px;height:3px;background:var(--cyan);margin-top:6px}
 .foot{margin-top:26px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted);font-size:11.5px;display:flex;justify-content:space-between;gap:16px}
+.legal{color:var(--muted);font-size:10.5px;margin-top:8px;line-height:1.45;max-width:78ch}
 @page{size:A4;margin:14mm}
 @media print{body{background:#fff}.sheet{margin:0;padding:0;max-width:none}.pay{break-inside:avoid}table.lines{break-inside:auto}tr{break-inside:avoid}}
 </style></head><body><div class="sheet">
@@ -3296,7 +3321,8 @@ h2 .dot{color:var(--cyan)}
 <div class="foot"><div>' + @Name
   + ISNULL(N' &#183; ' + NULLIF(dbo.fn_Html(REPLACE(dbo.fn_Setting('BusinessAddress'), CHAR(10), N', ')), N''), N'') + N'</div>'
   + N'<div>' + ISNULL(NULLIF(dbo.fn_Html(dbo.fn_Setting('BusinessEmail')), N''), N'')
-  + ISNULL(N' &#183; ' + NULLIF(dbo.fn_Html(dbo.fn_Setting('BusinessWebsite')), N''), N'') + N'</div></div>
+  + ISNULL(N' &#183; ' + NULLIF(dbo.fn_Html(dbo.fn_Setting('BusinessWebsite')), N''), N'') + N'</div></div>'
+  + @LegalHtml + N'
 
 </div></body></html>'
     FROM dbo.Invoice i JOIN dbo.Client c ON c.ClientId = i.ClientId
@@ -3708,6 +3734,6 @@ DECLARE @Logo nvarchar(max) = CONVERT(nvarchar(max), N'data:image/png;base64,') 
 UPDATE dbo.Setting SET Value = @Logo WHERE Name = 'LogoDataUri' AND ISNULL(Value, N'') = N'';
 GO
 
-INSERT dbo.InstallHistory (Version) VALUES ('2.4.0');   -- bump with every schema change: Molehill Manager offers the upgrade
-PRINT N'Molehill Admin 2.4.0 installed.';
+INSERT dbo.InstallHistory (Version) VALUES ('2.5.0');   -- bump with every schema change: Molehill Manager offers the upgrade
+PRINT N'Molehill Admin 2.5.0 installed.';
 GO
