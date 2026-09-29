@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Molehill Watch &#183; SQL Server monitoring and support</title>
+<meta name="description" content="Molehill Watch: monitoring installed on your SQL Servers, a weekly status report and a named DBA to call when something breaks. From GBP 450 per instance per month, three support hours included." />
+<link rel="icon" href="assets/favicon.png" />
+<link rel="stylesheet" href="assets/molehill.css" />
+<meta property="og:title" content="Molehill Watch - SQL Server monitoring and support" />
+<meta property="og:description" content="Someone watching your SQL Servers, without hiring a DBA. Weekly status reports, same-day response for critical issues, from GBP 450 per instance per month." />
+<meta property="og:type" content="website" />
+</head>
+<body>
+
+<header class="site-head">
+  <div class="wrap">
+    <a class="logo" href="index.html" aria-label="Molehill Data Services home">
+      <img src="assets/molehill-logo.png" alt="Molehill. dataServices" />
+    </a>
+    <nav class="nav" aria-label="Main">
+      <a href="index.html#services">Services</a>
+      <a href="molehill-watch.html" aria-current="page">Molehill Watch</a>
+      <a href="#included">What you get</a>
+      <a href="#pricing">Pricing</a>
+      <a href="#start">Get started</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<section class="hero on-dark">
+  <div class="wrap">
+    <img class="mark" src="assets/molehill-logo-dark.png" alt="" />
+    <p class="eyebrow">Molehill Watch &#183; SQL Server support package</p>
+    <h1>Someone watching your SQL Servers. Without hiring a DBA.</h1>
+    <p class="lede">Monitoring installed on your own servers, a status report in your inbox every
+       week, and a named DBA who reads it - and who picks up the phone when something breaks.</p>
+    <div class="facts">
+      <span>From &pound;450 per instance, per month</span>
+      <span>3 support hours included</span>
+      <span>Critical issues: same business day</span>
+    </div>
+    <div class="btn-row">
+      <a class="btn" href="#start">Start a conversation</a>
+      <a class="btn ghost" href="#pricing">See the pricing</a>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="head-block">
+      <div class="rule"></div>
+      <p class="eyebrow">The problem</p>
+      <h2>Most SQL Servers are fine right up until they are not.</h2>
+    </div>
+    <div class="grid two">
+      <div>
+        <p>Backups that have been failing quietly for a month. A CHECKDB nobody has run since the
+           server was built. An Availability Group that would not actually fail over. Disks filling
+           up at a predictable rate that nobody is watching.</p>
+        <p>None of this needs a full-time DBA. It needs somebody competent looking at the right
+           things every week, and being available when something does go wrong.</p>
+        <p><strong>That is all Molehill Watch is.</strong> A monitoring pack that runs on your
+           servers, and me reading what it finds.</p>
+      </div>
+      <div>
+        <div class="callout">
+          <p><strong>What it is not</strong></p>
+          <ul class="ticks" style="grid-template-columns:1fr">
+            <li>Not an agent phoning home - nothing leaves your server unless you set up the report e-mail</li>
+            <li>Not another dashboard for you to check</li>
+            <li>Not a call centre: you get the same DBA every week</li>
+            <li>Not a twelve-month lock-in - three months, then a month's notice</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="included" class="on-shell">
+  <div class="wrap">
+    <div class="head-block">
+      <div class="rule"></div>
+      <p class="eyebrow">What you get</p>
+      <h2>A report every week, and a person the rest of the time.</h2>
+    </div>
+
+    <div class="grid three">
+      <article class="card">
+        <h3>The weekly status report</h3>
+        <p>One page per instance, red / amber / green, with what changed since last week:</p>
+        <ul>
+          <li>Backups: what ran, what did not, and how far back you could actually restore</li>
+          <li>Integrity: CHECKDB results and anything corrupt</li>
+          <li>SQL Agent jobs: failures and jobs that quietly stopped running</li>
+          <li>Error log: what is worth your attention, filtered from what is not</li>
+          <li>Space and growth: databases, drives and where you will run out first</li>
+          <li>Top queries by time and reads, with the worst offenders named</li>
+          <li>Availability Groups: health, synchronisation and failover readiness</li>
+          <li>Blocking and long-running work</li>
+        </ul>
+      </article>
+
+      <article class="card">
+        <h3>A named DBA</h3>
+        <p>The same person, reading the report before you do, and telling you which parts matter.</p>
+        <ul>
+          <li>Three hours of business-hours support included each month</li>
+          <li>Critical issues answered the same business day</li>
+          <li>Everything else within one full business day</li>
+          <li>Work over an hour gets an estimate before it starts - no surprise invoices</li>
+        </ul>
+      </article>
+
+      <article class="card">
+        <h3>Version and patch watch</h3>
+        <p>Quiet risks that only show up when it is too late to do anything about them.</p>
+        <ul>
+          <li>SQL Server and Windows builds against Microsoft's lifecycle</li>
+          <li>Unsupported versions flagged, with the risk written down</li>
+          <li>Patch level compared with what Microsoft has released</li>
+          <li>Availability Group replicas compared for configuration drift</li>
+        </ul>
+      </article>
+    </div>
+
+    <div class="callout">
+      <p><strong>Runs on what you already have.</strong> SQL Server 2012 or later, any edition
+         including Express, on-premises, on a VM or on Azure IaaS. Azure SQL Managed Instance is
+         covered the same way; Azure SQL Database gets a read-only weekly report run from your jump
+         box. Everything installs into an <code>mw</code> schema, so it sits happily inside a DBA
+         database you already have - and uninstalling removes only those objects.</p>
+    </div>
+  </div>
+</section>
+
+<section id="pricing">
+  <div class="wrap">
+    <div class="head-block">
+      <div class="rule"></div>
+      <p class="eyebrow">Pricing</p>
+      <h2>Per instance, per month. No tiers to decode.</h2>
+    </div>
+
+    <div class="table-scroll"><table class="price">
+      <caption>All prices exclude VAT. Invoiced monthly in advance; support is invoiced in arrears. Payment terms 14 days.</caption>
+      <thead>
+        <tr><th scope="col">What is covered</th><th scope="col" class="num">Per month</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>First and second production instance</td><td class="num">&pound;450 each</td></tr>
+        <tr><td>Third production instance onwards</td><td class="num">&pound;375 each</td></tr>
+        <tr><td>Availability Group secondaries and standby instances</td><td class="num">&pound;225 each</td></tr>
+        <tr><td>Non-production instances</td><td class="num">By agreement</td></tr>
+      </tbody>
+    </table></div>
+
+    <div class="grid two" style="margin-top:34px">
+      <div>
+        <h3>Support hours</h3>
+        <div class="table-scroll"><table class="price" style="margin-top:14px">
+          <tbody>
+            <tr><td>Included each month (business hours)</td><td class="num">3 hours</td></tr>
+            <tr><td>Additional business-hours support</td><td class="num">&pound;75 / hour</td></tr>
+            <tr><td>Out of hours, weekends and bank holidays</td><td class="num">&pound;115 / hour</td></tr>
+            <tr><td>Pre-paid blocks of hours</td><td class="num">Reduced rate</td></tr>
+          </tbody>
+        </table></div>
+        <p style="color:var(--muted);font-size:.95rem;margin-top:12px">Business hours are Monday to
+           Friday, 09:00&ndash;17:30 UK time, excluding bank holidays. Included hours do not roll
+           over. Buying a block of hours in advance brings the hourly rate down - useful if you know
+           a busy period is coming.</p>
+      </div>
+      <div>
+        <h3>Terms</h3>
+        <div class="table-scroll"><table class="price" style="margin-top:14px">
+          <tbody>
+            <tr><td>Initial term</td><td class="num">3 months</td></tr>
+            <tr><td>After that</td><td class="num">1 month's notice</td></tr>
+            <tr><td>Price changes</td><td class="num">Once a year, 1 month's notice</td></tr>
+            <tr><td>Payment</td><td class="num">14 days, bank transfer</td></tr>
+          </tbody>
+        </table></div>
+        <p style="color:var(--muted);font-size:.95rem;margin-top:12px">Notice runs to the end of a
+           billing cycle, so you are never paying for cover you have stopped using. The full written
+           agreement comes with the quote - there is nothing in it that is not on this page.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="start" class="on-dark">
+  <div class="wrap">
+    <div class="head-block">
+      <div class="rule"></div>
+      <p class="eyebrow">Getting started</p>
+      <h2>First report inside a week.</h2>
+    </div>
+    <div class="steps">
+      <div class="step">
+        <h3>A call</h3>
+        <p>How many instances, what they run, and what has been going wrong. Half an hour is usually
+           enough to know whether this is a fit.</p>
+      </div>
+      <div class="step">
+        <h3>Quote and agreement</h3>
+        <p>A fixed monthly price for your estate, and the written agreement. Nothing is installed
+           until that is signed.</p>
+      </div>
+      <div class="step">
+        <h3>Onboarding</h3>
+        <p>A short checklist: access to each server, a named contact, and the install - one script
+           per instance, run by you or with me on a call.</p>
+      </div>
+      <div class="step">
+        <h3>The first report</h3>
+        <p>Within a week. The first one usually finds something, and I will tell you what it means
+           and what I would do about it.</p>
+      </div>
+    </div>
+    <div class="btn-row">
+      <a class="btn" href="mailto:jay@jayparry.co.uk?subject=Molehill%20Watch%20enquiry&amp;body=Hello%20James%2C%0A%0AWe%20run%20___%20SQL%20Server%20instances%20and%20would%20like%20to%20talk%20about%20Molehill%20Watch.%0A%0A">Email about Molehill Watch</a>
+      <a class="btn ghost" href="tel:+447552959259">07552 959259</a>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="head-block">
+      <div class="rule"></div>
+      <p class="eyebrow">Questions people ask</p>
+      <h2>Before you send this to your infrastructure team.</h2>
+    </div>
+    <div class="faq">
+      <details>
+        <summary>Does anything leave our network?</summary>
+        <p>No. The collectors write to a database on your own server. The weekly report is built
+           there too. It only leaves if you configure Database Mail to send it - and even then query
+           text is excluded from the e-mail by default. If you would rather nothing was e-mailed at
+           all, reports can be exported to files and picked up from your jump box.</p>
+      </details>
+      <details>
+        <summary>What does it do to server performance?</summary>
+        <p>The collectors are lightweight and run a few times a day as SQL Agent jobs, reading from
+           dynamic management views and system tables rather than running heavy queries. They keep a
+           rolling history in their own schema so the weekly report is a read of data already
+           collected, not a scan of your databases.</p>
+      </details>
+      <details>
+        <summary>What access do you need?</summary>
+        <p>Sysadmin to install (it creates jobs and reads server-level state), then an account that
+           can read health, job and performance data day to day. Remote access to each covered
+           server via your VPN, Azure Bastion or an agreed equivalent, and SSMS or similar on a jump
+           box. It is all written down in the onboarding checklist.</p>
+      </details>
+      <details>
+        <summary>Can it go in our existing DBA database?</summary>
+        <p>Yes. Everything is created in an <code>mw</code> schema, so it never clashes with objects
+           you already have, and the uninstall script removes only that schema and its four Agent
+           jobs. Nothing else on the instance is touched.</p>
+      </details>
+      <details>
+        <summary>We are on Azure SQL - does this still apply?</summary>
+        <p>Azure SQL Managed Instance is covered like any other instance. Azure SQL Database does not
+           have SQL Agent or server-level access, so it gets a read-only weekly report run from your
+           jump box instead, covering the same ground the platform exposes: sizing, storage, index
+           and query health, and failed connections.</p>
+      </details>
+      <details>
+        <summary>What happens when something breaks at 2am?</summary>
+        <p>Out-of-hours work is charged at the out-of-hours rate and is arranged rather than
+           guaranteed - there is no 24/7 on-call built into the standard package. If you need
+           overnight cover for a migration or a month-end, we agree it in writing beforehand.</p>
+      </details>
+      <details>
+        <summary>What if we want to stop?</summary>
+        <p>Three month initial term, then a month's notice ending at the close of a billing cycle.
+           Run the uninstall script and the monitoring is gone. The collected history is yours -
+           I can export it before it goes.</p>
+      </details>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="site-foot">
+  <div class="wrap">
+    <div>
+      <img src="assets/molehill-logo-dark.png" alt="Molehill. dataServices" />
+      <p>James Parry trading as Molehill Data Services<br />SQL Server consultancy, remote-first across the UK</p>
+    </div>
+    <nav aria-label="Footer">
+      <a href="index.html">Services</a>
+      <a href="molehill-watch.html">Molehill Watch</a>
+      <a href="mailto:jay@jayparry.co.uk">jay@jayparry.co.uk</a>
+      <a href="tel:+447552959259">07552 959259</a>
+    </nav>
+  </div>
+</footer>
+
+</body>
+</html>
