@@ -1,7 +1,7 @@
 /*
 ===============================================================================
  Molehill Watch - SQL Server Support Package
- Molehill Admin: clients, engagements, tickets, time and billing  Version 2.5.0
+ Molehill Admin: clients, engagements, tickets, time and billing  Version 2.6.0
  Molehill Data Services  -  jay@jayparry.co.uk  -  molehilldataservices.com
 -------------------------------------------------------------------------------
  Runs on YOUR OWN SQL Server (Express is fine), not on client servers.
@@ -458,6 +458,22 @@ BEGIN
     ALTER TABLE dbo.InvoiceLine ADD CONSTRAINT CK_InvoiceLine_Type
         CHECK (LineType IN ('MonthlyFee', 'BusinessHours', 'OutOfHours', 'Project', 'Adjustment', 'Info', 'PrepaidPurchase', 'PrepaidDrawn', 'Consultancy', 'FixedFee', 'Other'));
 END
+
+-- 2.6.0: invoice numbers only ever go up. The counter remembers the highest number
+-- handed out for a year, so deleting an invoice leaves a gap instead of freeing its number.
+IF OBJECT_ID(N'dbo.InvoiceNumber') IS NULL
+CREATE TABLE dbo.InvoiceNumber (
+    SeriesYear int NOT NULL CONSTRAINT PK_InvoiceNumber PRIMARY KEY,
+    LastNumber int NOT NULL CONSTRAINT CK_InvoiceNumber_Last CHECK (LastNumber >= 0));
+GO
+-- start it from the invoices already there
+INSERT dbo.InvoiceNumber (SeriesYear, LastNumber)
+SELECT YEAR(i.InvoiceDate), MAX(TRY_CONVERT(int, RIGHT(i.InvoiceNo, 4)))
+FROM dbo.Invoice i
+WHERE TRY_CONVERT(int, RIGHT(i.InvoiceNo, 4)) IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM dbo.InvoiceNumber n WHERE n.SeriesYear = YEAR(i.InvoiceDate))
+GROUP BY YEAR(i.InvoiceDate);
+GO
 
 -- 2.4.0: settings hold the logo now, so Value has to be long
 IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.Setting') AND name = N'Value' AND max_length <> -1)
@@ -2203,7 +2219,18 @@ BEGIN
     IF @ClientId IS NULL BEGIN RAISERROR(N'An invoice needs a client or an engagement.', 16, 1); RETURN; END
     DECLARE @Prefix varchar(10) = ISNULL(NULLIF(dbo.fn_Setting('InvoicePrefix'), N''), 'INV');
     DECLARE @Year char(4) = CONVERT(char(4), YEAR(@InvoiceDate));
-    DECLARE @Seq int = ISNULL((SELECT MAX(TRY_CONVERT(int, RIGHT(InvoiceNo, 4))) FROM dbo.Invoice WHERE InvoiceNo LIKE @Prefix + '-' + @Year + '-%'), 0) + 1;
+    DECLARE @Y int = YEAR(@InvoiceDate);
+
+    /* The next number is one past whichever is higher: the highest invoice on file for the
+       year, or the highest ever handed out. Deleting an invoice therefore leaves a gap
+       rather than freeing its number for someone else. */
+    DECLARE @OnFile int = ISNULL((SELECT MAX(TRY_CONVERT(int, RIGHT(InvoiceNo, 4))) FROM dbo.Invoice
+                                  WHERE InvoiceNo LIKE @Prefix + '-' + @Year + '-%'), 0);
+    DECLARE @Issued int = ISNULL((SELECT LastNumber FROM dbo.InvoiceNumber WITH (UPDLOCK, HOLDLOCK) WHERE SeriesYear = @Y), 0);
+    DECLARE @Seq int = CASE WHEN @OnFile > @Issued THEN @OnFile ELSE @Issued END + 1;
+    UPDATE dbo.InvoiceNumber SET LastNumber = @Seq WHERE SeriesYear = @Y;
+    IF @@ROWCOUNT = 0 INSERT dbo.InvoiceNumber (SeriesYear, LastNumber) VALUES (@Y, @Seq);
+
     INSERT dbo.Invoice (InvoiceNo, ClientId, EngagementId, InvoiceDate, DueDate)
     VALUES (@Prefix + '-' + @Year + '-' + RIGHT('0000' + CONVERT(varchar(10), @Seq), 4), @ClientId, @EngagementId, @InvoiceDate,
             DATEADD(day, ISNULL(TRY_CONVERT(int, dbo.fn_Setting('PaymentTermsDays')), 14), @InvoiceDate));
@@ -2858,11 +2885,12 @@ GO
 /*-----------------------------------------------------------------------------
   Invoice numbers run in invoice-date order. A billing run can raise invoices
   in any order (support cycles, then each engagement's periods), so once it has
-  finished, the drafts are renumbered into date order.
+  finished the drafts swap numbers between themselves until they read in date
+  order.
 
-  Anything sent, paid or voided keeps its number for good - those have gone to
-  the client, and a voided number is never handed out again. Drafts take the
-  numbers left over, in date order, so a client's invoices arrive in sequence.
+  Only drafts move, and only into numbers other drafts already hold: nothing
+  sent, paid or voided is touched, no number is invented, and a gap left by a
+  deleted or voided invoice stays a gap for good.
 -----------------------------------------------------------------------------*/
 CREATE OR ALTER PROCEDURE dbo.usp_Invoice_Renumber
     @Year  int = NULL,     -- NULL = every year that has a draft invoice
@@ -2882,24 +2910,21 @@ BEGIN
     WHILE @@FETCH_STATUS = 0
     BEGIN
         DECLARE @Year4 char(4) = CONVERT(char(4), @y);
-        DECLARE @Taken TABLE (Seq int PRIMARY KEY);
-        DELETE @Taken;
-        INSERT @Taken
-        SELECT DISTINCT TRY_CONVERT(int, RIGHT(InvoiceNo, 4)) FROM dbo.Invoice
-        WHERE Status <> 'Draft' AND InvoiceNo LIKE @Prefix + '-' + @Year4 + '-%' AND TRY_CONVERT(int, RIGHT(InvoiceNo, 4)) IS NOT NULL;
-
-        DECLARE @Drafts int = (SELECT COUNT(*) FROM dbo.Invoice WHERE Status = 'Draft' AND YEAR(InvoiceDate) = @y);
-        DECLARE @Need int = @Drafts + (SELECT COUNT(*) FROM @Taken);
 
         IF OBJECT_ID(N'tempdb..#Map') IS NOT NULL DROP TABLE #Map;
-        ;WITH n AS (SELECT TOP (@Need) Seq = ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) FROM sys.all_columns),
-              free AS (SELECT Seq, rn = ROW_NUMBER() OVER (ORDER BY Seq) FROM n WHERE Seq NOT IN (SELECT Seq FROM @Taken)),
-              d AS (SELECT InvoiceId, InvoiceNo, InvoiceDate, rn = ROW_NUMBER() OVER (ORDER BY InvoiceDate, InvoiceId)
-                    FROM dbo.Invoice WHERE Status = 'Draft' AND YEAR(InvoiceDate) = @y)
+        -- the numbers the drafts already hold, dealt back out in date order
+        ;WITH d AS (SELECT InvoiceId, InvoiceNo, InvoiceDate,
+                           Seq = TRY_CONVERT(int, RIGHT(InvoiceNo, 4)),
+                           ByDate = ROW_NUMBER() OVER (ORDER BY InvoiceDate, InvoiceId)
+                    FROM dbo.Invoice
+                    WHERE Status = 'Draft' AND YEAR(InvoiceDate) = @y
+                      AND InvoiceNo LIKE @Prefix + '-' + @Year4 + '-%'
+                      AND TRY_CONVERT(int, RIGHT(InvoiceNo, 4)) IS NOT NULL),
+              pool AS (SELECT Seq, ByNumber = ROW_NUMBER() OVER (ORDER BY Seq) FROM d)
         SELECT d.InvoiceId, OldNo = d.InvoiceNo, d.InvoiceDate,
-               NewNo = @Prefix + '-' + @Year4 + '-' + RIGHT('0000' + CONVERT(varchar(10), f.Seq), 4)
+               NewNo = @Prefix + '-' + @Year4 + '-' + RIGHT('0000' + CONVERT(varchar(10), p.Seq), 4)
         INTO #Map
-        FROM d JOIN free f ON f.rn = d.rn;
+        FROM d JOIN pool p ON p.ByNumber = d.ByDate;
 
         DELETE #Map WHERE OldNo = NewNo;
         IF EXISTS (SELECT 1 FROM #Map)
@@ -3734,6 +3759,6 @@ DECLARE @Logo nvarchar(max) = CONVERT(nvarchar(max), N'data:image/png;base64,') 
 UPDATE dbo.Setting SET Value = @Logo WHERE Name = 'LogoDataUri' AND ISNULL(Value, N'') = N'';
 GO
 
-INSERT dbo.InstallHistory (Version) VALUES ('2.5.0');   -- bump with every schema change: Molehill Manager offers the upgrade
-PRINT N'Molehill Admin 2.5.0 installed.';
+INSERT dbo.InstallHistory (Version) VALUES ('2.6.0');   -- bump with every schema change: Molehill Manager offers the upgrade
+PRINT N'Molehill Admin 2.6.0 installed.';
 GO

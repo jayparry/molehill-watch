@@ -51,9 +51,12 @@ GO
 
 DECLARE @Client nvarchar(200) = N'Example Widgets Ltd';   -- client name, agreement ref or engagement ref
 DECLARE @OnlyThisAgreement bit = 0;   -- 0 = everything the client has; 1 = only the agreement / engagement ref given above
-DECLARE @KeepPackageInvoices bit = 1; -- 1 = keep invoices that sold pre-paid hours (they are sales, not billing runs).
-                                      --     Set to 0 only if you also want those gone: a billing run will NOT raise them
-                                      --     again, so you would have to cancel the package and sell it again.
+DECLARE @KeepPackageInvoices bit = 1; -- 1 = keep an invoice whose ONLY purpose was selling pre-paid hours (a sale, not a
+                                      --     billing run). Where a package shares an invoice with a month's fees, that invoice
+                                      --     goes with the rest and the package is put back in the queue, so the rebuilt
+                                      --     invoice carries it again exactly as before.
+                                      --     Set to 0 to delete package sales too: a billing run only re-raises packages set to
+                                      --     bill "NextCycle", so one sold on its own invoice would have to be sold again.
 DECLARE @KeepTypedInvoices bit = 1;   -- 1 = keep invoices you typed by hand (licences, expenses, one-off charges).
                                       --     The billing run cannot rebuild those either, so 0 deletes them for good.
 
@@ -77,7 +80,11 @@ INSERT @Invoices
 SELECT i.InvoiceId FROM dbo.Invoice i
 WHERE (i.EngagementId IN (SELECT EngagementId FROM @Engagements)
        OR (i.EngagementId IS NULL AND i.ClientId = @ClientId AND @OnlyThisAgreement = 0))
-  AND (@KeepPackageInvoices = 0 OR NOT EXISTS (SELECT 1 FROM dbo.PrepaidPackage p WHERE p.InvoiceId = i.InvoiceId))
+  AND (@KeepPackageInvoices = 0
+       OR NOT EXISTS (SELECT 1 FROM dbo.PrepaidPackage p WHERE p.InvoiceId = i.InvoiceId)
+       -- a package sharing an invoice with billed work is not a pure sale: that invoice is rebuilt
+       OR EXISTS (SELECT 1 FROM dbo.InvoiceLine l WHERE l.InvoiceId = i.InvoiceId
+                  AND l.LineType IN ('MonthlyFee', 'Consultancy', 'FixedFee', 'BusinessHours', 'OutOfHours', 'PrepaidDrawn')))
   AND (@KeepTypedInvoices = 0 OR EXISTS (SELECT 1 FROM dbo.InvoiceLine l WHERE l.InvoiceId = i.InvoiceId
                                          AND l.LineType IN ('MonthlyFee', 'BusinessHours', 'OutOfHours', 'PrepaidDrawn', 'Consultancy', 'FixedFee')));
 
@@ -96,6 +103,10 @@ FROM dbo.TimeEntry e WHERE e.InvoiceId IN (SELECT InvoiceId FROM @Invoices);
 SELECT GivingBack = 'Pre-paid hours', p.PackageRef, Hours = SUM(u.HoursUsed)
 FROM dbo.PrepaidUsage u JOIN dbo.PrepaidPackage p ON p.PackageId = u.PackageId
 WHERE u.InvoiceId IN (SELECT InvoiceId FROM @Invoices) GROUP BY p.PackageRef;
+
+SELECT Requeued = 'Pre-paid hours going back in the queue', p.PackageRef, p.Price, Was_on = i.InvoiceNo
+FROM dbo.PrepaidPackage p JOIN dbo.Invoice i ON i.InvoiceId = p.InvoiceId
+WHERE p.InvoiceId IN (SELECT InvoiceId FROM @Invoices);
 
 SELECT Keeping = 'Invoices the billing run cannot rebuild', i.InvoiceNo, i.InvoiceDate, i.Total, i.Status
 FROM dbo.vw_Invoice i
@@ -121,6 +132,14 @@ UPDATE dbo.BillingCycle SET FeeInvoiceId = NULL WHERE AgreementId IN (SELECT Agr
 DELETE dbo.InvoiceLine WHERE InvoiceId IN (SELECT InvoiceId FROM @Invoices);
 DELETE dbo.Invoice WHERE InvoiceId IN (SELECT InvoiceId FROM @Invoices);
 DELETE dbo.BillingCycle WHERE AgreementId IN (SELECT AgreementId FROM @Agreements);
+
+-- Numbers normally only go up, so removing invoices would otherwise leave a permanent
+-- hole. This is a deliberate clear-down, so wind the counter back to what is left and
+-- the rebuilt invoices take the same numbers again.
+UPDATE n SET LastNumber = ISNULL(x.MaxSeq, 0)
+FROM dbo.InvoiceNumber n
+OUTER APPLY (SELECT MaxSeq = MAX(TRY_CONVERT(int, RIGHT(i.InvoiceNo, 4))) FROM dbo.Invoice i
+             WHERE YEAR(i.InvoiceDate) = n.SeriesYear) x;
 
 /*--------------------------------------------------------------- what's left */
 SELECT Left_Invoices = COUNT(*) FROM dbo.Invoice WHERE ClientId = @ClientId;
