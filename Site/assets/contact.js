@@ -5,7 +5,7 @@
          <form ... data-endpoint="https://formspree.io/f/xxxxxxx">
    If neither is available the form says so and shows the e-mail address instead. */
 (function () {
-  var EMAIL = 'jay@jayparry.co.uk';
+  var EMAIL = 'enquires@molehilldataservices.com';
 
   document.querySelectorAll('form[data-contact]').forEach(function (form) {
     var note = form.querySelector('.form-note');
