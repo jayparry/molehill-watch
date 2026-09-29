@@ -224,17 +224,81 @@
 
 <section class="on-dark" id="contact">
   <div class="wrap">
-    <div class="grid two">
+    <div class="contact-split">
       <div>
         <div class="rule"></div>
         <p class="eyebrow">Get in touch</p>
         <h2>Tell us what your databases are doing.</h2>
-        <p class="lede">Email is usually quickest, and we will tell you honestly whether it is
-           something we can help with.</p>
+        <p class="lede">Send this and we will reply the same working day, usually sooner - and we
+           will tell you honestly whether it is something we can help with.</p>
+        <p class="lede" style="font-size:1rem">No newsletter, no sales sequence. Your details are
+           used to answer you and nothing else.</p>
       </div>
       <div>
-        <ul class="contact-list">
-          <li><span class="k">Email</span>
+        <form class="form" data-contact name="contact" method="POST" data-netlify="true" netlify-honeypot="bot-field" action="/">
+          <input type="hidden" name="form-name" value="contact" />
+          <input type="hidden" name="page" value="Consultancy" />
+          <p class="hp"><label>Leave this empty <input name="bot-field" tabindex="-1" autocomplete="off" /></label></p>
+
+          <div class="row">
+            <div class="field">
+              <label for="c-name">Your name <span class="required" aria-hidden="true">*</span></label>
+              <input id="c-name" name="name" type="text" autocomplete="name" required />
+            </div>
+            <div class="field">
+              <label for="c-company">Company</label>
+              <input id="c-company" name="company" type="text" autocomplete="organization" />
+            </div>
+          </div>
+
+          <div class="row">
+            <div class="field">
+              <label for="c-email">Email <span class="required" aria-hidden="true">*</span></label>
+              <input id="c-email" name="email" type="email" autocomplete="email" required />
+            </div>
+            <div class="field">
+              <label for="c-phone">Phone</label>
+              <input id="c-phone" name="phone" type="tel" autocomplete="tel" />
+            </div>
+          </div>
+
+          <div class="row">
+          <div class="field">
+            <label for="c-instances">SQL Server instances</label>
+            <select id="c-instances" name="instances">
+              <option value="">Not sure yet</option>
+              <option>1 - 2</option>
+              <option>3 - 5</option>
+              <option>6 - 10</option>
+              <option>More than 10</option>
+              <option>Azure SQL only</option>
+            </select>
+          </div>
+            <div class="field">
+              <label for="c-help">What would help most?</label>
+              <select id="c-help" name="help">
+                <option value="">Not sure yet</option>
+                <option>Something is broken or slow</option>
+                <option>Health check or risk review</option>
+                <option>Migration or upgrade</option>
+                <option>HA / DR and failover</option>
+                <option>Ongoing cover (Molehill Watch)</option>
+                <option>Short-term DBA cover</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="c-message">What are your databases doing? <span class="required" aria-hidden="true">*</span></label>
+            <textarea id="c-message" name="message" required placeholder="A sentence or two is plenty - versions, how many servers, and what keeps going wrong."></textarea>
+          </div>
+
+          <button class="btn" type="submit">Send it</button>
+          <p class="form-note" role="status" aria-live="polite"></p>
+        </form>
+
+        <ul class="contact-list" style="margin-top:28px">
+          <li><span class="k">Or email directly</span>
               <a href="mailto:jay@jayparry.co.uk?subject=SQL%20Server%20consultancy%20enquiry">jay@jayparry.co.uk</a></li>
           <li><span class="k">Phone</span>
               <a href="tel:+447552959259">07552 959259</a></li>
@@ -264,5 +328,6 @@
   </div>
 </footer>
 
+<script src="assets/contact.js"></script>
 </body>
 </html>

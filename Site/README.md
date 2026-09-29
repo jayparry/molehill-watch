@@ -22,6 +22,36 @@ Anything that serves static files will do. The cheapest options, in order of eff
 The prospect link is then `molehilldataservices.com/molehill-watch.html` (or set up a redirect from
 `/molehill-watch` to keep it tidy).
 
+## The contact forms
+
+Both pages carry a form: a full one on the home page, a shorter one on the Molehill Watch page
+asking how many instances they run. Neither needs a server of your own - pick one of these:
+
+**Netlify (nothing to configure).** Deploy this folder to Netlify and the forms work as they are.
+Netlify spots `data-netlify="true"`, catches the POST, and submissions appear under
+*Site settings > Forms*, with e-mail notifications you turn on there. The free tier covers 100 a
+month. The two forms are named `contact` and `molehill-watch`, so you can tell them apart.
+
+**Anywhere else (one attribute).** Sign up for a form service - [Formspree](https://formspree.io) and
+[Web3Forms](https://web3forms.com) both have free tiers - and put the endpoint they give you on both
+forms:
+
+```html
+<form class="form" data-contact name="contact" method="POST" data-endpoint="https://formspree.io/f/xxxxxxx" ...>
+```
+
+`assets/contact.js` sends it in the background, so the visitor stays on the page and sees
+"Thank you - that has arrived". If the send fails for any reason, it shows your e-mail address
+instead of losing the enquiry. Without JavaScript the form posts normally and the service shows its
+own thank-you page.
+
+**Spam.** Each form has a hidden field a person never sees; anything that fills it in is dropped
+before it is sent, and Netlify uses the same field for its own filtering. If the bots ever get
+past that, both services offer a captcha you can turn on.
+
+**What arrives.** Name, company, e-mail, phone, how many instances, what would help most, the
+message - plus which page it came from, so you know whether they were reading about Molehill Watch.
+
 ## Editing
 
 - Prices live in one place: the tables under `<section id="pricing">` in `molehill-watch.html`.

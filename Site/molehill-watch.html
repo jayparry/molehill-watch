@@ -224,9 +224,62 @@
            and what we would do about it.</p>
       </div>
     </div>
-    <div class="btn-row">
-      <a class="btn" href="mailto:jay@jayparry.co.uk?subject=Molehill%20Watch%20enquiry&amp;body=Hello%20James%2C%0A%0AWe%20run%20___%20SQL%20Server%20instances%20and%20would%20like%20to%20talk%20about%20Molehill%20Watch.%0A%0A">Email about Molehill Watch</a>
-      <a class="btn ghost" href="tel:+447552959259">07552 959259</a>
+    <div class="contact-split" style="margin-top:44px">
+      <div>
+        <h3 style="font-size:1.3rem;margin-bottom:10px">Ask us about your estate</h3>
+        <p>Tell us roughly what you run and we will come back with what Molehill Watch would cost
+           for it, the same working day. No obligation, and no sales sequence afterwards.</p>
+        <ul class="contact-list" style="margin-top:22px">
+          <li><span class="k">Or email directly</span>
+              <a href="mailto:jay@jayparry.co.uk?subject=Molehill%20Watch%20enquiry">jay@jayparry.co.uk</a></li>
+          <li><span class="k">Phone</span>
+              <a href="tel:+447552959259">07552 959259</a></li>
+        </ul>
+      </div>
+      <div>
+        <form class="form" data-contact name="molehill-watch" method="POST" data-netlify="true" netlify-honeypot="bot-field" action="/">
+          <input type="hidden" name="form-name" value="molehill-watch" />
+          <input type="hidden" name="page" value="Molehill Watch" />
+          <p class="hp"><label>Leave this empty <input name="bot-field" tabindex="-1" autocomplete="off" /></label></p>
+
+          <div class="row">
+            <div class="field">
+              <label for="w-name">Your name <span class="required" aria-hidden="true">*</span></label>
+              <input id="w-name" name="name" type="text" autocomplete="name" required />
+            </div>
+            <div class="field">
+              <label for="w-company">Company</label>
+              <input id="w-company" name="company" type="text" autocomplete="organization" />
+            </div>
+          </div>
+
+          <div class="row">
+            <div class="field">
+              <label for="w-email">Email <span class="required" aria-hidden="true">*</span></label>
+              <input id="w-email" name="email" type="email" autocomplete="email" required />
+            </div>
+          <div class="field">
+            <label for="w-instances">SQL Server instances</label>
+            <select id="w-instances" name="instances">
+              <option value="">Not sure yet</option>
+              <option>1 - 2</option>
+              <option>3 - 5</option>
+              <option>6 - 10</option>
+              <option>More than 10</option>
+              <option>Azure SQL only</option>
+            </select>
+          </div>
+          </div>
+
+          <div class="field">
+            <label for="w-message">Anything we should know? </label>
+            <textarea id="w-message" name="message" placeholder="Versions, whether any of it is in Azure, and what has been going wrong."></textarea>
+          </div>
+
+          <button class="btn" type="submit">Ask about Molehill Watch</button>
+          <p class="form-note" role="status" aria-live="polite"></p>
+        </form>
+      </div>
     </div>
   </div>
 </section>
@@ -307,5 +360,6 @@
   </div>
 </footer>
 
+<script src="assets/contact.js"></script>
 </body>
 </html>
