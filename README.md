@@ -147,6 +147,7 @@ MolehillWatch\
 │  └─ Client-Onboarding-Guide.md            send to the client
 └─ Tools\
    ├─ Get-PatchStatus.ps1                   standalone patch check for any server (no install)
+   ├─ Test-DatabaseStatus.ps1               "is everything back?" after a patch, reboot or restore
    ├─ Test-SqlConnectionString.ps1          tests a list of connection strings (one-shot, no UI)
    ├─ SqlConnectionTester.ps1               the same app in PowerShell, for sites that forbid .exe files
    └─ SqlConnectionTester\                  C# terminal app: build, save and test connection strings
@@ -166,6 +167,23 @@ A single script, separate from Molehill Watch, for a quick "how out of date is t
 * **Compares** against the same Microsoft data as Molehill Watch, using the same rules, and writes an HTML report (`-CsvPath` for CSV too).
 * **Exit code** is 0 (OK), 1 (warnings) or 2 (critical).
 * **No internet on the server?** Run `.\Get-PatchStatus.ps1 -SaveReference patch-reference.json` somewhere with internet, and copy that file next to the script. It's picked up automatically.
+
+## Database status check (`Tools\Test-DatabaseStatus.ps1`)
+
+For straight after a patch, a reboot, a failover or a VM snapshot restore, when the only question is whether every database is back and connectable. It takes seconds, changes nothing, and gives a green line per database or a red one with the reason.
+
+```powershell
+.\Test-DatabaseStatus.ps1                   # asks for the instance
+.\Test-DatabaseStatus.ps1 SQL01\SALES       # press R to run it again while a database recovers
+.\Test-DatabaseStatus.ps1 SQL01 -NonInteractive -CsvPath .\status.csv
+```
+
+* **Every database, system ones included**: state (`RECOVERY_PENDING`, `SUSPECT`, `OFFLINE`, an unfinished `RESTORING`), user access (`SINGLE_USER` and `RESTRICTED_USER` keep applications out), read-only, standby, auto-close, suspect pages recorded in msdb, and Availability Group role, synchronisation state and health.
+* **It actually connects** to each database and runs `SELECT 1`, which is the real proof that something else can. `-Quick` skips that on instances with hundreds of databases.
+* **Instance header**: version and patch level, how long it has been up, and the SQL Server and SQL Agent services - an Agent set to start automatically but sitting stopped is a failure, because nothing will run the jobs or the backups.
+* **Not a health check**: no DBCC CHECKDB, no backup history, nothing that takes minutes. Molehill Watch covers that side.
+* **Exit code** is 0 (all green), 1 (something to check) or 2 (a failure), so it can go in a post-patch script.
+* `-SelfTest` checks the pass/fail rules without needing a server.
 
 ## Connection string tester (`Tools\Test-SqlConnectionString.ps1`)
 
