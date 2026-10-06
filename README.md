@@ -148,6 +148,7 @@ MolehillWatch\
 └─ Tools\
    ├─ Get-PatchStatus.ps1                   standalone patch check for any server (no install)
    ├─ Test-DatabaseStatus.ps1               "is everything back?" after a patch, reboot or restore
+   ├─ Restore-DatabaseCopy.ps1              restores a database to another server, and keeps it rolling forward
    ├─ Test-SqlConnectionString.ps1          tests a list of connection strings (one-shot, no UI)
    ├─ SqlConnectionTester.ps1               the same app in PowerShell, for sites that forbid .exe files
    └─ SqlConnectionTester\                  C# terminal app: build, save and test connection strings
@@ -184,6 +185,32 @@ For straight after a patch, a reboot, a failover or a VM snapshot restore, when 
 * **Not a health check**: no DBCC CHECKDB, no backup history, nothing that takes minutes. Molehill Watch covers that side.
 * **Exit code** is 0 (all green), 1 (something to check) or 2 (a failure), so it can go in a post-patch script.
 * `-SelfTest` checks the pass/fail rules without needing a server.
+
+## Restoring a copy to another server (`Tools\Restore-DatabaseCopy.ps1`)
+
+Two jobs that turn out to be the same script: refreshing a copy of a database onto another server, and moving a large database with minutes of downtime instead of hours. It reads `msdb.dbo.backupset` on the source to work out the chain, runs the RESTOREs on the destination, and installs nothing at either end.
+
+**Refresh**, safe to run on a schedule - it skips the work when that same backup is already restored there:
+
+```powershell
+.\Restore-DatabaseCopy.ps1 -SourceInstance SQL01 -Database Sales -DestinationInstance SQL02
+```
+
+**Log shipping by hand**, for a cutover. Seed the copy whenever suits, catch it up as often as you like, then switch:
+
+```powershell
+.\Restore-DatabaseCopy.ps1 SQL01 Sales SQL02 -KeepRestoring          # Monday: the full, the diff, the logs
+.\Restore-DatabaseCopy.ps1 SQL01 Sales SQL02 -KeepRestoring          # whenever: just the logs since
+.\Restore-DatabaseCopy.ps1 SQL01 Sales SQL02 -Cutover -TailLog       # the ten minutes that matter
+```
+
+* **"Has this already been restored?"** is answered from the backup set's own id (`backup_set_uuid`) against the restore history on the destination, so it holds across servers and reboots rather than guessing from dates.
+* **Catching up** reads how far the copy got from its restore history and applies only what comes next. It walks the chain by taking the backup that reaches furthest forward each time, which copes with copy-only backups and a second job writing its own files. A chain that does not join up is reported, with the LSN where it breaks, instead of failing half way through.
+* **Pre-flight**: the destination can read every file (it will try `\SOURCE\D$\...` by itself, or take a `-BackupPathMap`), the destination is not an older version of SQL Server than the backup, the file paths are not already in use by another database, and the database it is about to overwrite really is a copy of the source - an unrelated database of that name needs `-Force`.
+* **The source is read-only** unless you ask for `-TailLog` or `-DisconnectSource`. Those two ask once, up front, and name exactly what they will do - a tail log leaves the source in a restoring state, which is the point of a cutover but has no undo.
+* `-Standby` leaves the copy readable between log restores, `-StopAt` restores to a point in time, `-WhatIf` prints the exact RESTORE statements and runs nothing, `-SelfTest` checks the chain and statement logic without a server.
+* **Exit code** is 0 (done, or nothing to do), 1 (something to check) or 2 (a failure).
+* On-premises disk backups only. Backup sets written to URL or tape are ignored, and it says so rather than quietly leaving a hole in the chain.
 
 ## Connection string tester (`Tools\Test-SqlConnectionString.ps1`)
 
