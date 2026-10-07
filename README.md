@@ -149,6 +149,7 @@ MolehillWatch\
    ├─ Get-PatchStatus.ps1                   standalone patch check for any server (no install)
    ├─ Test-DatabaseStatus.ps1               "is everything back?" after a patch, reboot or restore
    ├─ Restore-DatabaseCopy.ps1              restores a database to another server, and keeps it rolling forward
+   ├─ Get-SqlLicensingAudit.ps1             what needs licensing across an estate, and the total to cover it
    ├─ Test-SqlConnectionString.ps1          tests a list of connection strings (one-shot, no UI)
    ├─ SqlConnectionTester.ps1               the same app in PowerShell, for sites that forbid .exe files
    └─ SqlConnectionTester\                  C# terminal app: build, save and test connection strings
@@ -185,6 +186,24 @@ For straight after a patch, a reboot, a failover or a VM snapshot restore, when 
 * **Not a health check**: no DBCC CHECKDB, no backup history, nothing that takes minutes. Molehill Watch covers that side.
 * **Exit code** is 0 (all green), 1 (something to check) or 2 (a failure), so it can go in a post-patch script.
 * `-SelfTest` checks the pass/fail rules without needing a server.
+
+## Licensing audit (`Tools\Get-SqlLicensingAudit.ps1`)
+
+Takes a list of instances and produces the number you need before a licensing conversation: every licensable product in the estate, and the total to cover all of it. Read-only, installs nothing.
+
+```powershell
+.\Get-SqlLicensingAudit.ps1 -SqlInstance SQL01, SQL02, 'SQL03\SALES'
+.\Get-SqlLicensingAudit.ps1 -ServerList .\servers.txt -IncludeHostInventory -SoftwareAssurance -Open
+```
+
+* **Counts by OS environment, not by instance.** Several instances on one server share one set of core licences, so instances are grouped by host first. The highest edition on a host licenses its cores and covers the ones below it through downgrade rights.
+* **The rules it applies**: every physical core with a minimum of four per socket; every vCPU with a minimum of four per VM; two-core packs rounded up; Enterprise core-based only from 2012; Standard either core-based or Server + CAL, with both shown.
+* **Free editions are listed and never totalled** - and flagged: Developer in production is the classic audit finding, Evaluation stops after 180 days, and an Express database near 10 GB is about to need a licence.
+* **Passive failover replicas** are counted by default and shown separately as waivable, so you can see the number with and without Software Assurance. An AG secondary that allows reads or takes backups is reported as active, because it is.
+* `-IncludeHostInventory` reads each host's service list over RPC to find Analysis, Reporting and Integration Services. Those need the host licensed and cannot be seen from a SQL connection, so an audit without them undercounts.
+* **Money is optional.** Give `-CorePackPrice`, `-ServerLicencePrice` and `-CalPrice` and it totals cost and compares per core against Server + CAL at your `-UserCount`. Nothing is assumed: no list prices are baked in.
+* Writes the same style of HTML report as the patch check, plus `-CsvPath`. **Exit code** is 0 (nothing to question), 1 (something to look at) or 2 (nothing audited).
+* It counts what the estate needs. Entitlements - Software Assurance, agreement terms, existing packs, CAL counts - are on no server, so this is one half of the sum and your paperwork is the other.
 
 ## Restoring a copy to another server (`Tools\Restore-DatabaseCopy.ps1`)
 
