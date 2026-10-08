@@ -13,6 +13,13 @@
 
       * Licences belong to an OS environment, not to an instance. Several instances on one server
         share one set of core licences, so instances are grouped by host before anything is totted up.
+      * The processor numbers come from the best source available, and the report says which was
+        used. SQL Server 2012 and later report sockets and cores per socket directly. Older versions
+        report only logical CPUs and a hyperthread ratio - which give the socket count, but cannot
+        say whether hyperthreading is on - so Windows is asked instead (one Win32_Processor row per
+        socket, over RPC). If that cannot be reached, the count is inferred on the assumption that
+        hyperthreading is off, which is the higher number and cannot leave you short, and the row
+        says so and offers -HardwareOverride.
       * Physical server: every physical core is licensed, with a minimum of four per socket.
       * Virtual machine: every vCPU is licensed, with a minimum of four per VM.
       * Core licences are sold in two-core packs, so the pack count is rounded up.
@@ -52,6 +59,11 @@
 .PARAMETER SoftwareAssurance
     You have Software Assurance. Passive failover replicas are then taken out of the total instead of
     only being shown separately.
+
+.PARAMETER HardwareOverride
+    The real processor layout for a host, when you have looked it up yourself and want it used instead
+    of anything discovered: @{ 'OLDSQL01' = '4x4'; 'OLDSQL02' = '16' }. '4x4' is four sockets of four
+    cores, '16' is sixteen cores in one socket (or sixteen vCPUs on a VM). This always wins.
 
 .PARAMETER IncludeHostInventory
     Also read the Windows service list on each host (CIM/WMI, needs RPC) to find Analysis Services,
@@ -103,6 +115,7 @@ param(
     [pscredential] $SqlCredential,
     [switch] $SoftwareAssurance,
     [switch] $IncludeHostInventory,
+    [hashtable] $HardwareOverride,
     [int] $UserCount,
     $CorePackPrice,
     [decimal] $ServerLicencePrice,
@@ -205,11 +218,108 @@ function Get-EditionFacts {
 
   Two-core packs, so the pack count rounds up - an odd core count buys one core more than it needs.
 #>
+<#
+  Works out what hardware a host actually has, from the best source available.
+
+  In order of preference: what you told it (-HardwareOverride), what Windows says (one Win32_Processor
+  row per socket, carrying physical and logical core counts), then what SQL Server says.
+
+  SQL Server 2012 and later report socket_count and cores_per_socket directly. Before that there is
+  only cpu_count and hyperthread_ratio, and the one thing those two reliably give is the SOCKET
+  count: cpu_count / hyperthread_ratio. They cannot say whether hyperthreading is on, so they cannot
+  give the physical core count. This assumes it is off, which counts the higher number - the one that
+  cannot leave you short - and says so, with the lower bound in the note.
+#>
+function Get-HardwareFacts {
+    [CmdletBinding()]
+    param(
+        [int] $ReportedSockets, [int] $ReportedCoresPerSocket,
+        [int] $LogicalCpus, [int] $HyperthreadRatio, [bool] $IsVirtual,
+        [int] $WindowsSockets, [int] $WindowsCores, [int] $WindowsLogical,
+        [string] $Override, [string] $HostName = '<host>'
+    )
+
+    $facts = [pscustomobject]@{
+        Sockets = 1; CoresPerSocket = 1; PhysicalCores = 1; LogicalCpus = [Math]::Max($LogicalCpus, 1)
+        Source = 'SQL Server'; Assumed = $false; LowerBoundCores = 0; Note = $null
+    }
+
+    if ($Override) {
+        $parts = ([string]$Override).ToLower().Split('x')
+        $good = $false
+        if ($parts.Count -eq 2 -and $parts[0].Trim() -match '^\d+$' -and $parts[1].Trim() -match '^\d+$') {
+            $facts.Sockets = [Math]::Max([int]$parts[0].Trim(), 1)
+            $facts.CoresPerSocket = [Math]::Max([int]$parts[1].Trim(), 1)
+            $good = $true
+        }
+        elseif ($parts.Count -eq 1 -and $parts[0].Trim() -match '^\d+$') {
+            $facts.Sockets = 1
+            $facts.CoresPerSocket = [Math]::Max([int]$parts[0].Trim(), 1)
+            $good = $true
+        }
+        if ($good) {
+            $facts.PhysicalCores = $facts.Sockets * $facts.CoresPerSocket
+            if ($IsVirtual) { $facts.LogicalCpus = $facts.PhysicalCores }
+            $facts.Source = 'you'
+            return $facts
+        }
+        $facts.Note = "-HardwareOverride '$Override' was not understood, so it was ignored: use '4x8' for four sockets of eight cores, or '16' for sixteen cores in one socket."
+    }
+
+    if ($WindowsCores -gt 0) {
+        $keepNote = $facts.Note
+        $facts.Sockets = [Math]::Max($WindowsSockets, 1)
+        $facts.PhysicalCores = $WindowsCores
+        $facts.CoresPerSocket = [Math]::Max([int][Math]::Round($WindowsCores / [double]$facts.Sockets), 1)
+        if ($WindowsLogical -gt 0) { $facts.LogicalCpus = $WindowsLogical }
+        $facts.Source = 'Windows'
+        $facts.Note = $keepNote
+        return $facts
+    }
+
+    if ($ReportedCoresPerSocket -gt 0) {
+        $facts.CoresPerSocket = $ReportedCoresPerSocket
+        if ($ReportedSockets -gt 0) { $facts.Sockets = $ReportedSockets }
+        else {
+            # Express and LocalDB report no socket count at all, while cores per socket is right
+            $facts.Sockets = 1
+            $facts.Note = 'this instance reports no socket count, so one socket is assumed - check it if the server has more than one processor'
+        }
+        $facts.PhysicalCores = $facts.Sockets * $facts.CoresPerSocket
+        return $facts
+    }
+
+    # Before SQL Server 2012, cpu_count / hyperthread_ratio is the socket count - and nothing here
+    # says whether those logical CPUs are hyperthreaded.
+    $ratio = [Math]::Max($HyperthreadRatio, 1)
+    $logical = [Math]::Max($LogicalCpus, 1)
+    $facts.Sockets = [Math]::Max([int][Math]::Round($logical / [double]$ratio), 1)
+    $facts.CoresPerSocket = [Math]::Max([int][Math]::Round($logical / [double]$facts.Sockets), 1)
+    $facts.PhysicalCores = $facts.Sockets * $facts.CoresPerSocket
+    $facts.Assumed = $true
+    $facts.Source = 'inferred'
+
+    $minimum = $facts.Sockets * 4
+    $upper = [Math]::Max($facts.PhysicalCores, $minimum)
+    $halved = [Math]::Max([int][Math]::Ceiling($facts.PhysicalCores / 2.0), 1)
+    $facts.LowerBoundCores = [Math]::Max($halved, $minimum)
+
+    if ($facts.LowerBoundCores -eq $upper) {
+        $facts.Note = ('this version reports only {0} logical CPUs and a hyperthread ratio of {1}, which is {2} socket(s). Hyperthreading on or off, the four-per-socket minimum makes it {3} core licences either way' -f
+                       $logical, $ratio, $facts.Sockets, $upper)
+    }
+    else {
+        $facts.Note = ('this version reports only {0} logical CPUs and a hyperthread ratio of {1}, which is {2} socket(s). It cannot say whether hyperthreading is on, so {3} physical cores is assumed - with it on this could be as low as {4}. Confirm the physical cores, or pass -HardwareOverride @{{ ''{5}'' = ''{2}x{6}'' }}' -f
+                       $logical, $ratio, $facts.Sockets, $facts.PhysicalCores, $facts.LowerBoundCores, $HostName, $facts.CoresPerSocket)
+    }
+    $facts
+}
+
 function Get-CoreLicences {
     [CmdletBinding()]
     param(
         [int] $Sockets,
-        [int] $CoresPerSocket,
+        [int] $PhysicalCores,
         [int] $LogicalCpus,
         [bool] $IsVirtual
     )
@@ -224,11 +334,10 @@ function Get-CoreLicences {
     }
     else {
         $sockets = [Math]::Max($Sockets, 1)
-        $perSocket = [Math]::Max($CoresPerSocket, 1)
-        $physical = $sockets * $perSocket
+        $physical = [Math]::Max($PhysicalCores, 1)
         $result.Cores = [Math]::Max($physical, $sockets * 4)
-        $result.Basis = '{0} socket{1} x {2} core{3}' -f $sockets, $(if ($sockets -ne 1) { 's' } else { '' }),
-                                                          $perSocket, $(if ($perSocket -ne 1) { 's' } else { '' })
+        $result.Basis = '{0} socket{1}, {2} physical core{3}' -f $sockets, $(if ($sockets -ne 1) { 's' } else { '' }),
+                                                                 $physical, $(if ($physical -ne 1) { 's' } else { '' })
         $result.Minimum = ($physical -lt $sockets * 4)
     }
     $result.Packs = [Math]::Ceiling($result.Cores / 2.0)
@@ -271,7 +380,7 @@ function Get-HostLicence {
         $top = @($Instances | Sort-Object { $_.Facts.Rank } | Select-Object -Last 1)[0]
         $result.FreeOnly = $true
         $result.Edition = $top.Facts.Family
-        $result.Basis = (Get-CoreLicences -Sockets $top.Sockets -CoresPerSocket $top.CoresPerSocket `
+        $result.Basis = (Get-CoreLicences -Sockets $top.Sockets -PhysicalCores $top.PhysicalCores `
                                           -LogicalCpus $top.LogicalCpus -IsVirtual $top.IsVirtual).Basis
         return $result
     }
@@ -287,7 +396,7 @@ function Get-HostLicence {
                     $(if ($lower.Count -ne 1) { 's' } else { '' })))
     }
 
-    $cores = Get-CoreLicences -Sockets $top.Sockets -CoresPerSocket $top.CoresPerSocket `
+    $cores = Get-CoreLicences -Sockets $top.Sockets -PhysicalCores $top.PhysicalCores `
                               -LogicalCpus $top.LogicalCpus -IsVirtual $top.IsVirtual
     $result.Cores = $cores.Cores
     $result.Packs = $cores.Packs
@@ -373,7 +482,7 @@ if ($SelfTest) {
     }
     function Inst([hashtable] $o) {
         $d = @{ Instance = 'SQL01'; Host = 'SQL01'; Edition = 'Standard Edition (64-bit)'; EngineEdition = 2
-                Sockets = 1; CoresPerSocket = 8; LogicalCpus = 16; IsVirtual = $false; LooksPassive = $false }
+                Sockets = 1; CoresPerSocket = 8; PhysicalCores = 8; LogicalCpus = 16; IsVirtual = $false; LooksPassive = $false }
         foreach ($k in $o.Keys) { $d[$k] = $o[$k] }
         $i = [pscustomobject]$d
         $i | Add-Member -NotePropertyName Facts -NotePropertyValue (Get-EditionFacts $i.Edition $i.EngineEdition)
@@ -401,21 +510,72 @@ if ($SelfTest) {
     $f = Get-EditionFacts 'SQL Azure' 5
     Check 'Azure SQL is not licensed this way at all' (-not $f.Licensable -and $f.Family -eq 'Azure')
 
+    Write-Host '  hardware' -ForegroundColor Gray
+    # SQL Server 2012 and later say it outright
+    $h = Get-HardwareFacts -ReportedSockets 2 -ReportedCoresPerSocket 10 -LogicalCpus 40 -HyperthreadRatio 20 -IsVirtual $false
+    Check 'a modern instance is taken at its word' ($h.Sockets -eq 2 -and $h.PhysicalCores -eq 20 -and -not $h.Assumed)
+    Check 'and the source is named' ($h.Source -eq 'SQL Server')
+
+    # the 2008 R2 case: cpu_count / hyperthread_ratio is the SOCKET count, not cores per socket
+    $h = Get-HardwareFacts -ReportedSockets 0 -ReportedCoresPerSocket 0 -LogicalCpus 16 -HyperthreadRatio 4 -IsVirtual $false
+    Check '16 logical CPUs at a ratio of 4 is four sockets, not one' ($h.Sockets -eq 4) "sockets=$($h.Sockets)"
+    Check 'and 16 cores, not 4' ($h.PhysicalCores -eq 16) "cores=$($h.PhysicalCores)"
+    $c = Get-CoreLicences -Sockets $h.Sockets -PhysicalCores $h.PhysicalCores -LogicalCpus 16 -IsVirtual $false
+    Check 'so that server needs 16 core licences in 8 packs' ($c.Cores -eq 16 -and $c.Packs -eq 8) "cores=$($c.Cores) packs=$($c.Packs)"
+    Check 'the guess is admitted to' ($h.Assumed -and $h.Source -eq 'inferred')
+    Check 'and on four sockets the answer holds either way' ($h.LowerBoundCores -eq 16 -and $h.Note -match 'either way')
+
+    # one socket, hyperthreaded: here the answer really does depend on the hardware
+    $h = Get-HardwareFacts -ReportedSockets 0 -ReportedCoresPerSocket 0 -LogicalCpus 16 -HyperthreadRatio 16 -IsVirtual $false
+    Check 'all 16 on one socket is one socket of 16' ($h.Sockets -eq 1 -and $h.PhysicalCores -eq 16)
+    Check 'the lower bound is given when it matters' ($h.LowerBoundCores -eq 8 -and $h.Note -match 'as low as 8')
+    Check 'and it says how to put it right' ($h.Note -match 'HardwareOverride')
+
+    $h = Get-HardwareFacts -ReportedSockets 0 -ReportedCoresPerSocket 0 -LogicalCpus 8 -HyperthreadRatio 8 -IsVirtual $false
+    Check 'an eight way single socket box is 8 cores' ($h.PhysicalCores -eq 8 -and $h.Sockets -eq 1)
+
+    # Windows knows, so Windows wins
+    $h = Get-HardwareFacts -ReportedSockets 0 -ReportedCoresPerSocket 0 -LogicalCpus 16 -HyperthreadRatio 4 `
+                           -WindowsSockets 2 -WindowsCores 8 -WindowsLogical 16 -IsVirtual $false
+    Check 'what Windows reports beats what is inferred' ($h.Sockets -eq 2 -and $h.PhysicalCores -eq 8 -and -not $h.Assumed)
+    Check 'and that source is named too' ($h.Source -eq 'Windows')
+    $h = Get-HardwareFacts -ReportedSockets 1 -ReportedCoresPerSocket 24 -LogicalCpus 48 `
+                           -WindowsSockets 2 -WindowsCores 32 -WindowsLogical 64 -IsVirtual $false
+    Check 'Windows also beats what SQL Server reports' ($h.PhysicalCores -eq 32 -and $h.Source -eq 'Windows')
+
+    # Express and LocalDB report no socket count
+    $h = Get-HardwareFacts -ReportedSockets 0 -ReportedCoresPerSocket 8 -LogicalCpus 4 -HyperthreadRatio 8 -IsVirtual $false
+    Check 'no socket count means one socket of what it did report' ($h.Sockets -eq 1 -and $h.PhysicalCores -eq 8 -and $h.Note -match 'one socket is assumed')
+
+    # you always win
+    $h = Get-HardwareFacts -ReportedSockets 0 -ReportedCoresPerSocket 0 -LogicalCpus 16 -HyperthreadRatio 4 -IsVirtual $false -Override '4x4' -HostName 'OLD01'
+    Check 'an override of 4x4 is four sockets of four' ($h.Sockets -eq 4 -and $h.PhysicalCores -eq 16 -and $h.Source -eq 'you')
+    $h = Get-HardwareFacts -ReportedSockets 0 -ReportedCoresPerSocket 0 -LogicalCpus 16 -HyperthreadRatio 4 -IsVirtual $false -Override '12'
+    Check 'a bare override is one socket of that many' ($h.Sockets -eq 1 -and $h.PhysicalCores -eq 12)
+    $h = Get-HardwareFacts -ReportedSockets 2 -ReportedCoresPerSocket 10 -LogicalCpus 40 -IsVirtual $false -Override '4x4'
+    Check 'an override beats even a modern instance' ($h.PhysicalCores -eq 16 -and $h.Source -eq 'you')
+    $h = Get-HardwareFacts -ReportedSockets 2 -ReportedCoresPerSocket 10 -LogicalCpus 40 -IsVirtual $false -Override 'lots'
+    Check 'nonsense in the override is ignored and said out loud' ($h.PhysicalCores -eq 20 -and $h.Note -match 'not understood')
+    $h = Get-HardwareFacts -ReportedSockets 0 -ReportedCoresPerSocket 0 -LogicalCpus 2 -HyperthreadRatio 2 -IsVirtual $true -Override '8'
+    Check 'an override on a VM sets its vCPUs' ($h.LogicalCpus -eq 8)
+
     Write-Host '  cores' -ForegroundColor Gray
-    $c = Get-CoreLicences -Sockets 2 -CoresPerSocket 8 -LogicalCpus 32 -IsVirtual $false
+    $c = Get-CoreLicences -Sockets 2 -PhysicalCores 16 -LogicalCpus 32 -IsVirtual $false
     Check 'a two by eight physical box is 16 cores, 8 packs' ($c.Cores -eq 16 -and $c.Packs -eq 8)
     Check 'and hyperthreading does not change it' ($c.Cores -eq 16)
-    $c = Get-CoreLicences -Sockets 2 -CoresPerSocket 2 -LogicalCpus 8 -IsVirtual $false
+    $c = Get-CoreLicences -Sockets 2 -PhysicalCores 4 -LogicalCpus 8 -IsVirtual $false
     Check 'four physical cores over two sockets still needs 8 (minimum per socket)' ($c.Cores -eq 8 -and $c.Minimum)
-    $c = Get-CoreLicences -Sockets 1 -CoresPerSocket 1 -LogicalCpus 2 -IsVirtual $false
+    $c = Get-CoreLicences -Sockets 4 -PhysicalCores 8 -LogicalCpus 16 -IsVirtual $false
+    Check 'eight cores over four sockets needs 16 (the minimum four times)' ($c.Cores -eq 16 -and $c.Packs -eq 8)
+    $c = Get-CoreLicences -Sockets 1 -PhysicalCores 1 -LogicalCpus 2 -IsVirtual $false
     Check 'a single core box pays the minimum four' ($c.Cores -eq 4 -and $c.Packs -eq 2)
-    $c = Get-CoreLicences -Sockets 1 -CoresPerSocket 9 -LogicalCpus 18 -IsVirtual $false
+    $c = Get-CoreLicences -Sockets 1 -PhysicalCores 9 -LogicalCpus 18 -IsVirtual $false
     Check 'nine cores needs nine licences, bought as five packs' ($c.Cores -eq 9 -and $c.Packs -eq 5)
-    $c = Get-CoreLicences -Sockets 1 -CoresPerSocket 4 -LogicalCpus 8 -IsVirtual $true
+    $c = Get-CoreLicences -Sockets 1 -PhysicalCores 4 -LogicalCpus 8 -IsVirtual $true
     Check 'a VM is licensed on vCPUs, not the hardware underneath' ($c.Cores -eq 8 -and $c.Basis -eq '8 vCPU')
-    $c = Get-CoreLicences -Sockets 1 -CoresPerSocket 2 -LogicalCpus 2 -IsVirtual $true
+    $c = Get-CoreLicences -Sockets 1 -PhysicalCores 2 -LogicalCpus 2 -IsVirtual $true
     Check 'a two vCPU VM pays the minimum four' ($c.Cores -eq 4 -and $c.Minimum)
-    $c = Get-CoreLicences -Sockets 1 -CoresPerSocket 7 -LogicalCpus 7 -IsVirtual $true
+    $c = Get-CoreLicences -Sockets 1 -PhysicalCores 7 -LogicalCpus 7 -IsVirtual $true
     Check 'seven vCPUs is seven licences in four packs' ($c.Cores -eq 7 -and $c.Packs -eq 4)
 
     Write-Host '  versions' -ForegroundColor Gray
@@ -442,7 +602,7 @@ if ($SelfTest) {
     Check 'with Software Assurance it drops out of the total' ($h.Packs -eq 0 -and $h.Waived -eq 4)
     $h = Get-HostLicence -Instances @((Inst @{ LooksPassive = $true }), (Inst @{ LooksPassive = $false })) -SoftwareAssurance
     Check 'a host with one active instance is not passive' ($h.Packs -eq 4 -and -not $h.Passive)
-    $h = Get-HostLicence -Instances @((Inst @{ Sockets = 2; CoresPerSocket = 16; LogicalCpus = 64 }))
+    $h = Get-HostLicence -Instances @((Inst @{ Sockets = 2; CoresPerSocket = 16; PhysicalCores = 32; LogicalCpus = 64 }))
     Check 'Standard on a 32 core box is called out as waste' (($h.Notes -join ' ') -match 'can only use 24')
 
     $o = Get-ServerCalOption -Instances @((Inst @{}))
@@ -462,11 +622,11 @@ if ($SelfTest) {
             IsVirtual = $Instances[0].IsVirtual
         }
     }
-    $ee  = Inst @{ Host = 'A'; Edition = 'Enterprise Edition: Core-based Licensing (64-bit)'; EngineEdition = 3; Sockets = 2; CoresPerSocket = 8; LogicalCpus = 32; Product = 'SQL Server 2022' }
-    $st  = Inst @{ Host = 'B'; IsVirtual = $true; LogicalCpus = 4; Product = 'SQL Server 2022' }
-    $pas = Inst @{ Host = 'C'; IsVirtual = $true; LogicalCpus = 4; LooksPassive = $true; Product = 'SQL Server 2022' }
+    $ee  = Inst @{ Host = 'A'; Edition = 'Enterprise Edition: Core-based Licensing (64-bit)'; EngineEdition = 3; Sockets = 2; CoresPerSocket = 8; PhysicalCores = 16; LogicalCpus = 32; Product = 'SQL Server 2022' }
+    $st  = Inst @{ Host = 'B'; IsVirtual = $true; LogicalCpus = 4; PhysicalCores = 4; Product = 'SQL Server 2022' }
+    $pas = Inst @{ Host = 'C'; IsVirtual = $true; LogicalCpus = 4; PhysicalCores = 4; LooksPassive = $true; Product = 'SQL Server 2022' }
     $exp = Inst @{ Host = 'D'; Edition = 'Express Edition (64-bit)'; EngineEdition = 4; Product = 'SQL Server 2022' }
-    $old = Inst @{ Host = 'E'; Sockets = 1; CoresPerSocket = 4; LogicalCpus = 8; Product = 'SQL Server 2016' }
+    $old = Inst @{ Host = 'E'; Sockets = 1; CoresPerSocket = 4; PhysicalCores = 4; LogicalCpus = 8; Product = 'SQL Server 2016' }
 
     $estate = @((FakeHost 'A' @($ee)), (FakeHost 'B' @($st)), (FakeHost 'C' @($pas)), (FakeHost 'D' @($exp)), (FakeHost 'E' @($old)))
     $t = Get-LicenceTotals -Hosts $estate
@@ -531,7 +691,38 @@ function Invoke-Sql {
     finally { $connection.Dispose() }
 }
 
-$InstanceQuery = @"
+<#
+  The hardware and version facts, asked for in a way that works on every version.
+
+  sys.dm_os_sys_info has gained and renamed columns over the years - socket_count and
+  cores_per_socket arrived in 2012, physical_memory_kb replaced physical_memory_in_bytes - so the
+  column list is read first and the SELECT is built from what is actually there. That beats running
+  a modern query, catching the error and falling back to a cut-down one, which is how a 2008 R2
+  server quietly lost its virtual machine flag and its memory.
+#>
+function Get-InstanceFacts {
+    [CmdletBinding()]
+    param([string] $Server)
+
+    $columns = @((Invoke-Sql -Server $Server -Query "SELECT name FROM sys.all_columns WHERE object_id = OBJECT_ID('sys.dm_os_sys_info')").Rows |
+                 ForEach-Object { [string]$_['name'] })
+    function Col([string] $Name, [string] $Type) {
+        if ($columns -contains $Name) { "si.$Name" } else { "CONVERT($Type, NULL)" }
+    }
+
+    $memory = if ($columns -contains 'physical_memory_kb') { 'si.physical_memory_kb / 1024' }
+              elseif ($columns -contains 'physical_memory_in_bytes') { 'si.physical_memory_in_bytes / 1048576' }
+              else { 'CONVERT(bigint, NULL)' }
+
+    # SERVERPROPERTY('ProductUpdateLevel') only exists from 2012, and asking for it on older
+    # versions returns NULL rather than failing - but only ask where it means something
+    $version = [string]((Invoke-Sql -Server $Server -Query "SELECT V = CONVERT(nvarchar(32), SERVERPROPERTY('ProductVersion'))").Rows[0]['V'])
+    $major = 0
+    if ($version -match '^(\d+)\.') { $major = [int]$Matches[1] }
+    $update = if ($major -ge 11) { "CONVERT(nvarchar(32), SERVERPROPERTY('ProductUpdateLevel'))" } else { 'CONVERT(nvarchar(32), NULL)' }
+    $hadr   = if ($major -ge 11) { "CONVERT(int, SERVERPROPERTY('IsHadrEnabled'))" } else { 'CONVERT(int, 0)' }
+
+    $query = @"
 SELECT  ServerName     = CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')),
         HostName       = ISNULL(CONVERT(nvarchar(128), SERVERPROPERTY('ComputerNamePhysicalNetBIOS')),
                                 CONVERT(nvarchar(128), SERVERPROPERTY('MachineName'))),
@@ -540,16 +731,16 @@ SELECT  ServerName     = CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')),
         EngineEdition  = CONVERT(int, SERVERPROPERTY('EngineEdition')),
         ProductVersion = CONVERT(nvarchar(32), SERVERPROPERTY('ProductVersion')),
         ProductLevel   = CONVERT(nvarchar(32), SERVERPROPERTY('ProductLevel')),
-        ProductUpdate  = CONVERT(nvarchar(32), SERVERPROPERTY('ProductUpdateLevel')),
+        ProductUpdate  = $update,
         IsClustered    = CONVERT(int, SERVERPROPERTY('IsClustered')),
-        IsHadrEnabled  = CONVERT(int, SERVERPROPERTY('IsHadrEnabled')),
+        IsHadrEnabled  = $hadr,
         LicenseType    = CONVERT(nvarchar(32), SERVERPROPERTY('LicenseType')),
         CpuCount       = si.cpu_count,
         HyperthreadRatio = si.hyperthread_ratio,
-        SocketCount    = si.socket_count,
-        CoresPerSocket = si.cores_per_socket,
-        VmType         = si.virtual_machine_type_desc,
-        MemoryMb       = si.physical_memory_kb / 1024,
+        SocketCount    = $(Col 'socket_count' 'int'),
+        CoresPerSocket = $(Col 'cores_per_socket' 'int'),
+        VmType         = $(Col 'virtual_machine_type_desc' 'nvarchar(60)'),
+        MemoryMb       = $memory,
         OnlineCores    = (SELECT COUNT(*) FROM sys.dm_os_schedulers WHERE status = 'VISIBLE ONLINE' AND scheduler_id < 1048576),
         Databases      = (SELECT COUNT(*) FROM sys.databases WHERE database_id > 4),
         BiggestDbGb    = (SELECT CONVERT(decimal(10,1), MAX(x.Gb)) FROM
@@ -557,37 +748,11 @@ SELECT  ServerName     = CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')),
                              FROM sys.master_files mf WHERE mf.database_id > 4 AND mf.type = 0
                              GROUP BY mf.database_id) x),
         DataGb         = (SELECT CONVERT(decimal(12,1), SUM(CONVERT(bigint, size)) * 8.0 / 1048576) FROM sys.master_files WHERE database_id > 4),
-        StartTime      = si.sqlserver_start_time
+        StartTime      = $(Col 'sqlserver_start_time' 'datetime')
 FROM sys.dm_os_sys_info si;
 "@
-
-# SQL Server 2008 R2 and older have no socket_count or cores_per_socket
-$InstanceQueryOld = @"
-SELECT  ServerName     = CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')),
-        HostName       = ISNULL(CONVERT(nvarchar(128), SERVERPROPERTY('ComputerNamePhysicalNetBIOS')),
-                                CONVERT(nvarchar(128), SERVERPROPERTY('MachineName'))),
-        InstanceName   = ISNULL(CONVERT(nvarchar(128), SERVERPROPERTY('InstanceName')), N'MSSQLSERVER'),
-        Edition        = CONVERT(nvarchar(128), SERVERPROPERTY('Edition')),
-        EngineEdition  = CONVERT(int, SERVERPROPERTY('EngineEdition')),
-        ProductVersion = CONVERT(nvarchar(32), SERVERPROPERTY('ProductVersion')),
-        ProductLevel   = CONVERT(nvarchar(32), SERVERPROPERTY('ProductLevel')),
-        ProductUpdate  = CONVERT(nvarchar(32), NULL),
-        IsClustered    = CONVERT(int, SERVERPROPERTY('IsClustered')),
-        IsHadrEnabled  = CONVERT(int, 0),
-        LicenseType    = CONVERT(nvarchar(32), SERVERPROPERTY('LicenseType')),
-        CpuCount       = si.cpu_count,
-        HyperthreadRatio = si.hyperthread_ratio,
-        SocketCount    = CONVERT(int, NULL),
-        CoresPerSocket = CONVERT(int, NULL),
-        VmType         = CONVERT(nvarchar(60), NULL),
-        MemoryMb       = CONVERT(bigint, NULL),
-        OnlineCores    = (SELECT COUNT(*) FROM sys.dm_os_schedulers WHERE status = 'VISIBLE ONLINE' AND scheduler_id < 1048576),
-        Databases      = (SELECT COUNT(*) FROM sys.databases WHERE database_id > 4),
-        BiggestDbGb    = CONVERT(decimal(10,1), NULL),
-        DataGb         = CONVERT(decimal(12,1), NULL),
-        StartTime      = CONVERT(datetime, NULL)
-FROM sys.dm_os_sys_info si;
-"@
+    (Invoke-Sql -Server $Server -Query $query).Rows[0]
+}
 
 # anything on the engine that points at a licensable component living beside it
 $ComponentQuery = @"
@@ -623,6 +788,53 @@ SELECT Mirrors = COUNT(*) FROM sys.database_mirroring WHERE mirroring_role = 2;
 $ClusterQuery = @"
 SELECT NodeName = NodeName, Status = status_description FROM sys.dm_os_cluster_nodes;
 "@
+
+<#
+  What Windows says the processors are: one Win32_Processor row per socket, each carrying its
+  physical and logical core counts. This is the only way to be certain on SQL Server 2008 R2 and
+  older, which do not report cores per socket at all - and it also answers whether the machine is
+  virtual, which those versions may not either.
+#>
+function Get-HostHardware {
+    [CmdletBinding()]
+    param([string] $HostName)
+
+    $result = [pscustomobject]@{ Ok = $false; Sockets = 0; Cores = 0; Logical = 0; IsVirtual = $null; Error = $null }
+    $processors = $null
+    $system = $null
+    try {
+        $session = New-CimSession -ComputerName $HostName -SessionOption (New-CimSessionOption -Protocol Dcom) -ErrorAction Stop
+        try {
+            $processors = @(Get-CimInstance -CimSession $session -ClassName Win32_Processor -ErrorAction Stop)
+            $system = Get-CimInstance -CimSession $session -ClassName Win32_ComputerSystem -ErrorAction Stop
+        }
+        finally { Remove-CimSession -CimSession $session -ErrorAction SilentlyContinue }
+    }
+    catch {
+        $result.Error = ($_.Exception.Message -split "`r?`n")[0]
+        try {
+            $processors = @(Get-WmiObject -Class Win32_Processor -ComputerName $HostName -ErrorAction Stop)
+            $system = Get-WmiObject -Class Win32_ComputerSystem -ComputerName $HostName -ErrorAction Stop
+            $result.Error = $null
+        }
+        catch { $result.Error = ($_.Exception.Message -split "`r?`n")[0]; return $result }
+    }
+    if (-not $processors -or $processors.Count -eq 0) { return $result }
+
+    $result.Sockets = $processors.Count
+    foreach ($cpu in $processors) {
+        # NumberOfCores needs Windows Server 2008 or later; without it there is nothing to add
+        if ($null -ne $cpu.NumberOfCores) { $result.Cores += [int]$cpu.NumberOfCores }
+        if ($null -ne $cpu.NumberOfLogicalProcessors) { $result.Logical += [int]$cpu.NumberOfLogicalProcessors }
+    }
+    if ($system) {
+        $text = '{0} {1}' -f $system.Manufacturer, $system.Model
+        if ($text -match 'VMware|Virtual Machine|VirtualBox|KVM|Xen|Hyper-V|QEMU|Parallels|Google Compute|Amazon EC2|Microsoft Corporation Virtual') { $result.IsVirtual = $true }
+        else { $result.IsVirtual = $false }
+    }
+    $result.Ok = ($result.Cores -gt 0)
+    $result
+}
 
 <#
   The Windows service list for a host. SSAS, SSRS, SSIS and Power BI Report Server cannot be seen
@@ -746,32 +958,56 @@ Write-Host ''
 $instances = New-Object System.Collections.Generic.List[object]
 $unreachable = New-Object System.Collections.Generic.List[object]
 $hostInventory = @{}
+$hostHardware = @{}
+
+function Get-Override([string] $HostName) {
+    if (-not $HardwareOverride) { return $null }
+    foreach ($key in $HardwareOverride.Keys) {
+        if ([string]$key -eq $HostName) { return [string]$HardwareOverride[$key] }
+    }
+    $null
+}
 
 foreach ($target in ($script:targets | Select-Object -Unique)) {
     try {
-        try   { $row = (Invoke-Sql -Server $target -Query $InstanceQuery).Rows[0] }
-        catch { $row = (Invoke-Sql -Server $target -Query $InstanceQueryOld).Rows[0] }
+        $row = Get-InstanceFacts -Server $target
 
         $edition = [string]$row['Edition']
         $facts = Get-EditionFacts $edition ([int]$row['EngineEdition'])
         $isVirtual = $false
         if (-not ($row['VmType'] -is [DBNull])) { $isVirtual = ([string]$row['VmType'] -ne 'NONE') }
-
-        $sockets = if ($row['SocketCount'] -is [DBNull]) { 0 } else { [int]$row['SocketCount'] }
-        $perSocket = if ($row['CoresPerSocket'] -is [DBNull]) { 0 } else { [int]$row['CoresPerSocket'] }
+        $reportedSockets = if ($row['SocketCount'] -is [DBNull]) { 0 } else { [int]$row['SocketCount'] }
+        $reportedPerSocket = if ($row['CoresPerSocket'] -is [DBNull]) { 0 } else { [int]$row['CoresPerSocket'] }
         $logical = [int]$row['CpuCount']
-        $assumed = $null
-        if ($perSocket -le 0) {
-            # nothing useful reported: infer physical cores from the hyperthread ratio, and own up to it
-            $ratio = [Math]::Max([int]$row['HyperthreadRatio'], 1)
-            $sockets = [Math]::Max($sockets, 1)
-            $perSocket = [Math]::Max([int][Math]::Floor($logical / $ratio), 1)
-            $assumed = 'this instance does not report cores per socket, so {0} physical core(s) in {1} socket(s) is inferred from {2} logical CPUs - check it against the hardware before buying anything' -f $perSocket, $sockets, $logical
+        $hostName = [string]$row['HostName']
+
+        # Where SQL Server cannot give the processor layout - 2008 R2 and older - ask Windows, because
+        # guessing it is how a four socket server gets counted as one. Also asked for every host when
+        # -IncludeHostInventory is on, since Windows is the better answer wherever it is available.
+        $windows = $null
+        if (($reportedPerSocket -le 0 -or $IncludeHostInventory) -and -not (Get-Override $hostName)) {
+            if (-not $hostHardware.ContainsKey($hostName)) { $hostHardware[$hostName] = Get-HostHardware -HostName $hostName }
+            if ($hostHardware[$hostName].Ok) { $windows = $hostHardware[$hostName] }
         }
-        elseif ($sockets -le 0) {
-            # Express and LocalDB report no socket count at all, while cores per socket is right
-            $sockets = 1
-            $assumed = 'this instance reports no socket count, so one socket of {0} cores is assumed - check it if the server has more than one processor' -f $perSocket
+
+        $hw = Get-HardwareFacts -ReportedSockets $reportedSockets -ReportedCoresPerSocket $reportedPerSocket `
+                                -LogicalCpus $logical -HyperthreadRatio ([int]$row['HyperthreadRatio']) -IsVirtual $isVirtual `
+                                -WindowsSockets $(if ($windows) { $windows.Sockets } else { 0 }) `
+                                -WindowsCores $(if ($windows) { $windows.Cores } else { 0 }) `
+                                -WindowsLogical $(if ($windows) { $windows.Logical } else { 0 }) `
+                                -Override (Get-Override $hostName) -HostName $hostName
+        $sockets = $hw.Sockets
+        $perSocket = $hw.CoresPerSocket
+        $physicalCores = $hw.PhysicalCores
+        if ($hw.Source -eq 'Windows') { $logical = $hw.LogicalCpus }
+        if ($hw.Source -eq 'you' -and $isVirtual) { $logical = $hw.LogicalCpus }
+        $assumed = $hw.Note
+        if ($hw.Source -eq 'inferred' -and $hostHardware.ContainsKey($hostName) -and -not $hostHardware[$hostName].Ok) {
+            $assumed += ('. Windows was asked on this host as well and could not answer: {0}' -f $hostHardware[$hostName].Error)
+        }
+        if ($windows -and $null -ne $windows.IsVirtual -and $row['VmType'] -is [DBNull]) {
+            # old versions may not say, and a VM counted as physical is counted wrong
+            $isVirtual = [bool]$windows.IsVirtual
         }
 
         $notes = New-Object System.Collections.Generic.List[string]
@@ -852,6 +1088,8 @@ foreach ($target in ($script:targets | Select-Object -Unique)) {
             IsVirtual     = $isVirtual
             Sockets       = $sockets
             CoresPerSocket = $perSocket
+            PhysicalCores = $physicalCores
+            HardwareSource = $hw.Source
             LogicalCpus   = $logical
             OnlineCores   = $online
             MemoryMb      = if ($row['MemoryMb'] -is [DBNull]) { 0 } else { [int64]$row['MemoryMb'] }
@@ -867,8 +1105,9 @@ foreach ($target in ($script:targets | Select-Object -Unique)) {
 
         Write-Badge 'OK' 'Green'
         Write-Host ("  {0,-28} {1} {2}" -f $instance.Instance, $instance.Product, $facts.Family) -NoNewline
-        Write-Host ("   {0}, {1}" -f $(if ($isVirtual) { 'VM' } else { 'physical' }),
-                    $(if ($isVirtual) { "$logical vCPU" } else { "$sockets x $perSocket cores" })) -ForegroundColor DarkGray
+        Write-Host ("   {0}, {1}{2}" -f $(if ($isVirtual) { 'VM' } else { 'physical' }),
+                    $(if ($isVirtual) { "$logical vCPU" } else { "$sockets socket(s), $physicalCores cores" }),
+                    $(if ($hw.Source -eq 'inferred') { ' (inferred)' } elseif ($hw.Source -ne 'SQL Server') { " (from $($hw.Source))" } else { '' })) -ForegroundColor DarkGray
     }
     catch {
         $message = ($_.Exception.GetBaseException().Message -split "`r?`n")[0]
