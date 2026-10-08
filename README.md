@@ -150,6 +150,7 @@ MolehillWatch\
    ├─ Test-DatabaseStatus.ps1               "is everything back?" after a patch, reboot or restore
    ├─ Restore-DatabaseCopy.ps1              restores a database to another server, and keeps it rolling forward
    ├─ Get-SqlLicensingAudit.ps1             what needs licensing across an estate, and the total to cover it
+   ├─ Export-DatabaseSample.ps1             a random sample of every table, as zipped CSVs
    ├─ Test-SqlConnectionString.ps1          tests a list of connection strings (one-shot, no UI)
    ├─ SqlConnectionTester.ps1               the same app in PowerShell, for sites that forbid .exe files
    └─ SqlConnectionTester\                  C# terminal app: build, save and test connection strings
@@ -231,6 +232,24 @@ Two jobs that turn out to be the same script: refreshing a copy of a database on
 * `-Standby` leaves the copy readable between log restores, `-StopAt` restores to a point in time, `-WhatIf` prints the exact RESTORE statements and runs nothing, `-SelfTest` checks the chain and statement logic without a server.
 * **Exit code** is 0 (done, or nothing to do), 1 (something to check) or 2 (a failure).
 * On-premises disk backups only. Backup sets written to URL or tape are ignored, and it says so rather than quietly leaving a hole in the chain.
+
+## Table samples as CSV (`Tools\Export-DatabaseSample.ps1`)
+
+Takes a random sample of rows from every user table in a database, writes one CSV per table and zips the lot. For handing a developer realistic shaped data, reproducing a problem somewhere safe, or seeing what is actually in a database you have just been given.
+
+```powershell
+.\Export-DatabaseSample.ps1 -SqlInstance SQLPROD01 -Database Sales -TrustServerCertificate
+.\Export-DatabaseSample.ps1 -SqlInstance myserver.database.windows.net -Database Sales -SqlCredential (Get-Credential) -Top 500
+```
+
+* `SELECT TOP (n) ... ORDER BY NEWID()` per table, 200 rows by default (`-Top`, or `-n`), to `<OutputPath>\<Database>\<schema>.<table>.csv` and then into `<Database>.zip`. `-RemoveFolderAfterZip` leaves just the zip.
+* **Works anywhere**: SQL Server on-premises or on an IaaS VM, Azure SQL Managed Instance and Azure SQL Database. It connects straight to the database, so there is no `USE` to trip over on Azure SQL Database. Windows, SQL and Entra ID authentication (`-UseEntraId` needs `Az.Accounts`; `-AccessToken` if you bring your own).
+* **The awkward columns are handled**: `geography`, `geometry` and `hierarchyid` are converted server side so no client assemblies are needed; `binary` and `rowversion` come out as `0x` hex; dates are ISO 8601 and numbers invariant; files are UTF-8 with a BOM and CRLF so Excel opens them without a fight; values are quoted per RFC 4180 only where they need to be. Empty tables still get a header row.
+* **It keeps going**: a table whose column list fails - graph tables, say - is retried once with `SELECT *`, external and diagram tables are skipped, and a failure is reported per table rather than stopping the run. `-ReadUncommitted` keeps it off the locks on a busy production table.
+* Prints a run summary and **returns a result object** (`Exported`, `Failed`, `TotalRows`, `ZipPath`, `Tables`) rather than setting an exit code, so pipe it or assign it when scripting.
+* No modules needed for the SQL Server and SQL authentication paths; ADO.NET only, on PowerShell 5.1 or 7.
+
+**It copies real data out of a database.** Where that data is personal or confidential, a sample is still personal or confidential: mind where the zip goes, and whether you should be using masked or synthetic data instead.
 
 ## Connection string tester (`Tools\Test-SqlConnectionString.ps1`)
 
