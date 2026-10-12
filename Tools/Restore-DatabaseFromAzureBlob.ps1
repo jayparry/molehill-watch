@@ -64,7 +64,9 @@
 
 .PARAMETER SasToken
     Shared Access Signature (SAS) token with at least Read and List permissions on the container.
-    A leading '?' is removed automatically.
+    Accepts a plain string or a SecureString. A leading '?' is removed automatically.
+    Wrap a plain string in single quotes: SAS tokens contain '&', which PowerShell treats as an
+    operator outside quotes.
 
 .PARAMETER LocalBackupPath
     Local staging folder for the downloaded backup file(s). Created if missing.
@@ -150,7 +152,8 @@ param(
     [string]$BlobPrefix,
 
     [Parameter(Mandatory)]
-    [SecureString]$SasToken,
+    [ValidateNotNull()]
+    [object]$SasToken,
 
     # Restore
     [Parameter(Mandatory)]
@@ -339,7 +342,13 @@ ORDER BY bs.backup_finish_date DESC, bmf.family_sequence_number;
 
     #region Storage
     Start-Step 'List backup blobs in storage container'
-    $sasPlain       = (ConvertFrom-SecureString -SecureString $SasToken -AsPlainText).TrimStart('?')
+    $sasPlain = switch ($SasToken) {
+        { $_ -is [SecureString] } { ConvertFrom-SecureString -SecureString $_ -AsPlainText; break }
+        { $_ -is [string] }       { $_; break }
+        default { throw "SasToken must be a string or SecureString, not $($SasToken.GetType().FullName)." }
+    }
+    $sasPlain = $sasPlain.Trim().TrimStart('?')
+    if (-not $sasPlain) { throw 'SasToken is empty.' }
     $storageContext = New-AzStorageContext -StorageAccountName $StorageAccountName -SasToken $sasPlain
     $sasPlain       = $null
 
