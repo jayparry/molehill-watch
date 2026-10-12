@@ -148,10 +148,9 @@ MolehillWatch\
 └─ Tools\
    ├─ Get-PatchStatus.ps1                   standalone patch check for any server (no install)
    ├─ Test-DatabaseStatus.ps1               "is everything back?" after a patch, reboot or restore
-   ├─ Restore-DatabaseCopy.ps1              restores a database to another server, and keeps it rolling forward
+   ├─ Restore-DatabaseCopy.ps1              restores databases to another server, directly or via Azure Blob Storage
    ├─ Get-SqlLicensingAudit.ps1             what needs licensing across an estate, and the total to cover it
    ├─ Export-DatabaseSample.ps1             a random sample of every table, as zipped CSVs
-   ├─ Restore-DatabaseFromAzureBlob.ps1     restores databases between servers via Azure Blob Storage
    ├─ Test-SqlConnectionString.ps1          tests a list of connection strings (one-shot, no UI)
    ├─ SqlConnectionTester.ps1               the same app in PowerShell, for sites that forbid .exe files
    └─ SqlConnectionTester\                  C# terminal app: build, save and test connection strings
@@ -210,55 +209,41 @@ Takes a list of instances and produces the number you need before a licensing co
 
 ## Restoring a copy to another server (`Tools\Restore-DatabaseCopy.ps1`)
 
-Two jobs that turn out to be the same script: refreshing a copy of a database onto another server, and moving a large database with minutes of downtime instead of hours. It reads `msdb.dbo.backupset` on the source to work out the chain, runs the RESTOREs on the destination, and installs nothing at either end.
+Three jobs that turn out to be one script: refreshing a copy of a database onto another server, moving a large database with minutes of downtime instead of hours, and doing either of those when the two servers cannot see each other. It reads the source's backup history from `msdb`, works out the chain, and runs plain T-SQL restores on the destination. No modules at all unless you use the Azure option, which needs `Az.Storage`.
 
 **Refresh**, safe to run on a schedule - it skips the work when that same backup is already restored there:
 
 ```powershell
-.\Restore-DatabaseCopy.ps1 -SourceInstance SQL01 -Database Sales -DestinationInstance SQL02
+.\Restore-DatabaseCopy.ps1 -SourceInstance SQL01 -DestinationInstance SQL02 -Database Sales
 ```
 
 **Log shipping by hand**, for a cutover. Seed the copy whenever suits, catch it up as often as you like, then switch:
 
 ```powershell
-.\Restore-DatabaseCopy.ps1 SQL01 Sales SQL02 -KeepRestoring          # Monday: the full, the diff, the logs
-.\Restore-DatabaseCopy.ps1 SQL01 Sales SQL02 -KeepRestoring          # whenever: just the logs since
-.\Restore-DatabaseCopy.ps1 SQL01 Sales SQL02 -Cutover -TailLog       # the ten minutes that matter
+.\Restore-DatabaseCopy.ps1 SQL01 SQL02 Sales -KeepRestoring          # the full, the diff, the logs
+.\Restore-DatabaseCopy.ps1 SQL01 SQL02 Sales -KeepRestoring          # whenever: just the logs since
+.\Restore-DatabaseCopy.ps1 SQL01 SQL02 Sales -Cutover -TailLog       # the ten minutes that matter
 ```
 
-* **"Has this already been restored?"** is answered from the backup set's own id (`backup_set_uuid`) against the restore history on the destination, so it holds across servers and reboots rather than guessing from dates.
-* **Catching up** reads how far the copy got from its restore history and applies only what comes next. It walks the chain by taking the backup that reaches furthest forward each time, which copes with copy-only backups and a second job writing its own files. A chain that does not join up is reported, with the LSN where it breaks, instead of failing half way through.
-* **Pre-flight**: the destination can read every file (it will try `\SOURCE\D$\...` by itself, or take a `-BackupPathMap`), the destination is not an older version of SQL Server than the backup, the file paths are not already in use by another database, and the database it is about to overwrite really is a copy of the source - an unrelated database of that name needs `-Force`.
-* **The source is read-only** unless you ask for `-TailLog` or `-DisconnectSource`. Those two ask once, up front, and name exactly what they will do - a tail log leaves the source in a restoring state, which is the point of a cutover but has no undo.
-* `-Standby` leaves the copy readable between log restores, `-StopAt` restores to a point in time, `-WhatIf` prints the exact RESTORE statements and runs nothing, `-SelfTest` checks the chain and statement logic without a server.
-* **Exit code** is 0 (done, or nothing to do), 1 (something to check) or 2 (a failure).
-* On-premises disk backups only. Backup sets written to URL or tape are ignored, and it says so rather than quietly leaving a hole in the chain.
-
-## Restoring through Azure Blob Storage (`Tools\Restore-DatabaseFromAzureBlob.ps1`)
-
-For moving databases off an old server when the two ends cannot see each other but both can see a storage account. Reads the source's own backup history, picks the newest full backup that has actually finished uploading, stages it locally, checks it, and restores over the destination copy. Needs the **dbatools** and **Az.Storage** modules (`-InstallMissingModules` will fetch them).
+**Through Azure Blob Storage**, for when the destination cannot see the source's backup share - an old server being retired, another site, another network. Several databases in one run:
 
 ```powershell
-# start here if anything will not connect: every check, and what each failure usually means
-.\Restore-DatabaseFromAzureBlob.ps1 -SourceInstance OLDSQL -DestinationInstance NEWSQL `
-    -DatabaseName MyDB -TestConnectionOnly -TrustServerCertificate
-
-# several databases in one run, from one instance to another
-.\Restore-DatabaseFromAzureBlob.ps1 -SourceInstance OLDSQL -DestinationInstance NEWSQL `
-    -DatabaseName Sales,Stock,Payroll -StorageAccountName mycompany -ContainerName legacybackup `
-    -BlobPrefix OLDSQL -SasToken (Get-Secret -Name LegacyBackupSas) `
+.\Restore-DatabaseCopy.ps1 -SourceInstance OLDSQL -DestinationInstance NEWSQL `
+    -Database Sales,Stock,Payroll -From AzureBlob -StorageAccountName mycompany `
+    -ContainerName legacybackup -BlobPrefix OLDSQL -SasToken (Get-Secret -Name LegacyBackupSas) `
     -LocalBackupPath D:\RestoreStaging -TrustServerCertificate -RepairOrphanUsers
 ```
 
-* **Several databases, one pair of instances.** Each is restored from its own latest backup; one failing is reported and the rest carry on, and the summary says what happened to each (`PARTLY DONE (2 of 3)`). The container is listed once for the whole run.
-* **It will not use a half-uploaded backup.** A backup msdb knows about but whose file is not in the container yet is skipped, with the reason, and the previous one is used instead.
-* **It checks before it breaks anything.** The backup header is read on the destination *before* the existing database is touched, which is where "the SQL service account cannot read the staging folder" and "that backup is from a newer version" show up. If the restore itself fails, the destination is put back the way it was found rather than left offline.
+* **Where the files come from is the only difference between the two modes.** `-From Path` (default) uses the paths msdb recorded, as the destination sees them - `-BackupPathMap` translates one, and a local path on another machine is retried through its admin share (`\\SOURCE\D$\...`) automatically. `-From AzureBlob` pulls them out of a container into a staging folder first. Everything after that is identical, including rolling restores: each run downloads only the logs it still needs.
+* **"Has this already been restored?"** is answered from the backup set's own id (`backup_set_uuid`) against the restore history on the destination, so it holds across servers and reboots rather than guessing from dates.
+* **It will not use a half-uploaded backup.** With storage in the way, a backup msdb knows about but whose blob has not finished committing is passed over with the reason - and a rolling restore simply stops at the last log that made it across.
+* **Catching up** reads how far the copy got from its own restore history and applies only what comes next, walking the chain by taking the backup that reaches furthest forward each time. That copes with copy-only backups and a second job writing its own files. A chain that does not join up is reported, with the LSN where it breaks.
+* **It checks before it breaks anything**: the destination can read every file, the backup header matches the database it claims to be, the destination is not an older version than the backup, the target file paths are free, and the database it would overwrite really is a copy of the source (an unrelated database of that name needs `-Force`). If a restore fails, the destination is put back as it was found rather than left offline.
+* **The source is read-only** unless you ask for `-TailLog` or `-DisconnectSource`. Those ask once, up front, and name exactly what they will do - a tail log leaves the source in a restoring state, which is the point of a cutover but has no undo.
+* **Once it is online**: `-DatabaseOwner`, `-CompatibilityLevel`, `-RepairOrphanUsers` (which reports the users it cannot remap, and why, rather than failing), `-UpdateStatistics` and `-RunCheckDb`. `PAGE_VERIFY CHECKSUM` is set either way, and a copy of a single-user database is opened back up to `MULTI_USER`.
 * **Connection problems are explained, not just reported.** `-TestConnectionOnly` runs the checks on their own. A failure gives what SQL Server said, what it means and what to try - the login error number and state, a refused or silently dropped port, SQL Browser for a named instance, and the two separate encryption traps: an untrusted certificate (add `-TrustServerCertificate`) and a TLS version mismatch (SQL Server 2008 R2 before SP3 + KB3135244 speaks TLS 1.0 only, which `-TrustServerCertificate` will not fix).
-* `-LogLevel Quiet|Normal|Verbose|Debug` - `Quiet` is problems and the summary, `Verbose` every check and decision, `Debug` adds raw exceptions, SQL error numbers and the redacted connection string. `-Verbose` or `-Debug` raise it by themselves, and `-LogFile` appends the same text to a file.
-* **Order of module imports matters and is commented in the script**: dbatools ships an older `Azure.Storage.Blobs` than Az.Storage needs, so Az.Storage is imported first. Loading dbatools first makes every blob call fail with `Method not found`, and the script warns if a profile has already done it.
-* `-WhatIf` reports the plan and changes nothing, `-SelfTest` checks the script's own logic with no server, storage account or modules needed. **Exit code** is 0 (restored, or a clean dry run), 1 (something failed) or 2 (bad parameters or missing modules).
-
-**The source is only ever read** - msdb history, nothing else. The destination copy is overwritten, so the name you give it is the one that gets replaced.
+* `-Standby` leaves the copy readable between log restores, `-StopAt` restores to a point in time, `-LogLevel Quiet|Normal|Verbose|Debug` sets how much it says (`-Verbose`/`-Debug` raise it by themselves), `-LogFile` appends it all to a file, `-CsvPath` writes a row per database, `-WhatIf` prints the exact RESTORE statements and runs nothing, and `-SelfTest` checks the chain, statement and path logic with no server at all.
+* **Several databases per run**, one pair of instances. A failure on one is reported and the rest carry on, with `PARTLY DONE (2 of 3)` in the summary. **Exit code** is 0 (done, or a clean dry run), 1 (something failed) or 2 (could not start).
 
 ## Table samples as CSV (`Tools\Export-DatabaseSample.ps1`)
 
