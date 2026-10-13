@@ -75,6 +75,16 @@
 .PARAMETER From
     Where the backup files are read from: Path (default) or AzureBlob.
 
+.PARAMETER SourceHistoryFile
+    Read the source's backup history out of a CSV file instead of connecting to it, produced by
+    running Tools\Export-BackupHistory.sql on the source server. The source is then never contacted:
+    useful when a modern machine cannot complete a TLS handshake with an old instance, which shows up
+    as "An existing connection was forcibly closed by the remote host".
+
+    -TailLog and -DisconnectSource need a live source and are refused with this. So is the admin
+    share fallback for backup paths, since the source's machine name is not known - use
+    -BackupPathMap, or -From AzureBlob.
+
 .PARAMETER BackupPathMap
     Path translation for -From Path, when the destination sees the backups somewhere else:
     @{ 'D:\Backup' = '\\SQL01\Backup$'; 'E:\Logs' = '\\SQL01\Logs$' }. Longest prefix wins.
@@ -246,6 +256,9 @@ param(
 
     # -From Path
     [hashtable] $BackupPathMap,
+
+    # when the source cannot be connected to at all
+    [string] $SourceHistoryFile,
 
     # -From AzureBlob
     [string] $StorageAccountName,
@@ -1615,15 +1628,101 @@ WHERE rh.destination_database_name = @db AND bs.backup_set_uuid = @uuid
 ORDER BY rh.restore_history_id DESC;
 "@
 
+<#
+  Reads a backup history file written by Tools\Export-BackupHistory.sql on the source server.
+
+  The columns are the ones the script would otherwise have read out of msdb, so everything
+  downstream - the chain, the availability filter, the already-restored test - works the same from
+  either source. Dates arrive as ISO 8601 and the big numbers as plain digits, so no regional
+  setting at either end can change what they mean.
+
+  It is deliberately forgiving about how the file was produced, because the two obvious ways differ:
+  sqlcmd with -h-1 writes no header line at all, while saving the grid out of Management Studio
+  writes one. Either is accepted, and the separator is worked out from the file rather than assumed,
+  so a path with a comma in it can be exported with -s"|" instead.
+#>
+function Import-BackupHistory {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [string] $Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) { throw "No backup history file at $Path" }
+
+    $columns = 'backup_set_id', 'backup_set_uuid', 'type', 'position', 'first_lsn', 'last_lsn',
+               'checkpoint_lsn', 'database_backup_lsn', 'backup_start_date', 'backup_finish_date',
+               'database_name', 'family_guid', 'is_copy_only', 'has_backup_checksums', 'backup_size',
+               'software_major_version', 'key_algorithm', 'physical_device_name', 'family_sequence_number'
+
+    $lines = @(Get-Content -LiteralPath $Path -TotalCount 5 | Where-Object { $_.Trim() })
+    if ($lines.Count -eq 0) { throw "$Path is empty. Check that Export-BackupHistory.sql returned rows on the source." }
+    $sample = $lines[0]
+
+    # whichever separator carves the first line into the right number of fields
+    $delimiter = $null
+    foreach ($candidate in ',', '|', "`t", ';') {
+        if (($sample -split [regex]::Escape($candidate)).Count -eq $columns.Count) { $delimiter = $candidate; break }
+    }
+    if (-not $delimiter) {
+        throw ("Cannot make sense of $Path : its first line has " + (($sample -split ',').Count) +
+               " comma separated field(s) and $($columns.Count) are expected. It has to be the output of Tools\Export-BackupHistory.sql.")
+    }
+    $shown = switch ($delimiter) { "`t" { 'tab' } default { "'$delimiter'" } }
+
+    $hasHeader = $sample -match '(^|\W)backup_set_id(\W|$)'
+    if ($hasHeader) { $rows = @(Import-Csv -LiteralPath $Path -Delimiter $delimiter) }
+    else { $rows = @(Import-Csv -LiteralPath $Path -Delimiter $delimiter -Header $columns) }
+    Write-Detail ('  {0}, {1} separated, {2} header line' -f $Path, $shown, $(if ($hasHeader) { 'with a' } else { 'with no' }))
+
+    # sqlcmd writes a row of dashes under the header when it is left on
+    $rows = @($rows | Where-Object { [string]$_.backup_set_id -notmatch '^-+$' -and ([string]$_.backup_set_id).Trim() })
+    if ($rows.Count -eq 0) { throw "$Path has no data rows in it." }
+
+    $have = @($rows[0].PSObject.Properties.Name)
+    $missing = @($columns | Where-Object { $have -notcontains $_ })
+    if ($missing.Count) {
+        throw ("$Path is missing the column(s) " + ($missing -join ', ') + '. It has to be the output of Tools\Export-BackupHistory.sql.')
+    }
+    foreach ($row in $rows) {
+        foreach ($name in $columns) { $row.$name = ([string]$row.$name).Trim() }
+    }
+    Write-Detail ('  {0} history row(s) read' -f $rows.Count)
+    $rows
+}
+
+# sqlcmd pads and PowerShell parses dates by locale, so both are pinned down here
+function Read-HistoryDate {
+    [CmdletBinding()]
+    param([AllowEmptyString()] [string] $Text)
+
+    $clean = ([string]$Text).Trim()
+    $formats = @('yyyy-MM-ddTHH:mm:ss.fff', 'yyyy-MM-ddTHH:mm:ss', 'yyyy-MM-dd HH:mm:ss.fff', 'yyyy-MM-dd HH:mm:ss')
+    foreach ($format in $formats) {
+        $parsed = [datetime]::MinValue
+        if ([datetime]::TryParseExact($clean, $format, [System.Globalization.CultureInfo]::InvariantCulture,
+                                      [System.Globalization.DateTimeStyles]::None, [ref]$parsed)) {
+            return $parsed
+        }
+    }
+    # last resort, in case someone saved the file through something that reformatted the dates
+    [datetime]::Parse($clean, [System.Globalization.CultureInfo]::CurrentCulture)
+}
+
 #==============================================================================
 # Getting started
 #==============================================================================
+$offlineSource = [bool]$SourceHistoryFile
+if ($offlineSource -and -not $SourceInstance) { $SourceInstance = 'the source (from history file)' }
+
 foreach ($required in 'SourceInstance', 'DestinationInstance') {
     if (-not (Get-Variable -Name $required -ValueOnly)) {
         Write-Host "  -$required is needed." -ForegroundColor Red
         Write-Host '  Try: Get-Help .\Restore-DatabaseCopy.ps1 -Detailed' -ForegroundColor Gray
         exit 2
     }
+}
+if ($offlineSource -and ($TailLog -or $DisconnectSource)) {
+    Write-Host '  -TailLog and -DisconnectSource have to talk to the source, so they cannot be used with -SourceHistoryFile.' -ForegroundColor Red
+    Write-Host '  Take the tail log on the source itself, put it somewhere the destination can read, and apply it there.' -ForegroundColor Gray
+    exit 2
 }
 # powershell.exe -File hands every argument over as a string, so -Database Sales,Stock arrives as
 # one element rather than two. Splitting a lone element on its commas makes scheduled runs work the
@@ -1674,18 +1773,27 @@ try {
 
     #region Connection checks
     Start-Step 'Check the SQL Server instances'
-    $sourceCheck = Test-SqlConnectivity -Instance $SourceInstance -Credential $SourceSqlCredential `
-                                        -Trust:$TrustServerCertificate -TimeoutSeconds $ConnectTimeoutSeconds
-    Write-ConnectivityReport -Result $sourceCheck -Role 'source'
+    if ($offlineSource) {
+        Write-Log ('source: not contacted, its backup history comes from {0}' -f $SourceHistoryFile)
+    }
+    else {
+        $sourceCheck = Test-SqlConnectivity -Instance $SourceInstance -Credential $SourceSqlCredential `
+                                            -Trust:$TrustServerCertificate -TimeoutSeconds $ConnectTimeoutSeconds
+        Write-ConnectivityReport -Result $sourceCheck -Role 'source'
+    }
     $destinationCheck = Test-SqlConnectivity -Instance $DestinationInstance -Credential $DestinationSqlCredential `
                                              -Trust:$TrustServerCertificate -TimeoutSeconds $ConnectTimeoutSeconds
     Write-ConnectivityReport -Result $destinationCheck -Role 'destination'
 
-    if (-not $sourceCheck.Connected -or -not $destinationCheck.Connected) {
-        $which = @()
-        if (-not $sourceCheck.Connected) { $which += "source $SourceInstance" }
-        if (-not $destinationCheck.Connected) { $which += "destination $DestinationInstance" }
-        throw ('Cannot connect to ' + ($which -join ' and ') + '. The checks above say why; -LogLevel Verbose shows every step and Debug the raw errors.')
+    $failed = @()
+    if (-not $offlineSource -and -not $sourceCheck.Connected) { $failed += "source $SourceInstance" }
+    if (-not $destinationCheck.Connected) { $failed += "destination $DestinationInstance" }
+    if ($failed.Count) {
+        $extra = ''
+        if (-not $offlineSource -and -not $sourceCheck.Connected -and $sourceCheck.Error -match 'forcibly closed|handshake|common algorithm|certificate') {
+            $extra = ' If the source is an old instance that will not negotiate encryption, Test-SqlTlsHandshake.ps1 says why - and -SourceHistoryFile lets you restore without contacting it at all.'
+        }
+        throw ('Cannot connect to ' + ($failed -join ' and ') + '. The checks above say why; -LogLevel Verbose shows every step and Debug the raw errors.' + $extra)
     }
     Complete-Step
 
@@ -1698,12 +1806,21 @@ try {
 
     #region The two ends
     Start-Step 'Read the instances'
-    $srcInfo = (Invoke-Sql -Server $SourceInstance -Query "SELECT ServerName = CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')), MachineName = CONVERT(nvarchar(128), SERVERPROPERTY('MachineName')), Major = CONVERT(int, SERVERPROPERTY('ProductMajorVersion')), BackupDir = CONVERT(nvarchar(512), SERVERPROPERTY('InstanceDefaultBackupPath'))").Rows[0]
+    $srcInfo = $null
+    $sourceHost = $null
+    $sourceBackupDir = $null
+    if (-not $offlineSource) {
+        $srcInfo = (Invoke-Sql -Server $SourceInstance -Query "SELECT ServerName = CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')), MachineName = CONVERT(nvarchar(128), SERVERPROPERTY('MachineName')), Major = CONVERT(int, SERVERPROPERTY('ProductMajorVersion')), BackupDir = CONVERT(nvarchar(512), SERVERPROPERTY('InstanceDefaultBackupPath'))").Rows[0]
+        $sourceHost = [string]$srcInfo['MachineName']
+        $sourceBackupDir = [string]$srcInfo['BackupDir']
+    }
     $dstInfo = (Invoke-Sql -Server $DestinationInstance -Query "SELECT ServerName = CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')), Major = CONVERT(int, SERVERPROPERTY('ProductMajorVersion')), DataPath = CONVERT(nvarchar(512), SERVERPROPERTY('InstanceDefaultDataPath')), LogPath = CONVERT(nvarchar(512), SERVERPROPERTY('InstanceDefaultLogPath'))").Rows[0]
-    $sourceHost = [string]$srcInfo['MachineName']
 
-    if ([string]$srcInfo['ServerName'] -eq [string]$dstInfo['ServerName'] -and -not $DestinationDatabase) {
+    if ($srcInfo -and [string]$srcInfo['ServerName'] -eq [string]$dstInfo['ServerName'] -and -not $DestinationDatabase) {
         throw 'The source and the destination are the same instance, so the copy needs -DestinationDatabase.'
+    }
+    if ($offlineSource -and $From -eq 'Path' -and -not $BackupPathMap) {
+        Write-Log 'With -SourceHistoryFile the source machine name is unknown, so a path it cannot see will not be retried through an admin share. If the destination cannot read the recorded paths, pass -BackupPathMap or use -From AzureBlob.' -Level WARN
     }
 
     $defaultData = [string]$dstInfo['DataPath']
@@ -1762,6 +1879,15 @@ try {
     }
     #endregion
 
+    $script:FileHistory = $null
+    if ($offlineSource) {
+        Start-Step 'Read the backup history file'
+        $script:FileHistory = Import-BackupHistory -Path $SourceHistoryFile
+        Write-Log ('{0} row(s) of history for {1} database(s)' -f $script:FileHistory.Count,
+                   @($script:FileHistory | ForEach-Object { [string]$_.database_name } | Select-Object -Unique).Count)
+        Complete-Step
+    }
+
     $setupDone = $true
 
     #==========================================================================
@@ -1788,7 +1914,44 @@ try {
             Write-Log ('---- {0} -> {1}.[{2}] ----' -f $dbName, $DestinationInstance, $dstName)
 
             #region History
-            Start-Step 'Read the backup history from the source'
+            Start-Step $(if ($offlineSource) { 'Read the backup history from the file' } else { 'Read the backup history from the source' })
+            if ($offlineSource) {
+                $cutoff = (Get-Date).AddDays(-$HistoryDays)
+                $rows = @($script:FileHistory | Where-Object { [string]$_.database_name -eq $dbName })
+                if ($rows.Count -eq 0) {
+                    throw ("{0} has no history for [{1}]. The names it does have: {2}" -f $SourceHistoryFile, $dbName,
+                           ((@($script:FileHistory | ForEach-Object { [string]$_.database_name } | Select-Object -Unique) | Sort-Object) -join ', '))
+                }
+                $sets = @()
+                foreach ($group in ($rows | Group-Object { [string]$_.backup_set_id })) {
+                    $first = $group.Group[0]
+                    $finish = Read-HistoryDate $first.backup_finish_date
+                    if ($finish -lt $cutoff) { continue }
+                    $sets += [pscustomobject]@{
+                        SetId        = [int]$first.backup_set_id
+                        Uuid         = [string]$first.backup_set_uuid
+                        Type         = [string]$first.type
+                        Position     = [int]$first.position
+                        FirstLsn     = [decimal]$first.first_lsn
+                        LastLsn      = [decimal]$first.last_lsn
+                        CheckpointLsn     = [decimal]$first.checkpoint_lsn
+                        DatabaseBackupLsn = [decimal]$first.database_backup_lsn
+                        StartDate    = Read-HistoryDate $first.backup_start_date
+                        FinishDate   = $finish
+                        FamilyGuid   = [string]$first.family_guid
+                        IsCopyOnly   = ([string]$first.is_copy_only -eq '1')
+                        HasChecksums = ([string]$first.has_backup_checksums -eq '1')
+                        Size         = [double]$first.backup_size
+                        Major        = [int]$first.software_major_version
+                        Encrypted    = ([string]$first.key_algorithm).Trim().Length -gt 0
+                        Files        = @($group.Group | Sort-Object { [int]$_.family_sequence_number } | ForEach-Object { [string]$_.physical_device_name })
+                    }
+                }
+                if ($sets.Count -eq 0) {
+                    throw ("{0} has history for [{1}] but none of it is within the last {2} days. Raise -HistoryDays, or export it again." -f $SourceHistoryFile, $dbName, $HistoryDays)
+                }
+            }
+            else {
             $history = Invoke-Sql -Server $SourceInstance -Query $SourceHistoryQuery -Parameters @{ '@db' = $dbName; '@days' = $HistoryDays }
             if ($history.Rows.Count -eq 0) {
                 $extra = ''
@@ -1822,6 +1985,7 @@ try {
                     Encrypted    = -not ($first['key_algorithm'] -is [DBNull])
                     Files        = @($group.Group | Sort-Object { [int]$_['family_sequence_number'] } | ForEach-Object { [string]$_['physical_device_name'] })
                 }
+            }
             }
             Write-Detail ('  {0} backup set(s) in history: {1} full, {2} differential, {3} log' -f $sets.Count,
                           @($sets | Where-Object { $_.Type -eq 'D' }).Count, @($sets | Where-Object { $_.Type -eq 'I' }).Count,
@@ -2071,7 +2235,7 @@ try {
             #region The tail of the log, off the source
             if ($TailLog) {
                 Start-Step 'Back up the tail of the log on the source'
-                $folder = if ($TailLogPath) { $TailLogPath } else { [string]$srcInfo['BackupDir'] }
+                $folder = if ($TailLogPath) { $TailLogPath } else { $sourceBackupDir }
                 if (-not $folder) { throw 'nowhere to put the tail log backup: pass -TailLogPath' }
                 $tailFile = '{0}\{1}_tail_{2}.trn' -f $folder.TrimEnd('\'), $dbName, (Get-Date).ToString('yyyyMMdd_HHmmss')
 
