@@ -1,4 +1,5 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
     Shows exactly how a SQL Server instance and this machine negotiate encryption: which TLS

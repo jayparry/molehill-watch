@@ -1,4 +1,5 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
     Gives a principal on one instance the same access another principal has on another instance:

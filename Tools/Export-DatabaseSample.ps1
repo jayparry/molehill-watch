@@ -1,4 +1,5 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
     Exports a random sample of rows from every user table in a database to CSV, then zips the output.
