@@ -377,6 +377,57 @@ function Complete-Step {
 # The decisions, kept free of SQL Server and Azure so -SelfTest can check them
 #==============================================================================
 <#
+  Puts a timestamp into one known type, whatever shape it arrived in.
+
+  Az.Storage hands back LastModified as a DateTimeOffset, SQL Server hands back a DateTime, and a
+  file read off disk can give either or a string. Letting PowerShell convert between them is the
+  trap: the conversion goes through the string form in the machine's own culture, so code that
+  works on one regional setting throws "Cannot convert the ... value of type System.DateTimeOffset
+  to type System.DateTime" on another. Everything here is normalised to a UTC DateTimeOffset on the
+  way in, parsed with the invariant culture, and compared as that type only.
+#>
+function ConvertTo-UtcTime {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [AllowNull()] $Value)
+
+    if ($null -eq $Value) { throw 'no timestamp to convert' }
+    if ($Value -is [System.DateTimeOffset]) { return $Value.ToUniversalTime() }
+    if ($Value -is [datetime]) {
+        $when = [datetime]$Value
+        # an unspecified kind is treated as UTC rather than as local: blob and backup timestamps
+        # are UTC, and guessing local would shift them by the server's offset
+        if ($when.Kind -eq [System.DateTimeKind]::Unspecified) {
+            $when = [datetime]::SpecifyKind($when, [System.DateTimeKind]::Utc)
+        }
+        return ([System.DateTimeOffset]$when).ToUniversalTime()
+    }
+
+    $text = ([string]$Value).Trim()
+    if (-not $text) { throw 'no timestamp to convert' }
+    $invariant = [System.Globalization.CultureInfo]::InvariantCulture
+    $styles = [System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal
+    $parsed = [System.DateTimeOffset]::MinValue
+    if ([System.DateTimeOffset]::TryParse($text, $invariant, $styles, [ref]$parsed)) { return $parsed.ToUniversalTime() }
+
+    # the shapes SQL Server, sqlcmd and the Azure libraries produce, none of them regional
+    $formats = @('yyyy-MM-ddTHH:mm:ss.fffK', 'yyyy-MM-ddTHH:mm:ssK', 'yyyy-MM-dd HH:mm:ss.fff',
+                 'yyyy-MM-dd HH:mm:ss', 'M/d/yyyy h:mm:ss tt zzz', 'M/d/yyyy h:mm:ss tt',
+                 'd/M/yyyy HH:mm:ss zzz', 'd/M/yyyy HH:mm:ss')
+    if ([System.DateTimeOffset]::TryParseExact($text, $formats, $invariant, $styles, [ref]$parsed)) { return $parsed.ToUniversalTime() }
+    throw ("cannot make a date out of '" + $text + "'")
+}
+
+# one spelling for dates in the output, so a log reads the same whatever region the server is set to
+function Format-Stamp {
+    [CmdletBinding()]
+    param([AllowNull()] $Value, [string] $Format = 'dd MMM yyyy HH:mm')
+
+    if ($null -eq $Value) { return '(no date)' }
+    try { (ConvertTo-UtcTime $Value).ToString($Format, [System.Globalization.CultureInfo]::InvariantCulture) + ' UTC' }
+    catch { '(unreadable date)' }
+}
+
+<#
   Pulls an instance string apart: SQL01, SQL01\SALES, SQL01,14330, sql01.contoso.com\SALES,1433,
   tcp:SQL01, (local), . and localhost all arrive here.
 #>
@@ -1188,7 +1239,7 @@ function Connect-BlobContainer {
     $index = @{}
     foreach ($blob in $blobs) {
         $leaf = ($blob.Name -split '/')[-1]
-        if (-not $index.ContainsKey($leaf) -or $blob.LastModified -gt $index[$leaf].LastModified) { $index[$leaf] = $blob }
+        if (-not $index.ContainsKey($leaf) -or (ConvertTo-UtcTime $blob.LastModified) -gt (ConvertTo-UtcTime $index[$leaf].LastModified)) { $index[$leaf] = $blob }
         Write-Deep ('  blob {0} ({1})' -f $blob.Name, (Format-Size $blob.Length))
     }
     Write-Log "Found $($blobs.Count) blob(s) under '$Container/$Prefix'"

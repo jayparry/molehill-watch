@@ -873,7 +873,7 @@ function Connect-BlobContainer {
     $index = @{}
     foreach ($blob in $blobs) {
         $leaf = ($blob.Name -split '/')[-1]
-        if (-not $index.ContainsKey($leaf) -or $blob.LastModified -gt $index[$leaf].LastModified) { $index[$leaf] = $blob }
+        if (-not $index.ContainsKey($leaf) -or (ConvertTo-UtcTime $blob.LastModified) -gt (ConvertTo-UtcTime $index[$leaf].LastModified)) { $index[$leaf] = $blob }
         Write-Deep ('  blob {0} ({1})' -f $blob.Name, (Format-Size $blob.Length))
     }
     Write-Log "Found $($blobs.Count) blob(s) under '$Container/$Prefix'"
@@ -903,6 +903,66 @@ function Get-BlobToFile {
 #==============================================================================
 # The decisions, kept free of SQL Server and Azure so -SelfTest can check them
 #==============================================================================
+
+<#
+  Puts a timestamp into one known type, whatever shape it arrived in.
+
+  Az.Storage hands back LastModified as a DateTimeOffset, SQL Server hands back a DateTime, and a
+  file read off disk can give either or a string. Letting PowerShell convert between them is the
+  trap: the conversion goes through the string form in the machine's own culture, so code that
+  works on one regional setting throws "Cannot convert the ... value of type System.DateTimeOffset
+  to type System.DateTime" on another. Everything here is normalised to a UTC DateTimeOffset on the
+  way in, parsed with the invariant culture, and compared as that type only.
+#>
+function ConvertTo-UtcTime {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [AllowNull()] $Value)
+
+    if ($null -eq $Value) { throw 'no timestamp to convert' }
+    if ($Value -is [System.DateTimeOffset]) { return $Value.ToUniversalTime() }
+    if ($Value -is [datetime]) {
+        $when = [datetime]$Value
+        # an unspecified kind is treated as UTC rather than as local: blob and backup timestamps
+        # are UTC, and guessing local would shift them by the server's offset
+        if ($when.Kind -eq [System.DateTimeKind]::Unspecified) {
+            $when = [datetime]::SpecifyKind($when, [System.DateTimeKind]::Utc)
+        }
+        return ([System.DateTimeOffset]$when).ToUniversalTime()
+    }
+
+    $text = ([string]$Value).Trim()
+    if (-not $text) { throw 'no timestamp to convert' }
+    $invariant = [System.Globalization.CultureInfo]::InvariantCulture
+    $styles = [System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal
+    $parsed = [System.DateTimeOffset]::MinValue
+    if ([System.DateTimeOffset]::TryParse($text, $invariant, $styles, [ref]$parsed)) { return $parsed.ToUniversalTime() }
+
+    # the shapes SQL Server, sqlcmd and the Azure libraries produce, none of them regional
+    $formats = @('yyyy-MM-ddTHH:mm:ss.fffK', 'yyyy-MM-ddTHH:mm:ssK', 'yyyy-MM-dd HH:mm:ss.fff',
+                 'yyyy-MM-dd HH:mm:ss', 'M/d/yyyy h:mm:ss tt zzz', 'M/d/yyyy h:mm:ss tt',
+                 'd/M/yyyy HH:mm:ss zzz', 'd/M/yyyy HH:mm:ss')
+    if ([System.DateTimeOffset]::TryParseExact($text, $formats, $invariant, $styles, [ref]$parsed)) { return $parsed.ToUniversalTime() }
+    throw ("cannot make a date out of '" + $text + "'")
+}
+
+<#
+  One spelling for dates in the output, so a log reads the same whatever region the server is set to.
+
+  -Utc is for values that really are UTC, such as a blob's LastModified. It is deliberately not the
+  default: SQL Server records backup_finish_date in the server's own local time, and labelling that
+  UTC would be a plain lie an hour wide.
+#>
+function Format-Stamp {
+    [CmdletBinding()]
+    param([AllowNull()] $Value, [string] $Format = 'dd MMM yyyy HH:mm', [switch] $Utc)
+
+    if ($null -eq $Value) { return '(no date)' }
+    try {
+        $text = (ConvertTo-UtcTime $Value).ToString($Format, [System.Globalization.CultureInfo]::InvariantCulture)
+        if ($Utc) { $text + ' UTC' } else { $text }
+    }
+    catch { '(unreadable date)' }
+}
 
 <#
   Where in the container a database's backups live. {db} is the database name, backslashes become
@@ -944,13 +1004,20 @@ function Select-LatestBackupBlob {
     })
     if ($usable.Count -eq 0) { return [pscustomobject]@{ Chosen = $null; Siblings = @(); Considered = 0 } }
 
-    $newest = @($usable | Sort-Object LastModified, Name | Select-Object -Last 1)[0]
-    $siblings = @($usable | Where-Object {
-        $_.Name -ne $newest.Name -and
-        [Math]::Abs((New-TimeSpan -Start $_.LastModified -End $newest.LastModified).TotalSeconds) -le $SiblingWindowSeconds
-    } | Sort-Object Name)
+    # normalise every timestamp once, then only ever compare that type. Az.Storage returns a
+    # DateTimeOffset and anything that coerces it to a DateTime does so through the machine's own
+    # regional setting, which is how this used to fail on a server set to US dates.
+    $dated = @($usable | ForEach-Object {
+        [pscustomobject]@{ Blob = $_; When = (ConvertTo-UtcTime $_.LastModified) }
+    })
 
-    [pscustomobject]@{ Chosen = $newest; Siblings = $siblings; Considered = $usable.Count }
+    $newest = @($dated | Sort-Object When, { $_.Blob.Name } | Select-Object -Last 1)[0]
+    $siblings = @($dated | Where-Object {
+        $_.Blob.Name -ne $newest.Blob.Name -and
+        [Math]::Abs(($_.When - $newest.When).TotalSeconds) -le $SiblingWindowSeconds
+    } | Sort-Object { $_.Blob.Name } | ForEach-Object { $_.Blob })
+
+    [pscustomobject]@{ Chosen = $newest.Blob; Siblings = $siblings; Considered = $usable.Count; ChosenWhen = $newest.When }
 }
 
 <#
@@ -980,8 +1047,12 @@ if ($SelfTest) {
         if ($Ok) { Write-Host "  PASS  $Name" -ForegroundColor Green }
         else { Write-Host "  FAIL  $Name $Detail" -ForegroundColor Red; $script:failed++ }
     }
+    # Az.Storage returns LastModified as a DateTimeOffset, so that is what the fake blobs carry.
+    # The old helper handed back a DateTime, which is how a conversion bug reached a live server.
     function Blob([string] $Name, [string] $When, [int] $Length = 1048576) {
-        [pscustomobject]@{ Name = $Name; LastModified = [datetime]$When; Length = $Length }
+        $utc = [datetime]::SpecifyKind([datetime]::ParseExact($When, 'yyyy-MM-dd HH:mm',
+                   [System.Globalization.CultureInfo]::InvariantCulture), [System.DateTimeKind]::Utc)
+        [pscustomobject]@{ Name = $Name; LastModified = [System.DateTimeOffset]$utc; Length = $Length }
     }
 
     Write-Host 'Restore-LatestAzureBackup self test'
@@ -1019,6 +1090,43 @@ if ($SelfTest) {
     Check 'a folder with no backups in it chooses nothing' ($null -eq $s.Chosen)
     $s = Select-LatestBackupBlob -Blobs @($mid, $new) -Extensions @('.trn')
     Check 'the extensions it accepts can be changed' ($null -eq $s.Chosen)
+
+    Write-Host '  dates, whatever the region' -ForegroundColor Gray
+    $offset = [System.DateTimeOffset]::new(2026, 10, 13, 10, 56, 59, [TimeSpan]::Zero)
+    Check 'a DateTimeOffset comes back as itself' ((ConvertTo-UtcTime $offset) -eq $offset)
+    $plain = [datetime]::SpecifyKind([datetime]::new(2026, 10, 13, 10, 56, 59), [System.DateTimeKind]::Utc)
+    Check 'a DateTime is taken as UTC, not shifted' ((ConvertTo-UtcTime $plain).UtcDateTime -eq $plain)
+    $unspecified = [datetime]::new(2026, 10, 13, 10, 56, 59)
+    Check 'an unspecified kind is not shifted either' ((ConvertTo-UtcTime $unspecified).Hour -eq 10)
+    Check 'the US string from the failing server reads correctly' ((ConvertTo-UtcTime '9/13/2026 10:56:59 AM +00:00').ToString('yyyy-MM-dd HH:mm:ss') -eq '2026-09-13 10:56:59')
+    Check 'an ISO string reads correctly' ((ConvertTo-UtcTime '2026-10-13T10:56:59').ToString('yyyy-MM-dd HH:mm') -eq '2026-10-13 10:56')
+    Check 'a SQL style string reads correctly' ((ConvertTo-UtcTime '2026-10-13 10:56:59.123').ToString('yyyy-MM-dd HH:mm') -eq '2026-10-13 10:56')
+    $threw = $false
+    try { ConvertTo-UtcTime 'not a date at all' | Out-Null } catch { $threw = $true }
+    Check 'nonsense is refused rather than guessed at' $threw
+    Check 'output is spelled the same way whatever the region' ((Format-Stamp $offset) -eq '13 Oct 2026 10:56')
+    Check 'and says UTC only where that is true' ((Format-Stamp $offset -Utc) -eq '13 Oct 2026 10:56 UTC')
+
+    # the real test: do it all again with the machine pretending to be somewhere else
+    $was = [System.Threading.Thread]::CurrentThread.CurrentCulture
+    try {
+        foreach ($culture in 'en-US', 'de-DE', 'en-GB') {
+            [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::new($culture)
+            $old = Blob 'FULL/DAILY/Sales/old.bak' '2026-10-11 22:05'
+            $mid = Blob 'FULL/DAILY/Sales/mid.bak' '2026-10-12 22:05'
+            $new = Blob 'FULL/DAILY/Sales/new.bak' '2026-10-13 22:05'
+            $pick = Select-LatestBackupBlob -Blobs @($old, $new, $mid)
+            Check ("under $culture the newest is still picked") ($pick.Chosen.Name -eq $new.Name)
+            Check ("under $culture days apart are not mistaken for stripes") ($pick.Siblings.Count -eq 0)
+
+            $stripe = Blob 'FULL/DAILY/Sales/new_stripe.bak' '2026-10-13 22:06'
+            $pick = Select-LatestBackupBlob -Blobs @($mid, $new, $stripe)
+            Check ("under $culture a minute apart is a candidate stripe") ($pick.Siblings.Count -eq 1 -and $pick.Siblings[0].Name -eq $new.Name)
+            Check ("under $culture the date still reads the same") ((Format-Stamp $new.LastModified -Utc) -eq '13 Oct 2026 22:05 UTC')
+            Check ("under $culture a US string still converts") ((ConvertTo-UtcTime '9/13/2026 10:56:59 AM +00:00').Month -eq 9)
+        }
+    }
+    finally { [System.Threading.Thread]::CurrentThread.CurrentCulture = $was }
 
     Write-Host '  which users stay' -ForegroundColor Gray
     Check 'dbo stays' (Test-SystemPrincipal -PrincipalId 1 -Name 'dbo' -Type 'S')
@@ -1323,7 +1431,7 @@ try {
             $prefix = Get-BlobPrefix -Pattern $BlobPathPattern -DatabaseName $dbName
             Write-Detail ("  looking under {0}/{1}" -f $ContainerName, $prefix)
             $inFolder = @($allBlobs | Where-Object { ([string]$_.Name).Replace('\', '/').StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) })
-            foreach ($b in $inFolder) { Write-Deep ('  {0} ({1}, {2:dd MMM HH:mm})' -f $b.Name, (Format-Size $b.Length), $b.LastModified) }
+            foreach ($b in $inFolder) { Write-Deep ('  {0} ({1}, {2})' -f $b.Name, (Format-Size $b.Length), (Format-Stamp $b.LastModified -Utc)) }
 
             $pick = Select-LatestBackupBlob -Blobs $inFolder
             if (-not $pick.Chosen) {
@@ -1331,7 +1439,7 @@ try {
                        $ContainerName, $prefix, $inFolder.Count)
             }
             $blob = $pick.Chosen
-            Write-Log ('Newest backup: {0} ({1}, written {2:dd MMM yyyy HH:mm})' -f $blob.Name, (Format-Size $blob.Length), $blob.LastModified)
+            Write-Log ('Newest backup: {0} ({1}, written {2})' -f $blob.Name, (Format-Size $blob.Length), (Format-Stamp $blob.LastModified -Utc))
             $outcome.Backup = $blob.Name
             if ($pick.Siblings.Count) {
                 Write-Detail ('  {0} other file(s) written within two minutes of it, which may be stripes of the same backup' -f $pick.Siblings.Count)
@@ -1385,11 +1493,11 @@ try {
             $backupType = [int]$row['BackupType']
             $families = [int]$row['FamilyCount']
             $inside = [string]$row['DatabaseName']
-            $taken = [datetime]$row['BackupFinishDate']
+            $taken = ConvertTo-UtcTime $row['BackupFinishDate']
             $outcome.BackupTaken = $taken
-            Write-Log ('The file holds a {0} backup of [{1}], finished {2:dd MMM yyyy HH:mm}, from SQL Server major version {3}' -f
+            Write-Log ('The file holds a {0} backup of [{1}], finished {2}, from SQL Server major version {3}' -f
                        $(switch ($backupType) { 1 { 'full' } 2 { 'transaction log' } 5 { 'differential' } default { "type $backupType" } }),
-                       $inside, $taken, $row['SoftwareVersionMajor'])
+                       $inside, (Format-Stamp $taken), $row['SoftwareVersionMajor'])
 
             if ($backupType -ne 1) {
                 throw ("that is not a full backup, so it cannot be restored on its own. The newest file under {0} is a {1}." -f
@@ -1630,7 +1738,7 @@ finally {
     }
     foreach ($outcome in $results) {
         $line = '{0,-20} {1}' -f $outcome.Result, $outcome.Database
-        if ($outcome.BackupTaken) { $line += ' (backup of {0:dd MMM yyyy HH:mm})' -f $outcome.BackupTaken }
+        if ($outcome.BackupTaken) { $line += ' (backup of {0})' -f (Format-Stamp $outcome.BackupTaken) }
         elseif ($outcome.Backup) { $line += ' ({0})' -f $outcome.Backup }
         if ($outcome.Detail) { $line += ' - ' + $outcome.Detail }
         Write-Log $line -Level $(if ($outcome.Result -like 'FAILED*') { 'ERROR' } elseif ($outcome.Result -like '*NOT TIDIED*') { 'WARN' } else { 'INFO' }) -Min Quiet
