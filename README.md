@@ -273,7 +273,16 @@ FULL/DAILY/<database name>/<something>.bak
 * **Newest wins, by when the blob was written**, because there is no `msdb` here to ask. Only backup files are considered, so an upload log sitting in the folder is ignored. `-BlobPathPattern` changes the shape, with `{db}` standing in for the name.
 * **It checks the file before touching the database**: the header has to say it is a full backup, of the database it claims to be, from a version this instance can restore. A log or differential backup, or one stripe of a set written across several files, is refused with what it actually is rather than failing inside `RESTORE`. That check also proves the SQL Server service account can read the staging folder, which is the usual reason a staged restore fails.
 * **Then, with every database copied**, each one is tidied: users dropped except the built-in ones, owner set to `sa`, recovery model set to `SIMPLE`. A user owning a schema or a role has it handed to `dbo` first, because otherwise it cannot be dropped, and anything that still refuses is reported with the reason.
-* `-AddUser` creates users for logins expected to exist already, **warning rather than failing** where one does not. `-AddUserRole` puts them in a role - without it they have no permissions at all. `-ReadOnly` is applied last, since a read-only database cannot be changed any further, and `-KeepUsers` opts out of the clearing.
+* `-AddUser` creates users for logins expected to exist already, **warning rather than failing** where one does not, and an entry can say **which database it is for** so one user need not go into all of them:
+
+  ```powershell
+  -AddUser 'BiTeam'                          # every database in -Database
+  -AddUser 'Sales:BiTeam:db_datareader'      # that one only, with that role
+  -AddUser @{ Database = 'Sales'; User = 'REPORTS\BiTeam'; Role = 'db_datareader','db_datawriter' }
+  ```
+
+  The colon form is there because `powershell.exe -File` turns every argument into a string and cannot pass a hashtable at all, which is what a scheduled task will be doing. `*` as the database means all of them, and naming one that is not in `-Database` is refused before anything is restored rather than quietly doing nothing. `-AddUserRole` supplies the role for entries that do not name their own; without a role a user has no permissions at all.
+* `-ReadOnly` is applied last, since a read-only database cannot be changed any further, and `-KeepUsers` opts out of the clearing.
 * **`AUTO_CLOSE` silently undoes `READ_ONLY`** - a database that closes and reopens comes back read-write - so where it is on it is turned off first, and the read-only state is read back afterwards rather than assumed.
 * Needs `Az.Storage` and nothing else; the restores are plain T-SQL. `-WhatIf` lists the backup it would use and changes nothing, `-SelfTest` checks the folder paths, the newest-backup choice and which principals are spared with nothing installed. **Exit code** is 0 (all done, or a clean dry run), 1 (at least one failed) or 2 (could not start).
 

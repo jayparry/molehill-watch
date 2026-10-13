@@ -91,12 +91,24 @@
     The recovery model to set once restored. Default SIMPLE.
 
 .PARAMETER AddUser
-    Users to create in every restored database, each mapped to a login of the same name that is
-    expected to exist already. A missing login is a warning, not a failure.
+    Users to create, each mapped to a login of the same name that is expected to exist already. A
+    missing login is a warning, not a failure.
+
+    An entry can name which database it is for, so one user need not go into all of them. Three
+    shapes are accepted, and they can be mixed:
+
+      'BiTeam'                             every database in -Database
+      'Sales:BiTeam:db_datareader'         that database only, with that role
+      @{ Database = 'Sales'; User = 'REPORTS\BiTeam'; Role = 'db_datareader', 'db_datawriter' }
+
+    The colon form exists because powershell.exe -File turns every argument into a string and
+    cannot pass a hashtable at all, which is what a scheduled task will be doing. Use '*' as the
+    database to mean all of them. Roles can be comma separated inside the third part. Naming a
+    database that is not in -Database is refused up front rather than quietly doing nothing.
 
 .PARAMETER AddUserRole
-    Database roles to put those users in, e.g. db_datareader, db_owner. Without this they are
-    created with no permissions at all, which is rarely what anyone wants.
+    The role or roles to use for entries that do not name their own, e.g. db_datareader, db_owner.
+    Without a role a user is created with no permissions at all, which is rarely what anyone wants.
 
 .PARAMETER ReadOnly
     Set each database read-only once everything else is done.
@@ -147,6 +159,13 @@
         -AddUser REPORTS\BiTeam -AddUserRole db_datareader -ReadOnly
 
 .EXAMPLE
+    # the reporting team on Sales only, the application account on both
+    .\Restore-LatestAzureBackup.ps1 -DestinationInstance SQL02 -Database Sales,Stock `
+        -StorageAccountName mycompany -ContainerName backups -SasToken $sas `
+        -LocalBackupPath D:\RestoreStaging `
+        -AddUser 'Sales:REPORTS\BiTeam:db_datareader', 'AppSvc' -AddUserRole db_datawriter
+
+.EXAMPLE
     .\Restore-LatestAzureBackup.ps1 -DestinationInstance SQL02 -Database Sales `
         -StorageAccountName mycompany -ContainerName backups -SasToken $sas `
         -LocalBackupPath D:\RestoreStaging -WhatIf
@@ -177,7 +196,7 @@ param(
     # what to do with each copy afterwards
     [string] $Owner = 'sa',
     [ValidateSet('SIMPLE', 'FULL', 'BULK_LOGGED')] [string] $RecoveryModel = 'SIMPLE',
-    [string[]] $AddUser,
+    [object[]] $AddUser,
     [string[]] $AddUserRole,
     [switch] $ReadOnly,
     [switch] $KeepUsers,
@@ -1021,6 +1040,96 @@ function Select-LatestBackupBlob {
 }
 
 <#
+  Works out who gets added to what.
+
+  -AddUser takes a plain name for every database, a 'Database:User:Role' string for one of them, or
+  a hashtable spelling the three out. The string form carries its weight because powershell.exe
+  -File hands every argument over as a string and cannot pass a hashtable at all - and a scheduled
+  task is exactly where this ends up. A colon is safe as the separator: a Windows account has a
+  backslash in it, never a colon.
+
+  Everything is flattened into one grant per database and user, with the roles merged, so the
+  caller just asks what a given database needs.
+#>
+function Resolve-UserGrant {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()] [object[]] $Entries,
+        [AllowEmptyCollection()] [string[]] $DefaultRoles,
+        [Parameter(Mandatory)] [string[]] $Databases
+    )
+
+    $grants = New-Object System.Collections.Generic.List[object]
+    $unknown = New-Object System.Collections.Generic.List[string]
+
+    function Add-Grant([string] $Database, [string] $User, [string[]] $Roles) {
+        $existing = @($grants | Where-Object { $_.Database -eq $Database -and $_.User -eq $User })
+        if ($existing.Count) {
+            foreach ($role in $Roles) { if ($existing[0].Roles -notcontains $role) { $existing[0].Roles += $role } }
+            return
+        }
+        $grants.Add([pscustomobject]@{ Database = $Database; User = $User; Roles = @($Roles) })
+    }
+
+    foreach ($entry in @($Entries)) {
+        if ($null -eq $entry) { continue }
+        $database = '*'
+        $user = ''
+        $roles = @()
+
+        if ($entry -is [System.Collections.IDictionary] -or $entry -is [pscustomobject]) {
+            $get = {
+                param($names)
+                foreach ($name in $names) {
+                    if ($entry -is [System.Collections.IDictionary]) {
+                        foreach ($key in $entry.Keys) { if ([string]$key -eq $name) { return $entry[$key] } }
+                    }
+                    else {
+                        $property = $entry.PSObject.Properties[$name]
+                        if ($property) { return $property.Value }
+                    }
+                }
+                $null
+            }
+            $d = & $get @('Database', 'Db', 'DatabaseName')
+            $u = & $get @('User', 'UserName', 'Login', 'Name')
+            $r = & $get @('Role', 'Roles')
+            if ($d) { $database = ([string]$d).Trim() }
+            if ($u) { $user = ([string]$u).Trim() }
+            if ($r) { $roles = @($r | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ }) }
+            if (-not $user) { throw "an -AddUser entry does not say who to add: $($entry | Out-String)".Trim() }
+        }
+        else {
+            $text = ([string]$entry).Trim()
+            if (-not $text) { continue }
+            $parts = $text.Split(':')
+            if ($parts.Count -eq 1) { $user = $parts[0].Trim() }
+            elseif ($parts.Count -ge 2) {
+                $database = $parts[0].Trim()
+                $user = $parts[1].Trim()
+                if ($parts.Count -ge 3) {
+                    $roles = @(($parts[2..($parts.Count - 1)] -join ':') -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+                }
+            }
+            if (-not $user) { throw "cannot make sense of the -AddUser entry '$text': expected a name, or Database:User:Role." }
+        }
+
+        if ($roles.Count -eq 0) { $roles = @(@($DefaultRoles) | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ }) }
+
+        if ($database -eq '*') {
+            foreach ($db in $Databases) { Add-Grant $db $user $roles }
+        }
+        else {
+            $match = @($Databases | Where-Object { $_ -eq $database })
+            if ($match.Count -eq 0) { $unknown.Add(('{0} (for {1})' -f $database, $user)); continue }
+            Add-Grant $match[0] $user $roles
+        }
+    }
+
+    [pscustomobject]@{ Grants = $grants.ToArray(); Unknown = $unknown.ToArray() }
+}
+
+<#
   Whether a database principal is one of the built-in ones that has to stay.
 
   dbo, guest, INFORMATION_SCHEMA and sys are principals 1 to 4 in every database. The fixed roles
@@ -1090,6 +1199,53 @@ if ($SelfTest) {
     Check 'a folder with no backups in it chooses nothing' ($null -eq $s.Chosen)
     $s = Select-LatestBackupBlob -Blobs @($mid, $new) -Extensions @('.trn')
     Check 'the extensions it accepts can be changed' ($null -eq $s.Chosen)
+
+    Write-Host '  who gets added to what' -ForegroundColor Gray
+    $dbs = 'Sales', 'Stock'
+    $g = Resolve-UserGrant -Entries @('BiTeam') -DefaultRoles @('db_datareader') -Databases $dbs
+    Check 'a bare name goes into every database' ($g.Grants.Count -eq 2 -and ($g.Grants | ForEach-Object { $_.Database }) -contains 'Stock')
+    Check 'and picks up the default role' ($g.Grants[0].Roles -contains 'db_datareader')
+
+    $g = Resolve-UserGrant -Entries @('Sales:BiTeam') -DefaultRoles @('db_datareader') -Databases $dbs
+    Check 'Database:User goes into that one only' ($g.Grants.Count -eq 1 -and $g.Grants[0].Database -eq 'Sales')
+    Check 'and still takes the default role' ($g.Grants[0].Roles -contains 'db_datareader')
+
+    $g = Resolve-UserGrant -Entries @('Sales:BiTeam:db_owner') -DefaultRoles @('db_datareader') -Databases $dbs
+    Check 'a named role beats the default' ($g.Grants[0].Roles.Count -eq 1 -and $g.Grants[0].Roles[0] -eq 'db_owner')
+
+    $g = Resolve-UserGrant -Entries @('Sales:BiTeam:db_datareader,db_datawriter') -Databases $dbs
+    Check 'roles can be comma separated in the string form' ($g.Grants[0].Roles.Count -eq 2)
+
+    $g = Resolve-UserGrant -Entries @('*:BiTeam:db_owner') -Databases $dbs
+    Check 'a star means every database' ($g.Grants.Count -eq 2)
+
+    $g = Resolve-UserGrant -Entries @('CONTOSO\\jo') -Databases $dbs
+    Check 'a Windows account with a backslash is not mangled' ($g.Grants[0].User -eq 'CONTOSO\\jo')
+    $g = Resolve-UserGrant -Entries @('Sales:CONTOSO\\jo:db_datareader') -Databases $dbs
+    Check 'and works in the string form too' ($g.Grants.Count -eq 1 -and $g.Grants[0].User -eq 'CONTOSO\\jo')
+
+    $g = Resolve-UserGrant -Entries @(@{ Database = 'Stock'; User = 'AppSvc'; Role = 'db_datawriter', 'db_datareader' }) -Databases $dbs
+    Check 'a hashtable entry works' ($g.Grants.Count -eq 1 -and $g.Grants[0].Database -eq 'Stock' -and $g.Grants[0].Roles.Count -eq 2)
+    $g = Resolve-UserGrant -Entries @([pscustomobject]@{ DatabaseName = 'Sales'; Login = 'AppSvc'; Roles = 'db_owner' }) -Databases $dbs
+    Check 'and the other spellings of its keys' ($g.Grants.Count -eq 1 -and $g.Grants[0].User -eq 'AppSvc')
+    $g = Resolve-UserGrant -Entries @(@{ User = 'AppSvc' }) -DefaultRoles @('db_datareader') -Databases $dbs
+    Check 'a hashtable with no database means all of them' ($g.Grants.Count -eq 2)
+
+    $g = Resolve-UserGrant -Entries @('Sales:BiTeam:db_datareader', 'BiTeam') -DefaultRoles @('db_datawriter') -Databases $dbs
+    Check 'the same user twice is merged, not duplicated' (@($g.Grants | Where-Object { $_.Database -eq 'Sales' }).Count -eq 1)
+    Check 'and its roles are merged' ((@($g.Grants | Where-Object { $_.Database -eq 'Sales' })[0].Roles | Sort-Object) -join ',' -eq 'db_datareader,db_datawriter')
+
+    $g = Resolve-UserGrant -Entries @('Sale:BiTeam') -Databases $dbs
+    Check 'a database that is not being restored is reported, not ignored' ($g.Grants.Count -eq 0 -and $g.Unknown.Count -eq 1)
+    Check 'and the report says which user it was for' ($g.Unknown[0] -match 'BiTeam')
+
+    $g = Resolve-UserGrant -Entries @('BiTeam') -Databases $dbs
+    Check 'no default role leaves the roles empty rather than inventing one' (@($g.Grants[0].Roles).Count -eq 0)
+    $g = Resolve-UserGrant -Entries @() -Databases $dbs
+    Check 'nothing asked for is nothing granted' ($g.Grants.Count -eq 0)
+    $threw = $false
+    try { Resolve-UserGrant -Entries @('Sales:') -Databases $dbs | Out-Null } catch { $threw = $true }
+    Check 'an entry with no user is refused' $threw
 
     Write-Host '  dates, whatever the region' -ForegroundColor Gray
     $offset = [System.DateTimeOffset]::new(2026, 10, 13, 10, 56, 59, [TimeSpan]::Zero)
@@ -1255,14 +1411,14 @@ SELECT UserName, Result, Detail FROM @outcome ORDER BY Result, UserName;
 #>
 function Add-DatabaseUser {
     [CmdletBinding()]
-    param([string] $Server, [string] $DatabaseName, [string[]] $Users, [string[]] $Roles)
+    param([string] $Server, [string] $DatabaseName, [AllowEmptyCollection()] [object[]] $Grants)
 
     $created = New-Object System.Collections.Generic.List[string]
     $noLogin = New-Object System.Collections.Generic.List[string]
     $failed = New-Object System.Collections.Generic.List[string]
 
-    foreach ($user in $Users) {
-        $name = ([string]$user).Trim()
+    foreach ($grant in @($Grants)) {
+        $name = ([string]$grant.User).Trim()
         if (-not $name) { continue }
         $login = Get-Scalar -Server $Server -Parameters @{ '@n' = $name } -Query `
                  "SELECT name FROM sys.server_principals WHERE name = @n AND type IN ('S','U','G','E','X')"
@@ -1270,15 +1426,15 @@ function Add-DatabaseUser {
         try {
             $statement = 'IF DATABASE_PRINCIPAL_ID(N''' + ($name -replace "'", "''") + ''') IS NULL CREATE USER ' + (Esc-Name $name) + ' FOR LOGIN ' + (Esc-Name $name) + ';'
             [void](Invoke-Sql -Server $Server -Query $statement -DatabaseName $DatabaseName)
-            foreach ($role in @($Roles)) {
+            foreach ($role in @($grant.Roles)) {
                 $r = ([string]$role).Trim()
                 if (-not $r) { continue }
                 [void](Invoke-Sql -Server $Server -DatabaseName $DatabaseName -Query `
                        ('ALTER ROLE ' + (Esc-Name $r) + ' ADD MEMBER ' + (Esc-Name $name) + ';'))
             }
-            $created.Add($name)
+            $created.Add($(if (@($grant.Roles).Count) { '{0} in {1}' -f $name, (@($grant.Roles) -join ', ') } else { $name }))
         }
-        catch { $failed.Add('{0}: {1}' -f $name, ($_.Exception.GetBaseException().Message -split "`r?`n")[0]) }
+        catch { $failed.Add(('{0}: {1}' -f $name, ($_.Exception.GetBaseException().Message -split "`r?`n")[0])) }
     }
     [pscustomobject]@{ Created = $created.ToArray(); NoLogin = $noLogin.ToArray(); Failed = $failed.ToArray() }
 }
@@ -1324,6 +1480,23 @@ if ($null -eq $SasToken) { Write-Host '  -SasToken is needed.' -ForegroundColor 
 if ($AddUserRole -and -not $AddUser) {
     Write-Host '  -AddUserRole only means something with -AddUser.' -ForegroundColor Red
     exit 2
+}
+
+# worked out now rather than per database: naming a database that is not being restored is a typo,
+# and finding out after the restores would mean a user silently missing from a copy already handed over
+$userGrants = @()
+if ($AddUser) {
+    try { $resolved = Resolve-UserGrant -Entries $AddUser -DefaultRoles $AddUserRole -Databases $databases }
+    catch {
+        Write-Host ('  ' + ($_.Exception.Message -split "`r?`n")[0]) -ForegroundColor Red
+        exit 2
+    }
+    if ($resolved.Unknown.Count) {
+        Write-Host ('  -AddUser names database(s) that are not in -Database: ' + ($resolved.Unknown -join '; ')) -ForegroundColor Red
+        Write-Host ('  the databases being restored are: ' + ($databases -join ', ')) -ForegroundColor Gray
+        exit 2
+    }
+    $userGrants = $resolved.Grants
 }
 
 $DestinationInstance = $DestinationInstance.Trim()
@@ -1647,12 +1820,14 @@ try {
                     -Statement ("ALTER DATABASE {DB} SET RECOVERY $RecoveryModel;")
                 Complete-Step
 
-                if ($AddUser) {
+                $mine = @($userGrants | Where-Object { $_.Database -eq $dbName })
+                if ($mine.Count) {
                     Start-Step 'Add the users asked for'
-                    $added = Add-DatabaseUser -Server $DestinationInstance -DatabaseName $dbName -Users $AddUser -Roles $AddUserRole
+                    $added = Add-DatabaseUser -Server $DestinationInstance -DatabaseName $dbName -Grants $mine
                     if ($added.Created.Count) {
-                        Write-Log ('Added {0}{1}' -f ($added.Created -join ', '),
-                                   $(if ($AddUserRole) { ' in ' + ($AddUserRole -join ', ') } else { ' with no role membership, so no permissions yet' }))
+                        $roleless = @($mine | Where-Object { @($_.Roles).Count -eq 0 })
+                        Write-Log ('Added ' + ($added.Created -join '; ') +
+                                   $(if ($roleless.Count) { ' - no role membership, so no permissions yet' } else { '' }))
                     }
                     foreach ($missing in $added.NoLogin) {
                         Write-Log ("There is no login called '{0}' on {1}, so no user was created for it. Create the login first, then run this again." -f $missing, $DestinationInstance) -Level WARN
@@ -1660,6 +1835,7 @@ try {
                     foreach ($failure in $added.Failed) { Write-Log ('Could not add ' + $failure) -Level WARN }
                     Complete-Step
                 }
+                elseif ($userGrants.Count) { Write-Detail '  no users asked for on this one' }
 
                 # last, because a read-only database cannot be changed any further
                 if ($ReadOnly) {
@@ -1690,7 +1866,9 @@ try {
                 }
 
                 # say what it actually is now, not what was asked for
-                $final = (Invoke-Sql -Server $DestinationInstance -Parameters @{ '@db' = $dbName } -Query `
+                # -DatabaseName matters: sys.database_principals is scoped to the connection's
+                # database, so without it this counted master's users instead of this one's
+                $final = (Invoke-Sql -Server $DestinationInstance -DatabaseName $dbName -Parameters @{ '@db' = $dbName } -Query `
                           'SELECT recovery_model_desc, is_read_only, Owner = SUSER_SNAME(owner_sid), Users = (SELECT COUNT(*) FROM sys.database_principals WHERE type IN (''S'',''U'',''G'') AND principal_id > 4) FROM sys.databases WHERE name = @db').Rows[0]
                 Write-Log ('{0} is now: owner {1}, recovery {2}, {3}, {4} user(s) besides the built-in ones' -f
                            $dbName, $final['Owner'], $final['recovery_model_desc'],
@@ -1733,13 +1911,15 @@ finally {
                    $(if ($KeepUsers) { 'users left alone, ' } else { 'users cleared, ' }),
                    $(if ($ownerLogin -and $ownerLogin.Login) { $ownerLogin.Login } else { 'unchanged' }),
                    $RecoveryModel,
-                   $(if ($AddUser) { ', users added: ' + ($AddUser -join ', ') } else { '' }),
+                   $(if ($userGrants.Count) { ', users added per database' } else { '' }),
                    $(if ($ReadOnly) { ', read-only' } else { '' })) -Min Quiet
     }
     foreach ($outcome in $results) {
         $line = '{0,-20} {1}' -f $outcome.Result, $outcome.Database
         if ($outcome.BackupTaken) { $line += ' (backup of {0})' -f (Format-Stamp $outcome.BackupTaken) }
         elseif ($outcome.Backup) { $line += ' ({0})' -f $outcome.Backup }
+        $granted = @($userGrants | Where-Object { $_.Database -eq $outcome.Database } | ForEach-Object { $_.User })
+        if ($granted.Count) { $line += ' [+' + ($granted -join ', ') + ']' }
         if ($outcome.Detail) { $line += ' - ' + $outcome.Detail }
         Write-Log $line -Level $(if ($outcome.Result -like 'FAILED*') { 'ERROR' } elseif ($outcome.Result -like '*NOT TIDIED*') { 'WARN' } else { 'INFO' }) -Min Quiet
     }
