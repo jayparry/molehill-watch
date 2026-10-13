@@ -306,7 +306,7 @@ FULL/DAILY/<database name>/<something>.bak
 
 * **Newest wins, by when the blob was written**, because there is no `msdb` here to ask. Only backup files are considered, so an upload log sitting in the folder is ignored. `-BlobPathPattern` changes the shape, with `{db}` standing in for the name.
 * **It checks the file before touching the database**: the header has to say it is a full backup, of the database it claims to be, from a version this instance can restore. A log or differential backup, or one stripe of a set written across several files, is refused with what it actually is rather than failing inside `RESTORE`. That check also proves the SQL Server service account can read the staging folder, which is the usual reason a staged restore fails.
-* **Then, with every database copied**, each one is tidied: users dropped except the built-in ones, owner set to `sa`, recovery model set to `SIMPLE`. A user owning a schema or a role has it handed to `dbo` first, because otherwise it cannot be dropped, and anything that still refuses is reported with the reason.
+* **Then, as soon as that database is restored** and before the next one is downloaded, it is settled: users dropped except the built-in ones, owner set to `sa`, recovery model set to `SIMPLE`, encrypted if you asked for it, read-only last. A user owning a schema or a role has it handed to `dbo` first, because otherwise it cannot be dropped, and anything that still refuses is reported with the reason. Doing this per database rather than once at the end is the point: a copy of production should not sit with the production users still in it, unencrypted, while the rest of the list downloads.
 * `-AddUser` creates users for logins expected to exist already, **warning rather than failing** where one does not, and an entry can say **which database it is for** so one user need not go into all of them:
 
   ```powershell
@@ -316,7 +316,18 @@ FULL/DAILY/<database name>/<something>.bak
   ```
 
   The colon form is there because `powershell.exe -File` turns every argument into a string and cannot pass a hashtable at all, which is what a scheduled task will be doing. `*` as the database means all of them, and naming one that is not in `-Database` is refused before anything is restored rather than quietly doing nothing. `-AddUserRole` supplies the role for entries that do not name their own; without a role a user has no permissions at all.
-* `-ReadOnly` is applied last, since a read-only database cannot be changed any further, and `-KeepUsers` opts out of the clearing.
+* `-EnableTde` encrypts each copy with TDE (AES-256) as it lands, and waits for the encryption scan to finish before moving on. The destination needs a database master key and a server certificate first - a one-off - and this **refuses before anything is restored**, with the statements to run, rather than creating keys whose backup nobody has taken:
+
+  ```sql
+  USE master;
+  CREATE MASTER KEY ENCRYPTION BY PASSWORD = '<a long random string>';
+  CREATE CERTIFICATE MolehillTde WITH SUBJECT = 'TDE certificate for restored copies';
+  BACKUP CERTIFICATE MolehillTde TO FILE = 'D:\Keys\MolehillTde.cer'
+      WITH PRIVATE KEY (FILE = 'D:\Keys\MolehillTde.pvk', ENCRYPTION BY PASSWORD = '<another>');
+  ```
+
+  That certificate, and the master key behind it, are the only way these databases can ever be read again - so keep both backups and their passwords somewhere that is not that server. Editions: Standard, Enterprise, Developer or Evaluation; SQL Server 2019 is what brought TDE to Standard. **Express does not have it at any version** and says so up front, because the engine refuses `CREATE DATABASE ENCRYPTION KEY` outright. Encrypting anything also encrypts `tempdb` for the whole instance, permanently, which is a decision about the server rather than about these copies. `-TdeWaitMinutes` caps the wait; a database still encrypting when that runs out carries on in the background, and `-ReadOnly` is skipped for it rather than applied to a scan still in progress.
+* `-ReadOnly` is applied last, since a read-only database cannot be changed any further - and that includes creating an encryption key, which is why `-EnableTde` runs before it and not after. `-KeepUsers` opts out of the clearing.
 * **`AUTO_CLOSE` silently undoes `READ_ONLY`** - a database that closes and reopens comes back read-write - so where it is on it is turned off first, and the read-only state is read back afterwards rather than assumed.
 * Needs `Az.Storage` and nothing else; the restores are plain T-SQL. `-WhatIf` lists the backup it would use and changes nothing, `-SelfTest` checks the folder paths, the newest-backup choice and which principals are spared with nothing installed. **Exit code** is 0 (all done, or a clean dry run), 1 (at least one failed) or 2 (could not start).
 

@@ -1,4 +1,5 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
     Restores the newest full backup sitting in an Azure Blob Storage container onto a destination
@@ -16,15 +17,15 @@
 
         FULL/DAILY/<database name>/<something>.bak
 
-    so -Database Sales,Stock reads FULL/DAILY/Sales/ and FULL/DAILY/Stock/ and takes the newest
-    .bak from each. -BlobPathPattern changes that shape if yours differs.
+    so -Database Sales,Stock reads FULL/DAILY/Sales/ and FULL/DAILY/Stock/ and takes the
+    newest .bak from each. -BlobPathPattern changes that shape if yours differs.
 
     WHAT HAPPENS TO EACH DATABASE
       1. The newest backup in its folder is downloaded to the staging folder and its header read,
          which proves it is a full backup of the database it claims to be and that the destination
          can read the file at all.
       2. Anything of that name on the destination is taken offline and restored over.
-      3. Then, once every database has been restored:
+      3. Then, straight away, before the next database is downloaded:
            * every user is dropped except the built-in ones (dbo, guest, INFORMATION_SCHEMA, sys)
              and the fixed roles. A user owning a schema has that schema handed to dbo first,
              because otherwise it cannot be dropped. Anything that still refuses is reported with
@@ -33,11 +34,17 @@
            * the recovery model is set to SIMPLE
            * -AddUser creates the users you name, assuming each login already exists on the
              destination - and warning, rather than failing, where one does not
+           * -EnableTde encrypts it, and waits for the encryption to finish
            * -ReadOnly, last of all, sets the database read-only
 
-    The order matters and is deliberate: users are cleared before the owner is set, so nothing
-    clashes with sa, and read-only is left until the very end because a read-only database cannot
-    be changed further.
+    Each copy is dealt with as soon as it is restored rather than at the end of the run, so a copy
+    of production does not sit with its production users still in it, and unencrypted, while the
+    rest of the list downloads.
+
+    The order within that matters and is deliberate: the users it came with go first, because that
+    is what closes off access; the owner follows, so nothing clashes with sa; and read-only is left
+    until the very end, because a read-only database cannot be changed further - and that includes
+    creating an encryption key.
 
     Needs the Az.Storage module and nothing else; the restores are plain T-SQL.
 
@@ -116,6 +123,42 @@
 .PARAMETER KeepUsers
     Leave the existing users alone instead of clearing them out.
 
+.PARAMETER EnableTde
+    Encrypt each copy with Transparent Data Encryption as soon as it is restored, with AES-256, and
+    wait for the encryption to finish before moving on.
+
+    The destination has to be ready for it first, which is a one-off: a database master key in
+    master, and a server certificate for -TdeCertificateName to protect the per-database keys with.
+    This refuses before anything is restored, with the statements to run, rather than creating keys
+    whose backup nobody has taken.
+
+        USE master;
+        CREATE MASTER KEY ENCRYPTION BY PASSWORD = '<a long random string>';
+        CREATE CERTIFICATE MolehillTde WITH SUBJECT = 'TDE certificate for restored copies';
+        BACKUP MASTER KEY TO FILE = 'D:\Keys\dmk.key' ENCRYPTION BY PASSWORD = '<another>';
+        BACKUP CERTIFICATE MolehillTde TO FILE = 'D:\Keys\MolehillTde.cer'
+            WITH PRIVATE KEY (FILE = 'D:\Keys\MolehillTde.pvk', ENCRYPTION BY PASSWORD = '<a third>');
+
+    Keep those backups and their passwords somewhere that is not that server. Without the
+    certificate no instance can restore or attach these databases - which for a disposable copy
+    means re-running this script, but for anything else means the data is gone.
+
+    Editions: Standard, Enterprise, Developer and Evaluation. SQL Server 2019 is what brought it to
+    Standard; before that it is Enterprise or Developer only. Express does not have it at any
+    version, and this says so rather than letting the restore run and the encryption fail.
+
+    It encrypts tempdb for the whole instance as a side effect, permanently, which affects every
+    other database on that instance.
+
+.PARAMETER TdeCertificateName
+    The server certificate in master that protects each database's encryption key. Default
+    MolehillTde. It must already exist.
+
+.PARAMETER TdeWaitMinutes
+    How long to wait for a database's encryption to finish before moving on, in minutes. Default
+    60. The encryption itself carries on in the background either way; what a timeout costs is
+    -ReadOnly, which is skipped rather than applied to a database still being encrypted.
+
 .PARAMETER KeepLocalCopy
     Keep the downloaded backup files instead of deleting them after a successful restore.
 
@@ -159,6 +202,12 @@
         -AddUser REPORTS\BiTeam -AddUserRole db_datareader -ReadOnly
 
 .EXAMPLE
+    # encrypted as each one lands, then handed over read-only
+    .\Restore-LatestAzureBackup.ps1 -DestinationInstance SQL02 -Database Sales,Stock `
+        -StorageAccountName mycompany -ContainerName backups -SasToken $sas `
+        -LocalBackupPath D:\RestoreStaging -EnableTde -ReadOnly
+
+.EXAMPLE
     # the reporting team on Sales only, the application account on both
     .\Restore-LatestAzureBackup.ps1 -DestinationInstance SQL02 -Database Sales,Stock `
         -StorageAccountName mycompany -ContainerName backups -SasToken $sas `
@@ -200,6 +249,9 @@ param(
     [string[]] $AddUserRole,
     [switch] $ReadOnly,
     [switch] $KeepUsers,
+    [switch] $EnableTde,
+    [string] $TdeCertificateName = 'MolehillTde',
+    [ValidateRange(1, 1440)] [int] $TdeWaitMinutes = 60,
 
     # connecting
     [PSCredential] $SqlCredential,
@@ -1147,6 +1199,64 @@ function Test-SystemPrincipal {
     $false
 }
 
+<#
+  Whether an instance can encrypt a database with a certificate of its own, worked out from facts
+  rather than from a connection so that the reasoning is testable.
+
+  SQL Server 2019 brought TDE to Standard; before that it needs Enterprise, Developer or
+  Evaluation. Express has never had it and still does not - on 2025 Express the engine answers
+  CREATE DATABASE ENCRYPTION KEY with "Transparent Data Encryption is not available in the edition
+  of this SQL Server instance", which is worth knowing before a database is restored rather than
+  after. The rest is about the keys, and the chain behind them is what makes encryption
+  open without anyone typing a password at startup: the database encryption key is protected by a
+  server certificate, the certificate's private key by the database master key in master, and that
+  by the service master key. Break any link and the database will not come online.
+
+  Azure manages all of this itself, so there a certificate of your own is the wrong answer rather
+  than a missing one.
+#>
+function Get-TdeProblem {
+    [CmdletBinding()]
+    param(
+        [int] $EngineEdition, [int] $MajorVersion, [AllowEmptyString()] [string] $Edition,
+        [bool] $HasMasterKey, [AllowEmptyString()] [string] $CertificateName,
+        [AllowEmptyString()] [string] $FoundCertificate, [AllowEmptyString()] [string] $PrivateKeyType
+    )
+
+    $problems = New-Object System.Collections.Generic.List[string]
+
+    if ($EngineEdition -in 5, 6, 9, 11) {
+        $problems.Add('this is Azure SQL Database, where encryption at rest is managed by the platform and there is no certificate of yours to protect anything with. Leave -EnableTde off.')
+    }
+    elseif ($EngineEdition -eq 8) {
+        $problems.Add('this is Azure SQL Managed Instance, which holds the keys itself: databases are encrypted by the instance rather than by a certificate you create. Leave -EnableTde off.')
+    }
+    elseif ($EngineEdition -in 1, 4) {
+        $problems.Add(("{0} does not have TDE at any version: the engine refuses to create a database encryption key outright. It needs Standard, Enterprise, Developer or Evaluation." -f
+                       $(if ($Edition) { $Edition } else { 'This edition' })))
+    }
+    elseif ($MajorVersion -gt 0 -and $MajorVersion -lt 15 -and $EngineEdition -ne 3) {
+        $problems.Add(("TDE needs Enterprise, Developer or Evaluation edition before SQL Server 2019, and this is {0} (major version {1}). 2019 brought it to Standard as well." -f
+                       $(if ($Edition) { $Edition } else { 'another edition' }), $MajorVersion))
+    }
+
+    if (-not $HasMasterKey) {
+        $problems.Add("there is no database master key in master. Create one, back it up and keep the password: CREATE MASTER KEY ENCRYPTION BY PASSWORD = '<a long random string>';")
+    }
+    if (-not $FoundCertificate) {
+        $problems.Add(("there is no certificate called '{0}' in master. Create it, then back it up WITH PRIVATE KEY before anything is encrypted with it: CREATE CERTIFICATE {1} WITH SUBJECT = 'TDE certificate for restored copies';" -f
+                       $CertificateName, (Esc-Name $CertificateName)))
+    }
+    elseif ($PrivateKeyType -eq 'NO_PRIVATE_KEY') {
+        $problems.Add(("the certificate '{0}' has no private key, so it cannot protect a database encryption key. It was restored from a .cer without its .pvk; restore it again WITH PRIVATE KEY." -f $CertificateName))
+    }
+    elseif ($PrivateKeyType -eq 'ENCRYPTED_BY_PASSWORD') {
+        $problems.Add(("the private key of '{0}' is protected by a password rather than by the database master key, so SQL Server cannot open it unattended. Re-import it so the master key protects it." -f $CertificateName))
+    }
+
+    $problems.ToArray()
+}
+
 #==============================================================================
 # Self test
 #==============================================================================
@@ -1306,6 +1416,40 @@ if ($SelfTest) {
     Check 'a backup device error points at the service account' ($e.Fix -match 'SERVICE ACCOUNT')
     $e = Get-SqlErrorExplanation -Number 18456 -Message "Login failed for user 'sa'. State: 8"
     Check 'a refused login is explained' ($e.Meaning -match '18456')
+
+    Write-Host '  whether the destination can encrypt anything' -ForegroundColor Gray
+    # PowerShell refuses to add two hashtables that share a key, so a changed copy is made by hand
+    function With([hashtable] $Base, [hashtable] $Change) {
+        $copy = @{}
+        foreach ($key in $Base.Keys) { $copy[$key] = $Base[$key] }
+        foreach ($key in $Change.Keys) { $copy[$key] = $Change[$key] }
+        $copy
+    }
+    # and -match against a list returns the matching items rather than a yes or no, so they are
+    # joined into one string first
+    function Problems([hashtable] $Facts) { @(Get-TdeProblem @Facts) -join ' | ' }
+    function ProblemCount([hashtable] $Facts) { @(Get-TdeProblem @Facts).Count }
+
+    $ready = @{ EngineEdition = 3; MajorVersion = 16; Edition = 'Enterprise Edition'; HasMasterKey = $true
+                CertificateName = 'MolehillTde'; FoundCertificate = 'MolehillTde'; PrivateKeyType = 'ENCRYPTED_BY_MASTER_KEY' }
+    Check 'a ready instance has nothing to report' ((Problems $ready) -eq '')
+    Check 'Standard from 2019 is fine' ((Problems (With $ready @{ EngineEdition = 2; MajorVersion = 15; Edition = 'Standard Edition' })) -eq '')
+    $express = With $ready @{ EngineEdition = 4; MajorVersion = 17; Edition = 'Express Edition (64-bit)' }
+    Check 'Express has none at any version, as the engine itself says' ((Problems $express) -match 'does not have TDE at any version')
+    Check 'and it is named rather than hinted at' ((Problems $express) -match 'Express Edition')
+    $old = With $ready @{ EngineEdition = 2; MajorVersion = 13; Edition = 'Standard Edition' }
+    Check 'Standard before 2019 is not' ((Problems $old) -match 'needs Enterprise')
+    Check 'and it names the edition it found' ((Problems $old) -match 'Standard Edition')
+    Check 'but Developer before 2019 is' ((Problems (With $ready @{ EngineEdition = 3; MajorVersion = 13 })) -eq '')
+
+    Check 'no master key is reported with the statement that makes one' ((Problems (With $ready @{ HasMasterKey = $false })) -match 'CREATE MASTER KEY')
+    Check 'a missing certificate likewise' ((Problems (With $ready @{ FoundCertificate = '' })) -match 'CREATE CERTIFICATE \[MolehillTde\]')
+    Check 'and a certificate name is quoted the long way round' ((Problems (With $ready @{ FoundCertificate = ''; CertificateName = 'Odd]Name' })) -match 'CREATE CERTIFICATE \[Odd\]\]Name\]')
+    Check 'a certificate with no private key is no use' ((Problems (With $ready @{ PrivateKeyType = 'NO_PRIVATE_KEY' })) -match 'no private key')
+    Check 'nor is one SQL Server cannot open by itself' ((Problems (With $ready @{ PrivateKeyType = 'ENCRYPTED_BY_PASSWORD' })) -match 'unattended')
+    Check 'Azure SQL Database is told to leave it to the platform' ((Problems (With $ready @{ EngineEdition = 5 })) -match 'managed by the platform')
+    Check 'and so is a managed instance' ((Problems (With $ready @{ EngineEdition = 8 })) -match 'holds the keys itself')
+    Check 'both missing keys are reported together, not one at a time' ((ProblemCount (With $ready @{ HasMasterKey = $false; FoundCertificate = '' })) -eq 2)
 
     Write-Host ''
     if ($script:failed -eq 0) { Write-Host 'All self tests passed.' -ForegroundColor Green; exit 0 }
@@ -1499,6 +1643,249 @@ if ($AddUser) {
     $userGrants = $resolved.Grants
 }
 
+<#
+  Asks the destination the questions Get-TdeProblem needs answered.
+#>
+function Test-TdeReadiness {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [string] $Server, [Parameter(Mandatory)] [string] $CertificateName)
+
+    $query = @'
+SELECT  EngineEdition = CONVERT(int, SERVERPROPERTY('EngineEdition')),
+        Major = CONVERT(int, SERVERPROPERTY('ProductMajorVersion')),
+        Edition = CONVERT(nvarchar(128), SERVERPROPERTY('Edition')),
+        HasMasterKey = CONVERT(bit, CASE WHEN EXISTS (SELECT 1 FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##') THEN 1 ELSE 0 END),
+        CertFound = ISNULL((SELECT TOP (1) c.name FROM sys.certificates c WHERE c.name = @cert), ''),
+        KeyType = ISNULL((SELECT TOP (1) c.pvt_key_encryption_type_desc FROM sys.certificates c WHERE c.name = @cert), ''),
+        Thumbprint = ISNULL((SELECT TOP (1) CONVERT(varchar(80), c.thumbprint, 1) FROM sys.certificates c WHERE c.name = @cert), ''),
+        Subject = ISNULL((SELECT TOP (1) c.subject FROM sys.certificates c WHERE c.name = @cert), ''),
+        Expiry = (SELECT TOP (1) c.expiry_date FROM sys.certificates c WHERE c.name = @cert)
+'@
+    $facts = (Invoke-Sql -Server $Server -Parameters @{ '@cert' = $CertificateName } -Query $query).Rows[0]
+
+    $problems = @(Get-TdeProblem -EngineEdition ([int]$facts['EngineEdition']) -MajorVersion ([int]$facts['Major']) `
+                                 -Edition ([string]$facts['Edition']) -HasMasterKey ([bool]$facts['HasMasterKey']) `
+                                 -CertificateName $CertificateName -FoundCertificate ([string]$facts['CertFound']) `
+                                 -PrivateKeyType ([string]$facts['KeyType']))
+    [pscustomobject]@{
+        Ok         = ($problems.Count -eq 0)
+        Problems   = $problems
+        Subject    = [string]$facts['Subject']
+        Thumbprint = [string]$facts['Thumbprint']
+        Expiry     = $(if ($facts['Expiry'] -is [DBNull]) { $null } else { $facts['Expiry'] })
+    }
+}
+
+<#
+  Where a database has got to with its encryption.
+
+  sys.dm_database_encryption_keys is server-scoped, so this is asked from master about the database
+  rather than from inside it. encryption_state is the answer: 1 unencrypted, 2 encrypting, 3
+  encrypted, 4 changing key, 5 decrypting - and no row at all means there is no encryption key yet.
+
+  It returns the table rather than the rows, and the caller takes .Rows from it. That is not
+  fussiness: this started life as a scriptblock in a variable, invoked with &, and the same
+  @((Invoke-Sql ...).Rows) expression that gives DataRows everywhere else gave back an Int32
+  through the scriptblock. Every poll then read the state as 0, and a database that had finished
+  encrypting in a tenth of a second looked like one stuck at 0% until the wait timed out.
+#>
+function Get-EncryptionState {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [string] $Server, [Parameter(Mandatory)] [string] $DatabaseName)
+
+    $query = @'
+SELECT encryption_state, percent_complete, key_algorithm, key_length
+FROM sys.dm_database_encryption_keys WHERE database_id = DB_ID(@db)
+'@
+    Invoke-Sql -Server $Server -Parameters @{ '@db' = $DatabaseName } -Query $query
+}
+
+<#
+  Encrypts one database, and waits for it to actually be encrypted.
+
+  SET ENCRYPTION ON returns at once: the work happens in the background, page by page, so being
+  encrypted is a state to wait for rather than something the statement reports. Waiting is also
+  what makes -ReadOnly safe to apply afterwards - the scan wants the database writable, and a
+  read-only database cannot have an encryption key created in the first place.
+#>
+function Enable-DatabaseTde {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $Server, [Parameter(Mandatory)] [string] $DatabaseName,
+        [Parameter(Mandatory)] [string] $CertificateName, [ValidateRange(1, 1440)] [int] $WaitMinutes = 60
+    )
+
+    $rows = @((Get-EncryptionState -Server $Server -DatabaseName $DatabaseName).Rows)
+    if ($rows.Count -and [int]$rows[0]['encryption_state'] -eq 3) {
+        Write-Detail '  it is encrypted already'
+        return [pscustomobject]@{ Encrypted = $true; Already = $true; TimedOut = $false; Percent = 100; Seconds = 0
+                                  Algorithm = [string]$rows[0]['key_algorithm']; KeyLength = [int]$rows[0]['key_length'] }
+    }
+
+    if ($rows.Count -eq 0) {
+        Write-Detail ('  creating the database encryption key, protected by the certificate ' + $CertificateName)
+        # this one has to run inside the database: there is no way to qualify it from master
+        [void](Invoke-Sql -Server $Server -DatabaseName $DatabaseName -Query `
+               ('CREATE DATABASE ENCRYPTION KEY WITH ALGORITHM = AES_256 ENCRYPTION BY SERVER CERTIFICATE ' + (Esc-Name $CertificateName) + ';'))
+    }
+    else { Write-Detail '  the encryption key is already there, so only the encryption needs turning on' }
+
+    Invoke-DbStatement -Server $Server -DatabaseName $DatabaseName -Statement 'ALTER DATABASE {DB} SET ENCRYPTION ON;'
+
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    $deadline = (Get-Date).AddMinutes($WaitMinutes)
+    $said = [datetime]::MinValue
+    while ($true) {
+        $rows = @((Get-EncryptionState -Server $Server -DatabaseName $DatabaseName).Rows)
+        if ($rows.Count -eq 0) { throw 'the database encryption key disappeared while the database was being encrypted' }
+        $state = [int]$rows[0]['encryption_state']
+        $percent = [double]$rows[0]['percent_complete']
+        $common = @{ Algorithm = [string]$rows[0]['key_algorithm']; KeyLength = [int]$rows[0]['key_length']
+                     Seconds = [math]::Round($timer.Elapsed.TotalSeconds, 1); Already = $false }
+
+        if ($state -eq 3) { return [pscustomobject]($common + @{ Encrypted = $true; TimedOut = $false; Percent = 100 }) }
+        if ($state -eq 5) { throw 'the database is being decrypted rather than encrypted; something else is working on it' }
+        if ((Get-Date) -ge $deadline) {
+            return [pscustomobject]($common + @{ Encrypted = $false; TimedOut = $true; Percent = $percent })
+        }
+        if (((Get-Date) - $said).TotalSeconds -ge 15) {
+            Write-Log ('  encrypting: {0}% after {1}s' -f [math]::Round($percent, 1), [math]::Round($timer.Elapsed.TotalSeconds))
+            $said = Get-Date
+        }
+        Start-Sleep -Milliseconds 1500
+    }
+}
+
+<#
+  Everything that happens to a copy once it is restored, for one database.
+
+  This runs as each database lands rather than once at the end of the run, so a copy of production
+  does not sit with the users it came with still in it, and unencrypted, while the rest of the list
+  downloads.
+
+  The order is deliberate: the users it came with go first, because that is what closes off access
+  and it takes a moment; encryption follows, because it takes as long as it takes; and read-only is
+  last, because a read-only database cannot be changed any further - including having an encryption
+  key created, which is why encryption cannot come after it.
+#>
+function Complete-RestoredDatabase {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $Server, [Parameter(Mandatory)] [string] $DatabaseName,
+        [Parameter(Mandatory)] $Outcome, $OwnerLogin,
+        [AllowEmptyCollection()] [object[]] $Grants = @()
+    )
+
+    if (-not $KeepUsers) {
+        Start-Step 'Clear out the users it came with'
+        $users = Clear-DatabaseUser -Server $Server -DatabaseName $DatabaseName
+        foreach ($moved in $users.Handover) { Write-Detail ('  ' + $moved) }
+        if ($users.Dropped.Count) { Write-Log ('Dropped {0} user(s): {1}' -f $users.Dropped.Count, ($users.Dropped -join ', ')) }
+        else { Write-Log 'No users to drop; only the built-in ones were there' }
+        foreach ($kept in $users.Kept) { Write-Log ('Could not drop ' + $kept) -Level WARN }
+        $Outcome.Users = '{0} dropped' -f $users.Dropped.Count
+        Complete-Step
+    }
+
+    if ($OwnerLogin -and $OwnerLogin.Login) {
+        Start-Step ('Set the owner to {0}' -f $OwnerLogin.Login)
+        Invoke-DbStatement -Server $Server -DatabaseName $DatabaseName `
+            -Statement ('ALTER AUTHORIZATION ON DATABASE::{DB} TO ' + (Esc-Name $OwnerLogin.Login) + ';')
+        Complete-Step
+    }
+
+    Start-Step ("Set the recovery model to $RecoveryModel")
+    Invoke-DbStatement -Server $Server -DatabaseName $DatabaseName `
+        -Statement ("ALTER DATABASE {DB} SET RECOVERY $RecoveryModel;")
+    Complete-Step
+
+    if ($Grants.Count) {
+        Start-Step 'Add the users asked for'
+        $added = Add-DatabaseUser -Server $Server -DatabaseName $DatabaseName -Grants $Grants
+        if ($added.Created.Count) {
+            $roleless = @($Grants | Where-Object { @($_.Roles).Count -eq 0 })
+            Write-Log ('Added ' + ($added.Created -join '; ') +
+                       $(if ($roleless.Count) { ' - no role membership, so no permissions yet' } else { '' }))
+        }
+        foreach ($missing in $added.NoLogin) {
+            Write-Log ("There is no login called '{0}' on {1}, so no user was created for it. Create the login first, then run this again." -f $missing, $Server) -Level WARN
+        }
+        foreach ($failure in $added.Failed) { Write-Log ('Could not add ' + $failure) -Level WARN }
+        Complete-Step
+    }
+    elseif ($userGrants.Count) { Write-Detail '  no users asked for on this one' }
+
+    # before read-only, because a read-only database cannot have an encryption key created
+    $encrypted = $false
+    if ($EnableTde) {
+        Start-Step 'Encrypt it'
+        $tde = Enable-DatabaseTde -Server $Server -DatabaseName $DatabaseName `
+                                  -CertificateName $TdeCertificateName -WaitMinutes $TdeWaitMinutes
+        $encrypted = $tde.Encrypted
+        if ($tde.Already) { Write-Log 'Already encrypted; left as it is' }
+        elseif ($tde.Encrypted) {
+            Write-Log ('Encrypted with {0} ({1}-bit) in {2}s' -f $tde.Algorithm, $tde.KeyLength, $tde.Seconds)
+        }
+        else {
+            Write-Log ('Still encrypting after {0} minute(s): {1}% done. It carries on in the background; this is not a failure, but nothing that needs it finished is done to this database.' -f
+                       $TdeWaitMinutes, [math]::Round($tde.Percent, 1)) -Level WARN
+        }
+        $Outcome.Encryption = $(if ($tde.Encrypted) { '{0} {1}-bit' -f $tde.Algorithm, $tde.KeyLength } else { 'in progress' })
+        Complete-Step -Result $(if ($tde.Encrypted) { 'OK' } else { 'SKIPPED' })
+    }
+
+    # last, because a read-only database cannot be changed any further
+    if ($ReadOnly) {
+        if ($EnableTde -and -not $encrypted) {
+            Write-Log 'Not setting it read-only: the encryption has not finished, and the scan needs the database writable. Run this again once it has, or set it read-only by hand.' -Level WARN
+        }
+        else {
+            Start-Step 'Set it read-only'
+            # AUTO_CLOSE undoes this: a database that closes and reopens comes back
+            # read-write, so the setting looks applied and then quietly is not. Turning
+            # AUTO_CLOSE off is the only way to make read-only mean anything, and it is
+            # not something a restored copy on a server wants switched on in any case.
+            $autoClose = Get-Scalar -Server $Server -Parameters @{ '@db' = $DatabaseName } -Query `
+                         'SELECT is_auto_close_on FROM sys.databases WHERE name = @db'
+            if ($autoClose -and [bool]$autoClose) {
+                Invoke-DbStatement -Server $Server -DatabaseName $DatabaseName `
+                    -Statement 'ALTER DATABASE {DB} SET AUTO_CLOSE OFF;'
+                Write-Log 'Turned AUTO_CLOSE off first: with it on, the database reverts to read-write the next time it is opened' -Level WARN
+            }
+
+            Invoke-DbStatement -Server $Server -DatabaseName $DatabaseName `
+                -Statement 'ALTER DATABASE {DB} SET READ_ONLY WITH ROLLBACK IMMEDIATE;'
+
+            # and prove it took, rather than reporting the statement that was sent
+            $nowReadOnly = Get-Scalar -Server $Server -Parameters @{ '@db' = $DatabaseName } -Query `
+                           'SELECT is_read_only FROM sys.databases WHERE name = @db'
+            if (-not ($nowReadOnly -and [bool]$nowReadOnly)) {
+                throw 'the database did not stay read-only. Something else is holding it read-write; check AUTO_CLOSE and whether anything is reopening it.'
+            }
+            Write-Log 'Set read-only'
+            Complete-Step
+        }
+    }
+
+    # say what it actually is now, not what was asked for
+    # -DatabaseName matters: sys.database_principals is scoped to the connection's
+    # database, so without it this counted master's users instead of this one's
+    $final = (Invoke-Sql -Server $Server -DatabaseName $DatabaseName -Parameters @{ '@db' = $DatabaseName } -Query `
+              'SELECT recovery_model_desc, is_read_only, Owner = SUSER_SNAME(owner_sid), Users = (SELECT COUNT(*) FROM sys.database_principals WHERE type IN (''S'',''U'',''G'') AND principal_id > 4), Encryption = ISNULL((SELECT TOP (1) k.encryption_state FROM sys.dm_database_encryption_keys k WHERE k.database_id = DB_ID(@db)), 0) FROM sys.databases WHERE name = @db').Rows[0]
+    $encryptionState = switch ([int]$final['Encryption']) {
+        2 { 'encryption in progress' ; break }
+        3 { 'encrypted' ; break }
+        4 { 'changing its encryption key' ; break }
+        5 { 'being decrypted' ; break }
+        default { 'not encrypted' }
+    }
+    Write-Log ('{0} is now: owner {1}, recovery {2}, {3}, {4}, {5} user(s) besides the built-in ones' -f
+               $DatabaseName, $final['Owner'], $final['recovery_model_desc'],
+               $(if ([bool]$final['is_read_only']) { 'read-only' } else { 'read-write' }), $encryptionState, $final['Users'])
+    $Outcome.Users = '{0} left' -f $final['Users']
+    $Outcome.Result = 'DONE'
+}
+
 $DestinationInstance = $DestinationInstance.Trim()
 $dryRun = $WhatIfPreference -eq $true
 
@@ -1536,6 +1923,21 @@ try {
     if ($DataPath) { $defaultData = $DataPath }
     if ($LogPath) { $defaultLog = $LogPath }
     Write-Detail ('  restored files go to {0}{1}' -f $defaultData, $(if ($defaultLog -ne $defaultData) { " and $defaultLog" } else { '' }))
+
+    # asked now rather than per database, and before anything is downloaded: a destination that
+    # cannot encrypt should say so while nothing has been restored onto it yet
+    if ($EnableTde) {
+        $tdeReady = Test-TdeReadiness -Server $DestinationInstance -CertificateName $TdeCertificateName
+        if (-not $tdeReady.Ok) {
+            $lines = @("{0} is not set up for TDE, so nothing has been restored:" -f $DestinationInstance)
+            foreach ($problem in $tdeReady.Problems) { $lines += "  * $problem" }
+            throw ($lines -join "`n")
+        }
+        Write-Log ('TDE: the certificate {0} is there ({1})' -f $TdeCertificateName, $tdeReady.Subject)
+        Write-Detail ('  thumbprint {0}{1}' -f $tdeReady.Thumbprint,
+                      $(if ($tdeReady.Expiry) { ', expires ' + (Format-Stamp $tdeReady.Expiry) } else { '' }))
+        Write-Log '  that certificate and the master key behind it are the only way these databases can ever be read again. Back both up, with their passwords, somewhere that is not this server.' -Level WARN
+    }
 
     # the owner is wanted on every copy, so settle it once and say so now rather than per database
     $ownerLogin = Resolve-OwnerLogin -Server $DestinationInstance -Wanted $Owner
@@ -1591,7 +1993,7 @@ try {
         $script:StepPrefix = if ($databases.Count -gt 1) { $dbName } else { '' }
         $outcome = [pscustomobject]@{
             Database = $dbName; DestinationInstance = $DestinationInstance; Result = 'FAILED'
-            Backup = $null; BackupTaken = $null; Bytes = 0; Users = $null; Detail = $null
+            Backup = $null; BackupTaken = $null; Bytes = 0; Users = $null; Encryption = $null; Detail = $null
         }
         $staged = New-Object System.Collections.Generic.List[string]
         $restored = $false
@@ -1641,8 +2043,10 @@ try {
             #endregion
 
             if ($dryRun) {
-                Write-Log ('Would restore {0} over {1}.[{2}], then clear its users, set the owner and the recovery model{3}' -f
-                           $blob.Name, $DestinationInstance, $dbName, $(if ($ReadOnly) { ', and make it read-only' } else { '' }))
+                Write-Log ('Would restore {0} over {1}.[{2}], then clear its users, set the owner and the recovery model{3}{4}' -f
+                           $blob.Name, $DestinationInstance, $dbName,
+                           $(if ($EnableTde) { ', encrypt it with TDE' } else { '' }),
+                           $(if ($ReadOnly) { ', and make it read-only' } else { '' }))
                 $outcome.Result = 'DRY RUN'
                 continue
             }
@@ -1765,6 +2169,20 @@ try {
             }
             $outcome.Result = 'RESTORED'
             $restoredOk.Add($dbName)
+
+            # and straight on to settling it, in this same pass, rather than at the end of the run
+            try {
+                Complete-RestoredDatabase -Server $DestinationInstance -DatabaseName $dbName -Outcome $outcome `
+                    -OwnerLogin $ownerLogin -Grants @($userGrants | Where-Object { $_.Database -eq $dbName })
+            }
+            catch {
+                if ($script:CurrentStep) { Complete-Step -Result 'FAILED' }
+                $message = ($_.Exception.GetBaseException().Message -split "`r?`n")[0]
+                Write-Log ('[{0}] restored, but the tidying up failed: {1}' -f $dbName, $message) -Level ERROR
+                Write-Deep ('full exception: ' + $_.Exception.ToString())
+                $outcome.Result = 'RESTORED, NOT TIDIED'
+                $outcome.Detail = $message
+            }
         }
         catch {
             if ($script:CurrentStep) { Complete-Step -Result 'FAILED' }
@@ -1788,105 +2206,6 @@ try {
         }
     }
 
-    #==========================================================================
-    # With all the databases copied, tidy them up
-    #==========================================================================
-    if ($restoredOk.Count -and -not $dryRun) {
-        Write-Log ('---- tidying up {0} restored database(s) ----' -f $restoredOk.Count)
-        foreach ($dbName in $restoredOk) {
-            $script:StepPrefix = if ($restoredOk.Count -gt 1) { $dbName } else { '' }
-            $outcome = @($results | Where-Object { $_.Database -eq $dbName })[0]
-            try {
-                if (-not $KeepUsers) {
-                    Start-Step 'Clear out the users it came with'
-                    $users = Clear-DatabaseUser -Server $DestinationInstance -DatabaseName $dbName
-                    foreach ($moved in $users.Handover) { Write-Detail ('  ' + $moved) }
-                    if ($users.Dropped.Count) { Write-Log ('Dropped {0} user(s): {1}' -f $users.Dropped.Count, ($users.Dropped -join ', ')) }
-                    else { Write-Log 'No users to drop; only the built-in ones were there' }
-                    foreach ($kept in $users.Kept) { Write-Log ('Could not drop ' + $kept) -Level WARN }
-                    $outcome.Users = '{0} dropped' -f $users.Dropped.Count
-                    Complete-Step
-                }
-
-                if ($ownerLogin.Login) {
-                    Start-Step ("Set the owner to {0}" -f $ownerLogin.Login)
-                    Invoke-DbStatement -Server $DestinationInstance -DatabaseName $dbName `
-                        -Statement ('ALTER AUTHORIZATION ON DATABASE::{DB} TO ' + (Esc-Name $ownerLogin.Login) + ';')
-                    Complete-Step
-                }
-
-                Start-Step ("Set the recovery model to $RecoveryModel")
-                Invoke-DbStatement -Server $DestinationInstance -DatabaseName $dbName `
-                    -Statement ("ALTER DATABASE {DB} SET RECOVERY $RecoveryModel;")
-                Complete-Step
-
-                $mine = @($userGrants | Where-Object { $_.Database -eq $dbName })
-                if ($mine.Count) {
-                    Start-Step 'Add the users asked for'
-                    $added = Add-DatabaseUser -Server $DestinationInstance -DatabaseName $dbName -Grants $mine
-                    if ($added.Created.Count) {
-                        $roleless = @($mine | Where-Object { @($_.Roles).Count -eq 0 })
-                        Write-Log ('Added ' + ($added.Created -join '; ') +
-                                   $(if ($roleless.Count) { ' - no role membership, so no permissions yet' } else { '' }))
-                    }
-                    foreach ($missing in $added.NoLogin) {
-                        Write-Log ("There is no login called '{0}' on {1}, so no user was created for it. Create the login first, then run this again." -f $missing, $DestinationInstance) -Level WARN
-                    }
-                    foreach ($failure in $added.Failed) { Write-Log ('Could not add ' + $failure) -Level WARN }
-                    Complete-Step
-                }
-                elseif ($userGrants.Count) { Write-Detail '  no users asked for on this one' }
-
-                # last, because a read-only database cannot be changed any further
-                if ($ReadOnly) {
-                    Start-Step 'Set it read-only'
-                    # AUTO_CLOSE undoes this: a database that closes and reopens comes back
-                    # read-write, so the setting looks applied and then quietly is not. Turning
-                    # AUTO_CLOSE off is the only way to make read-only mean anything, and it is
-                    # not something a restored copy on a server wants switched on in any case.
-                    $autoClose = Get-Scalar -Server $DestinationInstance -Parameters @{ '@db' = $dbName } -Query `
-                                 'SELECT is_auto_close_on FROM sys.databases WHERE name = @db'
-                    if ($autoClose -and [bool]$autoClose) {
-                        Invoke-DbStatement -Server $DestinationInstance -DatabaseName $dbName `
-                            -Statement 'ALTER DATABASE {DB} SET AUTO_CLOSE OFF;'
-                        Write-Log 'Turned AUTO_CLOSE off first: with it on, the database reverts to read-write the next time it is opened' -Level WARN
-                    }
-
-                    Invoke-DbStatement -Server $DestinationInstance -DatabaseName $dbName `
-                        -Statement 'ALTER DATABASE {DB} SET READ_ONLY WITH ROLLBACK IMMEDIATE;'
-
-                    # and prove it took, rather than reporting the statement that was sent
-                    $nowReadOnly = Get-Scalar -Server $DestinationInstance -Parameters @{ '@db' = $dbName } -Query `
-                                   'SELECT is_read_only FROM sys.databases WHERE name = @db'
-                    if (-not ($nowReadOnly -and [bool]$nowReadOnly)) {
-                        throw 'the database did not stay read-only. Something else is holding it read-write; check AUTO_CLOSE and whether anything is reopening it.'
-                    }
-                    Write-Log 'Set read-only'
-                    Complete-Step
-                }
-
-                # say what it actually is now, not what was asked for
-                # -DatabaseName matters: sys.database_principals is scoped to the connection's
-                # database, so without it this counted master's users instead of this one's
-                $final = (Invoke-Sql -Server $DestinationInstance -DatabaseName $dbName -Parameters @{ '@db' = $dbName } -Query `
-                          'SELECT recovery_model_desc, is_read_only, Owner = SUSER_SNAME(owner_sid), Users = (SELECT COUNT(*) FROM sys.database_principals WHERE type IN (''S'',''U'',''G'') AND principal_id > 4) FROM sys.databases WHERE name = @db').Rows[0]
-                Write-Log ('{0} is now: owner {1}, recovery {2}, {3}, {4} user(s) besides the built-in ones' -f
-                           $dbName, $final['Owner'], $final['recovery_model_desc'],
-                           $(if ([bool]$final['is_read_only']) { 'read-only' } else { 'read-write' }), $final['Users'])
-                $outcome.Users = '{0} left' -f $final['Users']
-                $outcome.Result = 'DONE'
-            }
-            catch {
-                if ($script:CurrentStep) { Complete-Step -Result 'FAILED' }
-                $message = ($_.Exception.GetBaseException().Message -split "`r?`n")[0]
-                Write-Log ('[{0}] restored, but the tidying up failed: {1}' -f $dbName, $message) -Level ERROR
-                Write-Deep ('full exception: ' + $_.Exception.ToString())
-                $outcome.Result = 'RESTORED, NOT TIDIED'
-                $outcome.Detail = $message
-            }
-            finally { $script:StepPrefix = '' }
-        }
-    }
 }
 catch {
     if ($script:CurrentStep) { Complete-Step -Result 'FAILED' }
@@ -1907,11 +2226,12 @@ finally {
     Write-Log "Destination:  $DestinationInstance" -Min Quiet
     Write-Log "Container:    $StorageAccountName/$ContainerName" -Min Quiet
     if (-not $dryRun -and $restoredOk.Count) {
-        Write-Log ("Applied to each: {0}owner {1}, recovery {2}{3}{4}" -f
+        Write-Log ("Applied to each: {0}owner {1}, recovery {2}{3}{4}{5}" -f
                    $(if ($KeepUsers) { 'users left alone, ' } else { 'users cleared, ' }),
                    $(if ($ownerLogin -and $ownerLogin.Login) { $ownerLogin.Login } else { 'unchanged' }),
                    $RecoveryModel,
                    $(if ($userGrants.Count) { ', users added per database' } else { '' }),
+                   $(if ($EnableTde) { ', TDE with ' + $TdeCertificateName } else { '' }),
                    $(if ($ReadOnly) { ', read-only' } else { '' })) -Min Quiet
     }
     foreach ($outcome in $results) {
@@ -1920,6 +2240,7 @@ finally {
         elseif ($outcome.Backup) { $line += ' ({0})' -f $outcome.Backup }
         $granted = @($userGrants | Where-Object { $_.Database -eq $outcome.Database } | ForEach-Object { $_.User })
         if ($granted.Count) { $line += ' [+' + ($granted -join ', ') + ']' }
+        if ($outcome.Encryption) { $line += ' [' + $outcome.Encryption + ']' }
         if ($outcome.Detail) { $line += ' - ' + $outcome.Detail }
         Write-Log $line -Level $(if ($outcome.Result -like 'FAILED*') { 'ERROR' } elseif ($outcome.Result -like '*NOT TIDIED*') { 'WARN' } else { 'INFO' }) -Min Quiet
     }
