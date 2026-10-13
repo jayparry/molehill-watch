@@ -149,6 +149,8 @@ MolehillWatch\
    ├─ Get-PatchStatus.ps1                   standalone patch check for any server (no install)
    ├─ Test-DatabaseStatus.ps1               "is everything back?" after a patch, reboot or restore
    ├─ Restore-DatabaseCopy.ps1              restores databases to another server, directly or via Azure Blob Storage
+   ├─ Export-BackupHistory.sql              run on a source you cannot connect to, feeds the above
+   ├─ Restore-LatestAzureBackup.ps1         restores the newest backup in a container, then tidies each copy
    ├─ Test-SqlTlsHandshake.ps1              why an instance will not negotiate encryption (old servers)
    ├─ Get-SqlLicensingAudit.ps1             what needs licensing across an estate, and the total to cover it
    ├─ Export-DatabaseSample.ps1             a random sample of every table, as zipped CSVs
@@ -236,6 +238,7 @@ Three jobs that turn out to be one script: refreshing a copy of a database onto 
 ```
 
 * **Where the files come from is the only difference between the two modes.** `-From Path` (default) uses the paths msdb recorded, as the destination sees them - `-BackupPathMap` translates one, and a local path on another machine is retried through its admin share (`\\SOURCE\D$\...`) automatically. `-From AzureBlob` pulls them out of a container into a staging folder first. Everything after that is identical, including rolling restores: each run downloads only the logs it still needs.
+* **A source it cannot connect to is not a blocker.** `-SourceHistoryFile` reads the backup history from a CSV instead, produced by running `Tools\Export-BackupHistory.sql` on the source itself; the source is then never contacted. That is the answer for an out-of-support instance a current client cannot complete a TLS handshake with - the history was the only thing it ever read from there. `-TailLog` and `-DisconnectSource` still need a live source and are refused with it.
 * **"Has this already been restored?"** is answered from the backup set's own id (`backup_set_uuid`) against the restore history on the destination, so it holds across servers and reboots rather than guessing from dates.
 * **It will not use a half-uploaded backup.** With storage in the way, a backup msdb knows about but whose blob has not finished committing is passed over with the reason - and a rolling restore simply stops at the last log that made it across.
 * **Catching up** reads how far the copy got from its own restore history and applies only what comes next, walking the chain by taking the backup that reaches furthest forward each time. That copes with copy-only backups and a second job writing its own files. A chain that does not join up is reported, with the LSN where it breaks.
@@ -246,21 +249,54 @@ Three jobs that turn out to be one script: refreshing a copy of a database onto 
 * `-Standby` leaves the copy readable between log restores, `-StopAt` restores to a point in time, `-LogLevel Quiet|Normal|Verbose|Debug` sets how much it says (`-Verbose`/`-Debug` raise it by themselves), `-LogFile` appends it all to a file, `-CsvPath` writes a row per database, `-WhatIf` prints the exact RESTORE statements and runs nothing, and `-SelfTest` checks the chain, statement and path logic with no server at all.
 * **Several databases per run**, one pair of instances. A failure on one is reported and the rest carry on, with `PARTLY DONE (2 of 3)` in the summary. **Exit code** is 0 (done, or a clean dry run), 1 (something failed) or 2 (could not start).
 
+## Refreshing from a container (`Tools\Restore-LatestAzureBackup.ps1`)
+
+For keeping a set of databases topped up from backups that are already in blob storage, and handing the copies out in a known state. There is no source SQL Server in this one at all: the container is the source of truth, and the newest backup in each database's folder is the one restored.
+
+The layout it expects is one folder per database:
+
+```
+FULL/DAILY/<database name>/<something>.bak
+```
+
+```powershell
+.\Restore-LatestAzureBackup.ps1 -DestinationInstance SQL02 -Database Sales,Stock `
+    -StorageAccountName mycompany -ContainerName backups -SasToken $sas `
+    -LocalBackupPath D:\RestoreStaging
+
+# refreshed, tidied, and handed to the reporting team read-only
+.\Restore-LatestAzureBackup.ps1 -DestinationInstance SQL02 -Database Sales `
+    -StorageAccountName mycompany -ContainerName backups -SasToken $sas `
+    -LocalBackupPath D:\RestoreStaging -AddUser REPORTS\BiTeam -AddUserRole db_datareader -ReadOnly
+```
+
+* **Newest wins, by when the blob was written**, because there is no `msdb` here to ask. Only backup files are considered, so an upload log sitting in the folder is ignored. `-BlobPathPattern` changes the shape, with `{db}` standing in for the name.
+* **It checks the file before touching the database**: the header has to say it is a full backup, of the database it claims to be, from a version this instance can restore. A log or differential backup, or one stripe of a set written across several files, is refused with what it actually is rather than failing inside `RESTORE`. That check also proves the SQL Server service account can read the staging folder, which is the usual reason a staged restore fails.
+* **Then, with every database copied**, each one is tidied: users dropped except the built-in ones, owner set to `sa`, recovery model set to `SIMPLE`. A user owning a schema or a role has it handed to `dbo` first, because otherwise it cannot be dropped, and anything that still refuses is reported with the reason.
+* `-AddUser` creates users for logins expected to exist already, **warning rather than failing** where one does not. `-AddUserRole` puts them in a role - without it they have no permissions at all. `-ReadOnly` is applied last, since a read-only database cannot be changed any further, and `-KeepUsers` opts out of the clearing.
+* **`AUTO_CLOSE` silently undoes `READ_ONLY`** - a database that closes and reopens comes back read-write - so where it is on it is turned off first, and the read-only state is read back afterwards rather than assumed.
+* Needs `Az.Storage` and nothing else; the restores are plain T-SQL. `-WhatIf` lists the backup it would use and changes nothing, `-SelfTest` checks the folder paths, the newest-backup choice and which principals are spared with nothing installed. **Exit code** is 0 (all done, or a clean dry run), 1 (at least one failed) or 2 (could not start).
+
+**Run it on the destination server if you can.** `-LocalBackupPath` has to be readable by the SQL Server service account, not just by you, so a path under `C:\Users` will not do.
+
 ## Why encryption will not negotiate (`Tools\Test-SqlTlsHandshake.ps1`)
 
 SQL Server encrypts the login packet whatever else you ask for, so every connection begins with a TLS handshake - and on an old instance that is where connections die. The error a client hands back ("pre-login handshake", "certificate chain", "no common algorithm") rarely says which side refused or why, and `-TrustServerCertificate` only fixes one of the possible causes.
 
 ```powershell
 .\Test-SqlTlsHandshake.ps1 LEGACYSERVER2008R2
-.\Test-SqlTlsHandshake.ps1 -ClientOnly          # just what this machine will agree to
+.\Test-SqlTlsHandshake.ps1 -ServerList .\legacy-servers.txt   # a whole estate at once
+.\Test-SqlTlsHandshake.ps1 -ClientOnly                        # just what this machine will agree to
 ```
 
 It speaks TDS directly: opens the socket, sends a PRELOGIN packet, and runs the TLS handshake itself - wrapped in TDS packets, the way a real client does - once per TLS version. No login is attempted and no credentials are needed.
 
 * **Per TLS version**, whether the handshake succeeded and with which cipher, or the exact error. It also tries "whatever Windows picks by default", which is what real clients ask for - an instance can manage TLS 1.0 while a default client is never offered it.
 * **The certificate it presents**: subject, issuer, signature algorithm, key size and dates. A self-signed 1024-bit SHA1 certificate is normal on an old instance, and a common reason a modern client walks away.
-* **What this machine will agree to**, by handshaking with itself, so the client can be ruled out rather than suspected.
-* **What it means**, spelled out: a working handshake sends you back to the login; only TLS 1.0 working points at the instance's patch level (KB3135244 adds TLS 1.2 to SQL Server 2008, 2008 R2 and 2012, on specific builds per service pack); nothing working points at cipher suites or at the certificate. Where a registry change is the answer it gives the exact commands, says plainly that it weakens the machine's TLS policy, and tells you how to undo it.
+* **What this machine will agree to**, by handshaking with itself, so the client can be ruled out rather than suspected - including whether the old cipher suites an out-of-support instance may be limited to (3DES, RC4) are still enabled here. On current Windows they often are not, and a missing cipher looks exactly like a protocol problem.
+* **It tells a reset apart from a refusal**, which is the distinction that matters most. An old TLS stack that cannot parse a modern ClientHello closes the socket instead of replying, and the client reports only "An existing connection was forcibly closed by the remote host" - which says nothing about the cause unless you know how to read it. Where that is what happened it says so, and sends you to the instance's own error log, to anything inspecting TLS in between, and to the ways of doing the job without connecting to it at all.
+* **What it means**, spelled out for each combination: a working handshake sends you back to the login; only a named version working points at the instance's patch level (KB3135244 adds TLS 1.2 to SQL Server 2008, 2008 R2 and 2012, on specific builds per service pack); "no common algorithm" points at the cipher suites, or at the certificate when it is the weak one an old instance generates for itself. Where a registry change is the answer it gives the exact commands, says plainly that it weakens the machine's TLS policy for everything on it, and tells you how to undo it.
+* `-SelfTest` checks that reasoning - how it reads each combination of results - without a server or a socket.
 * **Exit code** is 0 (something negotiated), 1 (nothing did) or 2 (could not get that far).
 
 ## Table samples as CSV (`Tools\Export-DatabaseSample.ps1`)

@@ -47,8 +47,12 @@
     Exit code: 0 = at least one handshake succeeded, 1 = none did, 2 = could not get that far.
 
 .PARAMETER SqlInstance
-    The instance to probe: SQL01, 'SQL01\SALES' or 'SQL01,14330'. A named instance with no port is
-    looked up through SQL Browser.
+    The instances to probe: SQL01, 'SQL01\SALES', 'SQL01,14330'. Several can be given, which is
+    worth doing when a whole estate is out of support and you want to know which boxes will be
+    trouble before you need them. A named instance with no port is looked up through SQL Browser.
+
+.PARAMETER ServerList
+    A text file of instances, one per line. Blank lines and lines starting with # are ignored.
 
 .PARAMETER ConnectTimeoutSeconds
     How long to wait for the socket and each handshake. Default 10.
@@ -57,20 +61,30 @@
     Skip the server and only report what this machine is willing to negotiate, by handshaking with
     itself. Useful for proving the client is not the problem.
 
+.PARAMETER SelfTest
+    Check the script's own reasoning - how it reads each combination of handshake results - without
+    a server or a socket.
+
 .EXAMPLE
     .\Test-SqlTlsHandshake.ps1 LEGACYSERVER2008R2
 
 .EXAMPLE
     .\Test-SqlTlsHandshake.ps1 -SqlInstance 'OLDSQL\SALES' -ConnectTimeoutSeconds 20
 
+.EXAMPLE
+    .\Test-SqlTlsHandshake.ps1 -ServerList .\legacy-servers.txt
+    # which of them a current client can still talk to, before you need any of them to work
+
 .NOTES
     Molehill Data Services. Read-only, unauthenticated, and it never sends a login packet.
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Position = 0)] [string] $SqlInstance,
+    [Parameter(Position = 0)] [Alias('ComputerName')] [string[]] $SqlInstance,
+    [string] $ServerList,
     [ValidateRange(1, 120)] [int] $ConnectTimeoutSeconds = 10,
-    [switch] $ClientOnly
+    [switch] $ClientOnly,
+    [switch] $SelfTest
 )
 
 $ErrorActionPreference = 'Stop'
@@ -413,11 +427,223 @@ $protocols = @(
 )
 
 #==============================================================================
+# What the answers mean, kept free of sockets so -SelfTest can check it
+#==============================================================================
+
+<#
+  Turns a set of handshake attempts into a diagnosis.
+
+  The useful distinctions, in the order they matter:
+
+    the default client got through          encryption is fine, look at the login
+    only a named version got through        the instance is older than the client's default offer
+    nothing got through, and we never saw
+      a certificate                         the instance dropped the connection before offering one
+    nothing got through, "no common
+      algorithm"                            a cipher suite or the certificate itself
+    nothing answered on the port            there is no instance there to negotiate with
+
+  The distinction that matters most in practice is the third: a reset is not a refusal. An old
+  SCHANNEL that cannot parse a modern ClientHello closes the socket rather than replying with a
+  TLS alert, and the client reports "An existing connection was forcibly closed by the remote
+  host" - which says nothing at all about the cause unless you know to read it that way.
+#>
+function Get-TlsVerdict {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()] [object[]] $Results,
+        $Certificate,
+        [AllowEmptyString()] [string] $Encryption = ''
+    )
+
+    $default = @($Results | Where-Object { $_.Asked -eq 'Windows default' })
+    $defaultOk = ($default.Count -gt 0 -and $default[0].Ok)
+    $namedOk = @($Results | Where-Object { $_.Ok -and $_.Asked -ne 'Windows default' })
+    $errors = (@($Results | ForEach-Object { [string]$_.Error }) -join ' ')
+    $actions = New-Object System.Collections.Generic.List[string]
+
+    $weakCert = $false
+    if ($Certificate -and $Certificate.CertKeyBits -gt 0) {
+        $weakCert = ($Certificate.CertKeyBits -lt 2048) -or ([string]$Certificate.CertAlgorithm -match 'sha1|md5')
+    }
+
+    if ($defaultOk) {
+        return [pscustomobject]@{
+            Ok = $true
+            Headline = 'The handshake works the way a normal client does it, over {0}. Encryption is not what is stopping you.' -f $default[0].Negotiated
+            Actions = @('Look at the login instead: the account, whether it has a login on that instance, and what it can reach.')
+        }
+    }
+
+    if ($namedOk.Count) {
+        $best = ($namedOk | ForEach-Object { $_.Asked }) -join ', '
+        $reset = ([string]$default[0].Error) -match 'forcibly closed|closed the connection|existing connection'
+        $headline = if ($reset) {
+            'The instance manages {0} when it is asked for by name, but it drops the connection when a client asks Windows for its default. That is an old TLS stack refusing a modern ClientHello rather than answering it.' -f $best
+        }
+        else {
+            'The instance can only do {0}, and a client asking Windows for its default is not offered it.' -f $best
+        }
+        $actions.Add('Run the tool from a machine whose Windows still offers {0} by default - often the destination server itself, which is where a restore wants to run anyway.' -f $best)
+        $actions.Add('Or allow it on this machine, which weakens its TLS policy for everything on it: reg add "HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\{0}\Client" /v Enabled /t REG_DWORD /d 1 /f and the same key with DisabledByDefault /d 0, then restart PowerShell. Undo it by setting Enabled 0 and DisabledByDefault 1.' -f (@($namedOk | ForEach-Object { $_.Asked }) | Select-Object -Last 1))
+        $actions.Add('Or patch the instance: KB3135244 adds TLS 1.2 to SQL Server 2008, 2008 R2 and 2012, on specific builds for each service pack.')
+        $actions.Add('Or take the source out of the job altogether - Restore-DatabaseCopy.ps1 -SourceHistoryFile, or Restore-LatestAzureBackup.ps1, neither of which connects to it.')
+        return [pscustomobject]@{ Ok = $false; Headline = $headline; Actions = $actions.ToArray() }
+    }
+
+    if ($errors -match 'no answer on') {
+        return [pscustomobject]@{
+            Ok = $false
+            Headline = 'Nothing answered on that port, so there is nothing to negotiate with yet.'
+            Actions = @('Check the instance is running and listening on that port, and that a firewall is not in the way. Test-DatabaseStatus.ps1 and the connection checks in Restore-DatabaseCopy.ps1 cover that ground.')
+        }
+    }
+
+    if ($Encryption -match 'not supported') {
+        return [pscustomobject]@{
+            Ok = $false
+            Headline = 'The instance says it does not support encryption at all, which no current client will accept.'
+            Actions = @('That is either a very old build or a broken configuration. Check the instance''s network configuration and its error log.')
+        }
+    }
+
+    if ($errors -match 'common algorithm') {
+        if ($weakCert) {
+            return [pscustomobject]@{
+                Ok = $false
+                Headline = 'No cipher suite in common, and the certificate the instance presents is {0}-bit {1} - which is what modern clients refuse.' -f $Certificate.CertKeyBits, $Certificate.CertAlgorithm
+                Actions = @(
+                    'Give the instance a 2048-bit SHA256 certificate and point SQL Server at it in Configuration Manager. That fixes it for every client and survives patching later.',
+                    'A patched build will also generate a stronger self-signed certificate of its own: KB3135244 covers SQL Server 2008, 2008 R2 and 2012.'
+                )
+            }
+        }
+        return [pscustomobject]@{
+            Ok = $false
+            Headline = 'No cipher suite in common: the instance only offers suites this Windows build has retired.'
+            Actions = @(
+                'Get-TlsCipherSuite shows what this machine offers. Enable-TlsCipherSuite puts one back, for example TLS_RSA_WITH_3DES_EDE_CBC_SHA, which weakens this machine''s policy for everything on it.',
+                'Running from an older machine avoids changing anything here.'
+            )
+        }
+    }
+
+    if ($errors -match 'forcibly closed|closed the connection|existing connection') {
+        $noCert = (-not $Certificate) -or (-not $Certificate.CertSubject)
+        $headline = if ($noCert) {
+            'Every attempt was dropped by the instance before it offered a certificate. It is resetting the connection rather than refusing it, which is what an old TLS stack does with a ClientHello it cannot parse.'
+        }
+        else {
+            'Every attempt was dropped mid-handshake, after a certificate had been offered.'
+        }
+        $actions.Add('Try from a machine of the same era as the instance - an older Windows Server sends a smaller, plainer ClientHello that an old SCHANNEL can read. If that works, the instance is the limit, not your settings.')
+        $actions.Add('Look at the instance''s SQL Server error log: it records TLS handshake failures with a reason, and it is the only place that says what the server made of it.')
+        $actions.Add('Rule out anything between the two machines. A firewall or IPS inspecting TLS will reset a handshake it dislikes, and it looks exactly like this from here.')
+        $actions.Add('Patch the instance if you can: KB3135244 adds TLS 1.2 to SQL Server 2008, 2008 R2 and 2012.')
+        $actions.Add('Or do the job without connecting to it: Restore-DatabaseCopy.ps1 -SourceHistoryFile reads the backup history from a file exported on the server itself, and Restore-LatestAzureBackup.ps1 needs no source instance at all.')
+        return [pscustomobject]@{ Ok = $false; Headline = $headline; Actions = $actions.ToArray() }
+    }
+
+    [pscustomobject]@{
+        Ok = $false
+        Headline = 'No TLS version worked, and the errors do not match anything this script recognises.'
+        Actions = @('The errors above are what the client library said. The instance''s SQL Server error log is the other half of the story.')
+    }
+}
+
+#==============================================================================
+# Self test
+#==============================================================================
+if ($SelfTest) {
+    $script:failed = 0
+    function Check([string] $Name, [bool] $Ok, [string] $Detail = '') {
+        if ($Ok) { Write-Host "  PASS  $Name" -ForegroundColor Green }
+        else { Write-Host "  FAIL  $Name $Detail" -ForegroundColor Red; $script:failed++ }
+    }
+    # not R: that is the built-in alias for Invoke-History, and an alias beats a function.
+    # Not $Error for a parameter name either, PowerShell already owns that one.
+    function Attempt([string] $Asked, [bool] $Ok, [string] $Failure = '', [string] $Negotiated = '') {
+        [pscustomobject]@{ Asked = $Asked; Ok = $Ok; Error = $Failure; Negotiated = $Negotiated }
+    }
+    function Cert([int] $Bits, [string] $Algorithm) {
+        [pscustomobject]@{ CertSubject = 'CN=test'; CertKeyBits = $Bits; CertAlgorithm = $Algorithm }
+    }
+    $reset = 'An existing connection was forcibly closed by the remote host'
+
+    Write-Host 'Test-SqlTlsHandshake self test'
+    Write-Host '  instance names' -ForegroundColor Gray
+    $p = Split-SqlInstanceName 'SQL01'
+    Check 'a bare name is the default instance on 1433' ($p.Computer -eq 'SQL01' -and $p.Port -eq 1433)
+    $p = Split-SqlInstanceName 'SQL01\SALES'
+    Check 'a named instance has no port until Browser says' ($p.Instance -eq 'SALES' -and $p.Port -eq 0)
+    $p = Split-SqlInstanceName 'SQL01,14330'
+    Check 'a comma is a port' ($p.Port -eq 14330)
+    $p = Split-SqlInstanceName 'tcp:sql01.contoso.com\SALES,1433'
+    Check 'prefix, name, instance and port together' ($p.Computer -eq 'sql01.contoso.com' -and $p.Instance -eq 'SALES' -and $p.Port -eq 1433)
+
+    Write-Host '  the verdict' -ForegroundColor Gray
+    $v = Get-TlsVerdict -Results @((Attempt 'Windows default' $true '' 'Tls12'), (Attempt 'TLS 1.2' $true '' 'Tls12')) -Certificate (Cert 2048 'sha256RSA')
+    Check 'a working default sends you to the login' ($v.Ok -and $v.Headline -match 'not what is stopping you')
+
+    $v = Get-TlsVerdict -Results @((Attempt 'Windows default' $false 'handshake failed'), (Attempt 'TLS 1.2' $false 'x'), (Attempt 'TLS 1.0' $true '' 'Tls')) -Certificate (Cert 1024 'sha1RSA')
+    Check 'only TLS 1.0 working blames the default offer' (-not $v.Ok -and $v.Headline -match 'only do TLS 1.0')
+    Check 'and offers the older machine first' ($v.Actions[0] -match 'machine whose Windows still offers')
+    Check 'and mentions the registry second, with the undo' (($v.Actions -join ' ') -match 'DisabledByDefault' -and ($v.Actions -join ' ') -match 'Undo it')
+    Check 'and the no-source-needed way out' (($v.Actions -join ' ') -match 'SourceHistoryFile')
+
+    $v = Get-TlsVerdict -Results @((Attempt 'Windows default' $false $reset), (Attempt 'TLS 1.2' $false $reset), (Attempt 'TLS 1.0' $true '' 'Tls'))
+    Check 'a reset on the default but TLS 1.0 by name blames the modern ClientHello' ($v.Headline -match 'modern ClientHello' -and $v.Headline -match 'drops the connection')
+
+    $v = Get-TlsVerdict -Results @((Attempt 'Windows default' $false $reset), (Attempt 'TLS 1.2' $false $reset), (Attempt 'TLS 1.1' $false $reset), (Attempt 'TLS 1.0' $false $reset))
+    Check 'everything reset, no certificate seen, is called a reset not a refusal' (-not $v.Ok -and $v.Headline -match 'resetting the connection rather than refusing')
+    Check 'and points at the error log on the instance' (($v.Actions -join ' ') -match 'SQL Server error log')
+    Check 'and at anything in between' (($v.Actions -join ' ') -match 'firewall or IPS')
+    Check 'and at doing the job without it' (($v.Actions -join ' ') -match 'Restore-LatestAzureBackup')
+
+    $noAlg = 'The client and server cannot communicate, because they do not possess a common algorithm'
+    $v = Get-TlsVerdict -Results @((Attempt 'Windows default' $false $noAlg), (Attempt 'TLS 1.0' $false $noAlg)) -Certificate (Cert 1024 'sha1RSA')
+    Check 'no common algorithm with a weak certificate blames the certificate' ($v.Headline -match '1024-bit' -and $v.Headline -match 'sha1')
+    Check 'and says to replace it' (($v.Actions -join ' ') -match '2048-bit SHA256')
+
+    $v = Get-TlsVerdict -Results @((Attempt 'Windows default' $false $noAlg), (Attempt 'TLS 1.0' $false $noAlg)) -Certificate (Cert 4096 'sha256RSA')
+    Check 'no common algorithm with a good certificate blames the cipher suites' ($v.Headline -match 'cipher suite in common' -and $v.Headline -notmatch 'certificate')
+    Check 'and names the cmdlets for it' (($v.Actions -join ' ') -match 'Enable-TlsCipherSuite')
+
+    $v = Get-TlsVerdict -Results @((Attempt 'Windows default' $false 'no answer on SQL01:1433 within 10s'))
+    Check 'nothing listening is not a TLS problem at all' ($v.Headline -match 'nothing to negotiate')
+
+    $v = Get-TlsVerdict -Results @((Attempt 'Windows default' $false $reset)) -Encryption 'not supported by the instance'
+    Check 'an instance that says it cannot encrypt is its own finding' ($v.Headline -match 'does not support encryption')
+
+    $v = Get-TlsVerdict -Results @((Attempt 'Windows default' $false 'something nobody has seen before'))
+    Check 'an unrecognised error says so rather than guessing' ($v.Headline -match 'do not match anything this script recognises')
+
+    Write-Host ''
+    if ($script:failed -eq 0) { Write-Host 'All self tests passed.' -ForegroundColor Green; exit 0 }
+    Write-Host "$script:failed self test(s) failed." -ForegroundColor Red
+    exit 1
+}
+
+#==============================================================================
 # What this machine will agree to, on its own
 #==============================================================================
+$instances = @($SqlInstance | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+if ($instances.Count -eq 1 -and $instances[0] -match ',\s*\D') {
+    # powershell.exe -File turns a list into one string; a comma followed by a digit is a port
+    $instances = @($instances[0] -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+if ($ServerList) {
+    if (-not (Test-Path -LiteralPath $ServerList)) { Write-Host "  No such list: $ServerList" -ForegroundColor Red; exit 2 }
+    foreach ($line in (Get-Content -LiteralPath $ServerList)) {
+        $t = $line.Trim()
+        if ($t -and -not $t.StartsWith('#')) { $instances += $t }
+    }
+}
+$instances = @($instances | Select-Object -Unique)
+
 Write-Host ''
 Write-Host '  SQL Server TLS handshake  ' -NoNewline -ForegroundColor Black -BackgroundColor Cyan
-Write-Host ("  {0}   {1}" -f $(if ($SqlInstance) { $SqlInstance } else { 'this machine only' }), (Get-Date).ToString('ddd dd MMM HH:mm'))
+Write-Host ("  {0}   {1}" -f $(if ($instances.Count) { $instances -join ', ' } else { 'this machine only' }), (Get-Date).ToString('ddd dd MMM HH:mm'))
 Write-Host ''
 Write-Line ("  This machine: {0}, PowerShell {1}" -f (Get-CimInstance Win32_OperatingSystem).Caption, $PSVersionTable.PSVersion) 'DarkGray'
 
@@ -427,123 +653,104 @@ Write-Line '  What this client will agree to, handshaking with itself' 'White'
 $probeCert = New-SelfSignedCertificate -Subject 'CN=molehill-tls-probe' -CertStoreLocation Cert:\CurrentUser\My `
     -KeyAlgorithm RSA -KeyLength 2048 -NotAfter (Get-Date).AddDays(1)
 try {
-foreach ($p in $protocols) {
-    if ($p.Name -eq 'Windows default') { continue }
-    $r = [Molehill.SqlTls]::Loopback($probeCert, $p.Value, [System.Security.Authentication.SslProtocols]::None, $p.Name)
-    if ($r.Ok) { Write-Line ('    ok    {0,-16} a server offering only this is acceptable to a default client ({1})' -f $p.Name, $r.Cipher) 'Gray' }
-    else { Write-Line ('    off   {0,-16} a default client here will not use it: {1}' -f $p.Name, $r.Error) 'Yellow' }
-}
-Write-Line '    (the client side is rarely the problem; this is here so it can be ruled out)' 'DarkGray'
+    foreach ($p in $protocols) {
+        if ($p.Name -eq 'Windows default') { continue }
+        $r = [Molehill.SqlTls]::Loopback($probeCert, $p.Value, [System.Security.Authentication.SslProtocols]::None, $p.Name)
+        if ($r.Ok) { Write-Line ('    ok    {0,-16} a server offering only this is acceptable to a default client ({1})' -f $p.Name, $r.Cipher) 'Gray' }
+        else { Write-Line ('    off   {0,-16} a default client here will not use it: {1}' -f $p.Name, $r.Error) 'Yellow' }
+    }
+
+    # the suites an old instance is likely to be limited to, since a missing one looks like a
+    # protocol problem and is not
+    $legacy = 'TLS_RSA_WITH_AES_256_CBC_SHA', 'TLS_RSA_WITH_AES_128_CBC_SHA', 'TLS_RSA_WITH_3DES_EDE_CBC_SHA', 'TLS_RSA_WITH_RC4_128_SHA'
+    $missing = @($legacy | Where-Object { -not (Get-TlsCipherSuite -Name $_ -ErrorAction SilentlyContinue) })
+    if ($missing.Count -eq 0) { Write-Line ('    ok    {0,-16} all of them are enabled here' -f 'old ciphers') 'Gray' }
+    else { Write-Line ('    off   {0,-16} not enabled here: {1}' -f 'old ciphers', ($missing -join ', ')) 'Yellow' }
+    Write-Line '    (the client is rarely the problem; this is here so it can be ruled out)' 'DarkGray'
 }
 finally {
     if ($probeCert) { Remove-Item -LiteralPath $probeCert.PSPath -Force -ErrorAction SilentlyContinue }
 }
 
-if ($ClientOnly -or -not $SqlInstance) {
+if ($ClientOnly -or $instances.Count -eq 0) {
     Write-Host ''
-    if (-not $SqlInstance) { Write-Line '  Give an instance name to probe a server as well.' 'Yellow' }
+    if ($instances.Count -eq 0) { Write-Line '  Give an instance name to probe a server as well.' 'Yellow' }
     Write-Host ''
     exit 0
 }
 
 #==============================================================================
-# The instance
+# Each instance
 #==============================================================================
-$parts = Split-SqlInstanceName -Instance $SqlInstance
-$port = $parts.Port
-if ($parts.Instance -and $port -eq 0) {
-    $port = Get-SqlBrowserPort -Computer $parts.Computer -Instance $parts.Instance
-    if ($port -eq 0) {
-        Write-Host ''
-        Write-Line ("  SQL Browser did not say which port '{0}' is on. Give it directly, as SERVER,PORT." -f $parts.Instance) 'Red'
-        Write-Host ''
-        exit 2
-    }
-    Write-Line ("  SQL Browser says {0} listens on {1}" -f $parts.Instance, $port) 'DarkGray'
-}
+$anySucceeded = $false
+$anyFailed = $false
 
-Write-Host ''
-Write-Line ("  Handshaking with {0} on port {1}" -f $parts.Computer, $port) 'White'
-
-$results = @()
-foreach ($p in $protocols) {
-    $r = [Molehill.SqlTls]::Probe($parts.Computer, $port, $p.Value, $p.Name, $ConnectTimeoutSeconds)
-    $results += $r
-    if ($r.Ok) {
-        Write-Verdict 'OK' ("{0,-16} negotiated {1}, {2}" -f $p.Name, $r.Negotiated, $r.Cipher) 'Green'
-    }
-    else {
-        Write-Verdict 'FAIL' ("{0,-16} {1}" -f $p.Name, $r.Error) 'Red'
-    }
-    if ($p.Note -and -not $r.Ok) { Write-Line ("          ({0})" -f $p.Note) 'DarkGray' }
-}
-
-$encryption = @($results | Where-Object { $_.Encryption } | Select-Object -First 1)
-if ($encryption.Count) {
+foreach ($instance in $instances) {
+    $parts = Split-SqlInstanceName -Instance $instance
+    $port = $parts.Port
     Write-Host ''
-    Write-Line ('  The instance says encryption is: ' + $encryption[0].Encryption) 'Gray'
-}
+    Write-Line ("  {0}" -f $instance) 'White'
 
-$withCert = @($results | Where-Object { $_.CertSubject } | Select-Object -First 1)
-if ($withCert.Count) {
-    $c = $withCert[0]
-    Write-Host ''
-    Write-Line '  The certificate it presents' 'White'
-    Write-Line ('    subject    {0}' -f $c.CertSubject) 'Gray'
-    Write-Line ('    issuer     {0}{1}' -f $c.CertIssuer, $(if ($c.CertSelfSigned) { '  (self-signed, which is normal for SQL Server)' } else { '' })) 'Gray'
-    Write-Line ('    signature  {0}' -f $c.CertAlgorithm) $(if ($c.CertAlgorithm -match 'sha1|md5') { 'Yellow' } else { 'Gray' })
-    Write-Line ('    key        {0}-bit' -f $c.CertKeyBits) $(if ($c.CertKeyBits -gt 0 -and $c.CertKeyBits -lt 2048) { 'Yellow' } else { 'Gray' })
-    Write-Line ('    valid      {0:dd MMM yyyy} to {1:dd MMM yyyy}' -f $c.CertFrom, $c.CertTo) $(if ($c.CertTo -lt (Get-Date)) { 'Red' } else { 'Gray' })
-}
-
-#==============================================================================
-# What it means
-#==============================================================================
-$default = @($results | Where-Object { $_.Asked -eq 'Windows default' })[0]
-$anyOk = @($results | Where-Object { $_.Ok })
-$named = @($results | Where-Object { $_.Ok -and $_.Asked -ne 'Windows default' })
-
-Write-Host ''
-Write-Line '  What this means' 'White'
-if ($default.Ok) {
-    Write-Line ("    The handshake works the way a normal client does it, over {0}. Encryption is not what is" -f $default.Negotiated) 'Green'
-    Write-Line '    stopping you: look at the login instead - the account, its permissions, or the database.' 'Green'
-}
-elseif ($named.Count) {
-    $best = ($named | ForEach-Object { $_.Asked }) -join ', '
-    Write-Line ("    The instance can only do {0}, and a client asking Windows for its default is not offered it." -f $best) 'Yellow'
-    Write-Line '    Two ways out, and the first is usually right:' 'Yellow'
-    Write-Line '      1. Run the tool from a machine whose Windows still offers that version by default - often' 'Gray'
-    Write-Line '         the destination server itself, which is where a restore wants to run anyway.' 'Gray'
-    Write-Line '      2. Allow it on this machine, which weakens its TLS policy for everything:' 'Gray'
-    Write-Line '           reg add "HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.0\Client" /v Enabled /t REG_DWORD /d 1 /f' 'DarkCyan'
-    Write-Line '           reg add "HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.0\Client" /v DisabledByDefault /t REG_DWORD /d 0 /f' 'DarkCyan'
-    Write-Line '         then restart PowerShell. To undo it, set Enabled to 0 and DisabledByDefault to 1.' 'Gray'
-    Write-Line '      3. Or patch the instance: KB3135244 adds TLS 1.2 to SQL Server 2008, 2008 R2 and 2012, on' 'Gray'
-    Write-Line '         specific builds per service pack. Check its build against that article.' 'Gray'
-}
-else {
-    Write-Line '    No TLS version worked at all, so this is not about the version.' 'Red'
-    $errors = (($results | ForEach-Object { $_.Error }) -join ' ')
-    if ($errors -match 'common algorithm') {
-        Write-Line '    "No common algorithm" means no cipher suite in common. Either the instance only offers suites' 'Yellow'
-        Write-Line '    this Windows build has retired, or its certificate is too weak for the client to accept:' 'Yellow'
-        if ($withCert.Count -and ($withCert[0].CertKeyBits -lt 2048 -or $withCert[0].CertAlgorithm -match 'sha1')) {
-            Write-Line ('      the certificate above is {0}-bit {1}, which modern clients often refuse.' -f $withCert[0].CertKeyBits, $withCert[0].CertAlgorithm) 'Yellow'
-            Write-Line '      A SQL Server certificate can be replaced: give the instance a 2048-bit SHA256 certificate' 'Gray'
-            Write-Line '      in Configuration Manager, or let it regenerate one on a patched build.' 'Gray'
+    if ($parts.Instance -and $port -eq 0) {
+        $port = Get-SqlBrowserPort -Computer $parts.Computer -Instance $parts.Instance
+        if ($port -eq 0) {
+            Write-Verdict 'FAIL' ("SQL Browser did not say which port '{0}' is on. Give it directly, as SERVER,PORT." -f $parts.Instance) 'Red'
+            $anyFailed = $true
+            continue
         }
-        Write-Line '      Get-TlsCipherSuite shows what this machine offers; Enable-TlsCipherSuite adds one back.' 'Gray'
+        Write-Line ("    SQL Browser says {0} listens on {1}" -f $parts.Instance, $port) 'DarkGray'
     }
-    elseif ($errors -match 'closed the connection|forcibly closed|did not answer') {
-        Write-Line '    The instance accepted the socket and then dropped it. That is usually encryption being' 'Yellow'
-        Write-Line '    refused outright, or something between the two machines interfering with the handshake.' 'Yellow'
-    }
-    elseif ($errors -match 'no answer on') {
-        Write-Line '    Nothing answered on that port, so there is nothing to negotiate with yet.' 'Yellow'
-    }
-}
-Write-Host ''
+    Write-Line ("    handshaking with {0} on port {1}" -f $parts.Computer, $port) 'DarkGray'
 
-if ($anyOk.Count) { exit 0 }
-exit 1
+    $results = @()
+    foreach ($p in $protocols) {
+        $r = [Molehill.SqlTls]::Probe($parts.Computer, $port, $p.Value, $p.Name, $ConnectTimeoutSeconds)
+        $results += $r
+        if ($r.Ok) { Write-Verdict 'OK' ("{0,-16} negotiated {1}, {2}" -f $p.Name, $r.Negotiated, $r.Cipher) 'Green' }
+        else {
+            Write-Verdict 'FAIL' ("{0,-16} {1}" -f $p.Name, $r.Error) 'Red'
+            if ($p.Note) { Write-Line ("          ({0})" -f $p.Note) 'DarkGray' }
+        }
+    }
+
+    $encryption = @($results | Where-Object { $_.Encryption } | Select-Object -First 1)
+    $stance = if ($encryption.Count) { $encryption[0].Encryption } else { '' }
+    if ($stance) { Write-Line ('    the instance says encryption is: ' + $stance) 'Gray' }
+
+    $withCert = @($results | Where-Object { $_.CertSubject } | Select-Object -First 1)
+    $certificate = if ($withCert.Count) { $withCert[0] } else { $null }
+    if ($certificate) {
+        Write-Line '    the certificate it presents' 'White'
+        Write-Line ('      subject    {0}' -f $certificate.CertSubject) 'Gray'
+        Write-Line ('      issuer     {0}{1}' -f $certificate.CertIssuer, $(if ($certificate.CertSelfSigned) { '  (self-signed, which is normal for SQL Server)' } else { '' })) 'Gray'
+        Write-Line ('      signature  {0}' -f $certificate.CertAlgorithm) $(if ($certificate.CertAlgorithm -match 'sha1|md5') { 'Yellow' } else { 'Gray' })
+        Write-Line ('      key        {0}-bit' -f $certificate.CertKeyBits) $(if ($certificate.CertKeyBits -gt 0 -and $certificate.CertKeyBits -lt 2048) { 'Yellow' } else { 'Gray' })
+        Write-Line ('      valid      {0:dd MMM yyyy} to {1:dd MMM yyyy}' -f $certificate.CertFrom, $certificate.CertTo) $(if ($certificate.CertTo -lt (Get-Date)) { 'Red' } else { 'Gray' })
+    }
+    elseif (@($results | Where-Object { $_.Ok }).Count -eq 0) {
+        Write-Line '    no certificate was seen: the connection was dropped before one was offered' 'Yellow'
+    }
+
+    $verdict = Get-TlsVerdict -Results $results -Certificate $certificate -Encryption $stance
+    Write-Host ''
+    Write-Line '    what this means' 'White'
+    Write-Line ('      ' + $verdict.Headline) $(if ($verdict.Ok) { 'Green' } else { 'Yellow' })
+    if (-not $verdict.Ok) {
+        Write-Line '    what to try' 'White'
+        $n = 0
+        foreach ($action in $verdict.Actions) {
+            $n++
+            Write-Line ('      {0}. {1}' -f $n, $action) 'Gray'
+        }
+    }
+    if ($verdict.Ok) { $anySucceeded = $true } else { $anyFailed = $true }
+}
+
+Write-Host ''
+if ($instances.Count -gt 1) {
+    Write-Line ('  {0} instance(s) probed, {1} negotiated cleanly' -f $instances.Count, $(if ($anySucceeded) { @($instances).Count - [int]$anyFailed } else { 0 })) 'DarkGray'
+    Write-Host ''
+}
+
+if ($anyFailed) { exit 1 }
+exit 0
