@@ -149,6 +149,7 @@ MolehillWatch\
    ├─ Get-PatchStatus.ps1                   standalone patch check for any server (no install)
    ├─ Test-DatabaseStatus.ps1               "is everything back?" after a patch, reboot or restore
    ├─ Restore-DatabaseCopy.ps1              restores databases to another server, directly or via Azure Blob Storage
+   ├─ Test-SqlTlsHandshake.ps1              why an instance will not negotiate encryption (old servers)
    ├─ Get-SqlLicensingAudit.ps1             what needs licensing across an estate, and the total to cover it
    ├─ Export-DatabaseSample.ps1             a random sample of every table, as zipped CSVs
    ├─ Test-SqlConnectionString.ps1          tests a list of connection strings (one-shot, no UI)
@@ -244,6 +245,23 @@ Three jobs that turn out to be one script: refreshing a copy of a database onto 
 * **Connection problems are explained, not just reported.** `-TestConnectionOnly` runs the checks on their own. A failure gives what SQL Server said, what it means and what to try - the login error number and state, a refused or silently dropped port, SQL Browser for a named instance, and the two separate encryption traps: an untrusted certificate (add `-TrustServerCertificate`) and a TLS version mismatch (SQL Server 2008 R2 before SP3 + KB3135244 speaks TLS 1.0 only, which `-TrustServerCertificate` will not fix).
 * `-Standby` leaves the copy readable between log restores, `-StopAt` restores to a point in time, `-LogLevel Quiet|Normal|Verbose|Debug` sets how much it says (`-Verbose`/`-Debug` raise it by themselves), `-LogFile` appends it all to a file, `-CsvPath` writes a row per database, `-WhatIf` prints the exact RESTORE statements and runs nothing, and `-SelfTest` checks the chain, statement and path logic with no server at all.
 * **Several databases per run**, one pair of instances. A failure on one is reported and the rest carry on, with `PARTLY DONE (2 of 3)` in the summary. **Exit code** is 0 (done, or a clean dry run), 1 (something failed) or 2 (could not start).
+
+## Why encryption will not negotiate (`Tools\Test-SqlTlsHandshake.ps1`)
+
+SQL Server encrypts the login packet whatever else you ask for, so every connection begins with a TLS handshake - and on an old instance that is where connections die. The error a client hands back ("pre-login handshake", "certificate chain", "no common algorithm") rarely says which side refused or why, and `-TrustServerCertificate` only fixes one of the possible causes.
+
+```powershell
+.\Test-SqlTlsHandshake.ps1 LEGACYSERVER2008R2
+.\Test-SqlTlsHandshake.ps1 -ClientOnly          # just what this machine will agree to
+```
+
+It speaks TDS directly: opens the socket, sends a PRELOGIN packet, and runs the TLS handshake itself - wrapped in TDS packets, the way a real client does - once per TLS version. No login is attempted and no credentials are needed.
+
+* **Per TLS version**, whether the handshake succeeded and with which cipher, or the exact error. It also tries "whatever Windows picks by default", which is what real clients ask for - an instance can manage TLS 1.0 while a default client is never offered it.
+* **The certificate it presents**: subject, issuer, signature algorithm, key size and dates. A self-signed 1024-bit SHA1 certificate is normal on an old instance, and a common reason a modern client walks away.
+* **What this machine will agree to**, by handshaking with itself, so the client can be ruled out rather than suspected.
+* **What it means**, spelled out: a working handshake sends you back to the login; only TLS 1.0 working points at the instance's patch level (KB3135244 adds TLS 1.2 to SQL Server 2008, 2008 R2 and 2012, on specific builds per service pack); nothing working points at cipher suites or at the certificate. Where a registry change is the answer it gives the exact commands, says plainly that it weakens the machine's TLS policy, and tells you how to undo it.
+* **Exit code** is 0 (something negotiated), 1 (nothing did) or 2 (could not get that far).
 
 ## Table samples as CSV (`Tools\Export-DatabaseSample.ps1`)
 

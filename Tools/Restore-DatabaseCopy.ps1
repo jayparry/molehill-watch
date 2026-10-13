@@ -443,13 +443,13 @@ function Get-SqlErrorExplanation {
     if ($m -match 'pre-login handshake|certificate chain was issued by an authority that is not trusted|The target principal name is incorrect|SSL Provider|encryption') {
         return [pscustomobject]@{
             Meaning = 'The connection failed while setting up encryption.'
-            Fix     = 'Current SQL client libraries ask for an encrypted connection, and an older instance has no certificate they trust. Add -TrustServerCertificate. This is the usual answer for SQL Server 2008 R2.'
+            Fix     = 'Try -TrustServerCertificate first: an instance with a self-signed certificate needs it. If that changes nothing, the handshake is failing on the protocol or the cipher rather than on trust - Test-SqlTlsHandshake.ps1 against the instance will say which, and what certificate it is presenting.'
         }
     }
     if ($m -match 'do not possess a common algorithm|existing connection was forcibly closed|SSL/TLS|schannel') {
         return [pscustomobject]@{
-            Meaning = 'The two machines could not agree on a TLS version.'
-            Fix     = 'SQL Server 2008 R2 only speaks TLS 1.2 from SP3 with KB3135244 (build 10.50.6542 or later). On SP2 or earlier it is TLS 1.0 only, so the machine running this script has to still allow TLS 1.0 - check SCHANNEL in the registry and the .NET strong crypto settings. -TrustServerCertificate does not help with this one: it is the protocol version, not the certificate.'
+            Meaning = 'The two machines could not agree on how to encrypt the connection - a TLS version or a cipher suite, not a certificate.'
+            Fix     = 'SQL Server encrypts the login packet whatever -TrustServerCertificate says, so that switch will not help here. Run Test-SqlTlsHandshake.ps1 against the instance: it says which TLS versions it will do, whether a default client is offered them, and what certificate it presents - an old instance often has a 1024-bit SHA1 one that a modern client refuses. Guessing between those causes wastes an afternoon.'
         }
     }
     if ($m -match 'wait operation timed out|Timeout expired|timeout period elapsed') {
@@ -761,6 +761,9 @@ function Write-ConnectivityReport {
         if ($Result.Error)   { Write-Log "    what SQL Server said: $($Result.Error)" -Level ERROR }
         if ($Result.Meaning) { Write-Log "    what it means: $($Result.Meaning)" -Level ERROR }
         if ($Result.Fix)     { Write-Log "    what to try: $($Result.Fix)" -Level WARN }
+        if ($Result.Error -match 'handshake|certificate|common algorithm|SSL|TLS|forcibly closed') {
+            Write-Log ("    for the detail: .\Test-SqlTlsHandshake.ps1 '{0}'" -f $Result.Instance) -Level WARN
+        }
     }
 }
 
@@ -1482,8 +1485,9 @@ if ($SelfTest) {
     $e = Get-SqlErrorExplanation -Number 0 -Message "A parameter cannot be found that matches parameter name 'EnableException'."
     Check 'and a script fault is called a script fault' ($e.Meaning -match 'fault in the script')
     $e = Get-SqlErrorExplanation -Number 0 -Message 'The client and server cannot communicate, because they do not possess a common algorithm'
-    Check 'a TLS version mismatch is told apart from a certificate problem' ($e.Meaning -match 'TLS version' -and $e.Fix -match 'TLS 1.0')
-    Check 'and says the certificate switch will not fix it' ($e.Fix -match 'does not help')
+    Check 'an encryption mismatch is told apart from a certificate problem' ($e.Meaning -match 'not a certificate')
+    Check 'and says the certificate switch will not fix it' ($e.Fix -match 'will not help')
+    Check 'and sends you to the tool that measures it' ($e.Fix -match 'Test-SqlTlsHandshake')
     $e = Get-SqlErrorExplanation -Number 0 -Message 'The wait operation timed out'
     Check 'a bare timeout is explained as a timeout' ($e.Meaning -match 'did not answer' -and $e.Fix -match 'firewall')
     $e = Get-SqlErrorExplanation -Number 0 -Message 'something nobody has seen before'
