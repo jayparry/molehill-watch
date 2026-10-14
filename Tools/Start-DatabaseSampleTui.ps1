@@ -25,9 +25,11 @@
     connection string you saw and the exact table names you picked. Nothing is sampled until you
     confirm on the last screen.
 
-    The first screen is not written here: it comes from Molehill.SqlConnect.psm1 beside this
-    script, which Get-SqlConnectionString.ps1 also uses to hand a connection string to the
-    pipeline. Anything else that needs a connection can use it too.
+    None of the screens are written here. They come from Molehill.SqlConnect.psm1 beside this
+    script: the connect dialog, which Get-SqlConnectionString.ps1 also uses to hand a connection
+    string to the pipeline, and the two pickers - Show-TuiList for one of something and
+    Show-TuiCheckList for the all / only these / all but these choice. What is left in this script
+    is the table discovery, the export form, and the order it all happens in.
 
     AUTHENTICATION, AND WHICH DRIVER CAN DO WHAT
     The methods on offer are not guessed at: each one is tried against the connection string
@@ -86,8 +88,8 @@
     single characters are all understood.
 
 .PARAMETER SelfTest
-    Check the screen logic - the connect screen's own tests from the module, plus the table
-    picker - with no server at all.
+    Check the logic behind the screens, which all come from Molehill.SqlConnect, with no server at
+    all.
 
 .EXAMPLE
     .\Start-DatabaseSampleTui.ps1
@@ -127,39 +129,6 @@ if (-not (Test-Path -LiteralPath $modulePath)) {
 Import-Module $modulePath -Force -DisableNameChecking
 
 #==============================================================================
-# The sums this screen does for itself
-#==============================================================================
-function Get-PickerSummary {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)] [ValidateSet('All', 'Include', 'Exclude')] [string] $Mode,
-        [int] $Total, [int] $Ticked
-    )
-    switch ($Mode) {
-        'All' { return [pscustomobject]@{ Count = $Total; Text = "ALL TABLES - every one of the $Total will be exported" } }
-        'Include' { return [pscustomobject]@{ Count = $Ticked; Text = "INCLUDE - $Ticked ticked of $Total, so $Ticked will be exported" } }
-        default {
-            $left = $Total - $Ticked
-            return [pscustomobject]@{ Count = $left; Text = "EXCLUDE - $Ticked ticked of $Total, so $left will be exported" }
-        }
-    }
-}
-function Select-PickerRows {
-    [CmdletBinding()]
-    param([AllowEmptyCollection()] [object[]] $Rows, [AllowEmptyString()] [string] $Filter)
-
-    # -NoEnumerate so one match still comes back as a list: under Windows PowerShell 5.1 a single
-    # object has no .Count, and counting the rows is most of what this screen does
-    if (-not $Filter) { return Write-Output -NoEnumerate @($Rows) }
-    $needle = $Filter.Trim()
-    Write-Output -NoEnumerate @($Rows | Where-Object { "$($_.Schema).$($_.Table)" -like "*$needle*" })
-}
-function Format-Rows([object] $Value) {
-    if ($null -eq $Value) { return '' }
-    '{0:N0}' -f [int64]$Value
-}
-
-#==============================================================================
 # The tables this database would export
 #==============================================================================
 <#
@@ -195,170 +164,8 @@ AND     NOT EXISTS (SELECT 1 FROM sys.extended_properties AS ep
 ORDER BY s.name, o.name
 "@
     }
-    Write-Output -NoEnumerate @((Invoke-SqlQueryTable -Connection $Connection -Query $query).Rows | ForEach-Object {
-        [pscustomobject]@{ Schema = [string]$_['SchemaName']; Table = [string]$_['TableName']; Rows = [int64]$_['Rows']; Ticked = $false }
-    })
-}
-
-#==============================================================================
-# Screen 2: which database
-#==============================================================================
-function Show-DatabasePicker {
-    [CmdletBinding()]
-    param([Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $Databases)
-
-    if (@($Databases).Count -eq 0) { return $null }
-    $index = 0
-    $window = 15
-    while ($true) {
-        Clear-TuiScreen
-        Write-TuiTitle 'Which database'
-        Write-Tui ''
-        $first = [math]::Max(0, [math]::Min($index - [int]($window / 2), @($Databases).Count - $window))
-        if ($first -lt 0) { $first = 0 }
-        for ($i = $first; $i -lt [math]::Min($first + $window, @($Databases).Count); $i++) {
-            $db = $Databases[$i]
-            $marker = if ($i -eq $index) { '>' } else { ' ' }
-            $colour = if ($i -eq $index) { [ConsoleColor]::White } elseif ($db.State -ne 'ONLINE') { [ConsoleColor]::DarkGray } else { [ConsoleColor]::Gray }
-            Write-Tui ('  {0} {1,-50} {2}' -f $marker, $db.Name, $(if ($db.State -ne 'ONLINE') { $db.State } else { '' })) $colour
-        }
-        Write-Tui ''
-        Write-Tui ("  {0} of {1}" -f ($index + 1), @($Databases).Count) DarkGray
-        Write-TuiKeys 'Up/Down   Enter choose   Esc back'
-
-        $key = Read-TuiKey
-        switch ($key.Name) {
-            'UpArrow'   { $index = [math]::Max(0, $index - 1) }
-            'DownArrow' { $index = [math]::Min(@($Databases).Count - 1, $index + 1) }
-            'PageUp'    { $index = [math]::Max(0, $index - $window) }
-            'PageDown'  { $index = [math]::Min(@($Databases).Count - 1, $index + $window) }
-            'Home'      { $index = 0 }
-            'End'       { $index = @($Databases).Count - 1 }
-            'Enter'     { return $Databases[$index].Name }
-            'Escape'    { return $null }
-        }
-    }
-}
-
-#==============================================================================
-# Screen 3: which tables
-#==============================================================================
-function Show-TablePicker {
-    [CmdletBinding()]
-    param([Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $Tables, [string] $DatabaseName)
-
-    $mode = 'All'
-    $index = 0
-    $filter = ''
-    $filtering = $false
-    $window = 15
-    $message = ''
-
-    while ($true) {
-        $visible = Select-PickerRows -Rows $Tables -Filter $filter
-        if ($index -ge @($visible).Count) { $index = [math]::Max(0, @($visible).Count - 1) }
-        $ticked = @($Tables | Where-Object { $_.Ticked }).Count
-        $summary = Get-PickerSummary -Mode $mode -Total @($Tables).Count -Ticked $ticked
-
-        Clear-TuiScreen
-        Write-TuiTitle "Tables in [$DatabaseName]"
-        Write-Tui ''
-        Write-Tui ("  Mode: " + $summary.Text) $(if ($summary.Count -eq 0) { [ConsoleColor]::Red } else { [ConsoleColor]::Green })
-        if ($filtering -or $filter) {
-            Write-Tui ("  Filter: '{0}'{1} - {2} of {3} shown" -f $filter,
-                       $(if ($filtering) { ' (typing; Enter or Esc to stop)' } else { '' }),
-                       @($visible).Count, @($Tables).Count) $(if ($filtering) { [ConsoleColor]::Yellow } else { [ConsoleColor]::DarkGray })
-        }
-        Write-Tui ''
-
-        if (@($visible).Count -eq 0) { Write-Tui '    nothing matches that filter' DarkGray }
-        $first = [math]::Max(0, [math]::Min($index - [int]($window / 2), @($visible).Count - $window))
-        if ($first -lt 0) { $first = 0 }
-        for ($i = $first; $i -lt [math]::Min($first + $window, @($visible).Count); $i++) {
-            $row = $visible[$i]
-            $marker = if ($i -eq $index) { '>' } else { ' ' }
-            $box = if ($mode -eq 'All') { '   ' } elseif ($row.Ticked) { '[x]' } else { '[ ]' }
-            $colour = if ($i -eq $index) { [ConsoleColor]::White }
-                      elseif ($mode -eq 'Exclude' -and $row.Ticked) { [ConsoleColor]::DarkGray }
-                      else { [ConsoleColor]::Gray }
-            Write-Tui ('  {0} {1} {2,-50} {3,12} rows' -f $marker, $box, "$($row.Schema).$($row.Table)", (Format-Rows $row.Rows)) $colour
-        }
-        Write-Tui ''
-        Write-Tui ("  {0} of {1} listed" -f $(if (@($visible).Count) { $index + 1 } else { 0 }), @($visible).Count) DarkGray
-        if ($message) { Write-Tui "  $message" Yellow }
-        if ($filtering) { Write-TuiKeys 'type to narrow the list   Backspace   Enter or Esc to stop filtering' }
-        else { Write-TuiKeys 'Up/Down   Space tick   F2 mode (All/Include/Exclude)   F3 all shown   F4 none   F6 invert shown   F7 filter   Enter continue   Esc back' }
-
-        $key = Read-TuiKey
-        $message = ''
-
-        # while the filter is being typed the letters are letters, not commands
-        if ($filtering) {
-            switch ($key.Name) {
-                'Enter'     { $filtering = $false }
-                'Escape'    { $filtering = $false; $filter = ''; $index = 0 }
-                'Backspace' { $filter = Remove-TuiChar $filter; $index = 0 }
-                'UpArrow'   { $index = [math]::Max(0, $index - 1) }
-                'DownArrow' { $index = [math]::Min([math]::Max(0, @($visible).Count - 1), $index + 1) }
-                default     { if ($key.Char) { $filter = Add-TuiChar $filter $key.Char; $index = 0 } }
-            }
-            continue
-        }
-
-        $handled = $true
-        switch ($key.Name) {
-            'UpArrow'   { $index = [math]::Max(0, $index - 1) }
-            'DownArrow' { $index = [math]::Min([math]::Max(0, @($visible).Count - 1), $index + 1) }
-            'PageUp'    { $index = [math]::Max(0, $index - $window) }
-            'PageDown'  { $index = [math]::Min([math]::Max(0, @($visible).Count - 1), $index + $window) }
-            'Home'      { $index = 0 }
-            'End'       { $index = [math]::Max(0, @($visible).Count - 1) }
-            'Escape'    { return $null }
-            'Spacebar'  {
-                if ($mode -eq 'All') { $message = 'Ticking does nothing in ALL mode. Press M to include or exclude.' }
-                elseif (@($visible).Count) { $visible[$index].Ticked = -not $visible[$index].Ticked }
-            }
-            'F2'        { $mode = switch ($mode) { 'All' { 'Include' } 'Include' { 'Exclude' } default { 'All' } } }
-            'F3'        {
-                if ($mode -eq 'All') { $message = 'Ticking does nothing in ALL mode. Press F2 to include or exclude.' }
-                else { foreach ($row in $visible) { $row.Ticked = $true } }
-            }
-            'F4'        { foreach ($row in $Tables) { $row.Ticked = $false } }
-            'F6'        {
-                if ($mode -eq 'All') { $message = 'Ticking does nothing in ALL mode. Press F2 to include or exclude.' }
-                else { foreach ($row in $visible) { $row.Ticked = -not $row.Ticked } }
-            }
-            'F7'        { $filtering = $true; $message = 'Filtering.' }
-            'Enter'     { $handled = $false }
-            default     { $handled = $false }
-        }
-        if ($handled) { continue }
-
-        if ($key.Name -eq 'Enter') {
-            if ($mode -eq 'All') { return [pscustomobject]@{ Mode = 'All'; Names = @() } }
-            $names = @($Tables | Where-Object { $_.Ticked } | ForEach-Object { "$($_.Schema).$($_.Table)" })
-            if ($names.Count -eq 0) {
-                $message = 'Nothing is ticked. Tick some tables with Space, or press M for ALL.'
-                continue
-            }
-            if ($mode -eq 'Exclude' -and $names.Count -eq @($Tables).Count) {
-                $message = 'Every table is ticked to be excluded, which would export nothing.'
-                continue
-            }
-            return [pscustomobject]@{ Mode = $mode; Names = $names }
-        }
-
-        # nothing on this screen is typed into, so the old letters still work as shortcuts
-        if ($key.Char) {
-            switch (([string]$key.Char).ToUpperInvariant()) {
-                '/' { $filtering = $true; $message = 'Filtering.' }
-                'M' { $mode = switch ($mode) { 'All' { 'Include' } 'Include' { 'Exclude' } default { 'All' } } }
-                'A' { if ($mode -ne 'All') { foreach ($row in $visible) { $row.Ticked = $true } } }
-                'N' { foreach ($row in $Tables) { $row.Ticked = $false } }
-                'V' { if ($mode -ne 'All') { foreach ($row in $visible) { $row.Ticked = -not $row.Ticked } } }
-                default { $message = "Nothing is bound to '$($key.Char)'. F7 or / filters by name." }
-            }
-        }
+    (Invoke-SqlQueryTable -Connection $Connection -Query $query).Rows | ForEach-Object {
+        [pscustomobject]@{ Schema = [string]$_['SchemaName']; Table = [string]$_['TableName']; Rows = [int64]$_['Rows'] }
     }
 }
 
@@ -387,8 +194,8 @@ function Show-ExportScreen {
         Write-Tui ''
         $what = switch ($Choice.Mode) {
             'All'     { 'every table' }
-            'Include' { "only these $(@($Choice.Names).Count): " + (@($Choice.Names) -join ', ') }
-            default   { "everything except these $(@($Choice.Names).Count): " + (@($Choice.Names) -join ', ') }
+            'Include' { "only these $(@($Choice.Labels).Count): " + (@($Choice.Labels) -join ', ') }
+            default   { "everything except these $(@($Choice.Labels).Count): " + (@($Choice.Labels) -join ', ') }
         }
         Write-Tui "  Tables: $what" Cyan
         if ($message) { Write-Tui ''; Write-Tui "  $message" Yellow }
@@ -445,45 +252,21 @@ function Show-ExportScreen {
 
 #==============================================================================
 # Self test
+#
+# The screens here are the module's now - the connect dialog, the list and the tick list - so its
+# tests are these tests. What is left in this script is the table discovery query and the export
+# form, and both of those need a server to mean anything.
 #==============================================================================
 if ($SelfTest) {
     Write-Host 'Start-DatabaseSampleTui self test'
-    Write-Host '  the connect screen (Molehill.SqlConnect)' -ForegroundColor Gray
+    Write-Host '  the screens it uses (Molehill.SqlConnect)' -ForegroundColor Gray
     $module = Test-SqlConnectModule
-
-    $failed = $module.Failed
-    function Check([string] $Name, [bool] $Ok, [string] $Detail = '') {
-        if ($Ok) { Write-Host "  PASS  $Name" -ForegroundColor Green }
-        else { Write-Host "  FAIL  $Name $Detail" -ForegroundColor Red; $script:failed++ }
-    }
-    $script:failed = $failed
-
-    Write-Host '  the three ways to choose tables' -ForegroundColor Gray
-    Check 'all means all' ((Get-PickerSummary -Mode All -Total 10 -Ticked 0).Count -eq 10)
-    Check 'and says so' ((Get-PickerSummary -Mode All -Total 10 -Ticked 3).Text -match 'every one of the 10')
-    Check 'include exports what is ticked' ((Get-PickerSummary -Mode Include -Total 10 -Ticked 3).Count -eq 3)
-    Check 'exclude exports the rest' ((Get-PickerSummary -Mode Exclude -Total 10 -Ticked 3).Count -eq 7)
-    Check 'excluding everything exports nothing' ((Get-PickerSummary -Mode Exclude -Total 10 -Ticked 10).Count -eq 0)
-    Check 'including nothing exports nothing' ((Get-PickerSummary -Mode Include -Total 10 -Ticked 0).Count -eq 0)
-
-    $rows = @(
-        [pscustomobject]@{ Schema = 'dbo'; Table = 'Orders' }
-        [pscustomobject]@{ Schema = 'dbo'; Table = 'CustomerAudit' }
-        [pscustomobject]@{ Schema = 'staging'; Table = 'Load' }
-    )
-    Check 'no filter shows everything' ((Select-PickerRows -Rows $rows -Filter '').Count -eq 3)
-    Check 'one match is still a list, which 5.1 would otherwise not count' (
-        $null -ne (Select-PickerRows -Rows $rows -Filter 'Orders').Count)
-    Check 'a filter narrows it' ((Select-PickerRows -Rows $rows -Filter 'audit').Count -eq 1)
-    Check 'and matches the schema too' ((Select-PickerRows -Rows $rows -Filter 'staging').Count -eq 1)
-    Check 'and nothing is nothing' ((Select-PickerRows -Rows $rows -Filter 'zzz').Count -eq 0)
-
     Write-Host ''
-    if ($script:failed -eq 0) {
+    if ($module.Failed -eq 0) {
         Write-Host ("All self tests passed{0}." -f $(if ($module.Skipped) { ", $($module.Skipped) skipped" } else { '' })) -ForegroundColor Green
         exit 0
     }
-    Write-Host "$script:failed self test(s) failed." -ForegroundColor Red
+    Write-Host "$($module.Failed) self test(s) failed." -ForegroundColor Red
     exit 1
 }
 
@@ -529,10 +312,12 @@ while ($true) {
         if (-not $settings.Database) {
             Write-Tui ''
             Write-Tui '  Reading the database list...' DarkGray
-            $databases = Get-SqlDatabaseList -Connection $connection -Info $info
-            $chosen = Show-DatabasePicker -Databases $databases
+            $databases = @(Get-SqlDatabaseList -Connection $connection -Info $info)
+            $chosen = Show-TuiList -Items $databases -Title 'Which database' -AllowFilter `
+                          -Label { $_.Name } -Detail { if ($_.State -ne 'ONLINE') { $_.State } else { '' } } `
+                          -Dim { $_.State -ne 'ONLINE' }
             if (-not $chosen) { $connection.Dispose(); $connection = $null; continue }
-            $settings.Database = $chosen
+            $settings.Database = $chosen.Name
             $connection.Dispose()
             $connectionString = New-SqlConnectionString -Settings $settings
             $connection = Open-SqlConnection -Settings $settings -ConnectionString $connectionString
@@ -541,7 +326,7 @@ while ($true) {
 
         Clear-TuiScreen
         Write-TuiTitle "Reading the tables in [$($settings.Database)]"
-        $tables = Get-TuiTableList -Connection $connection -Info $info
+        $tables = @(Get-TuiTableList -Connection $connection -Info $info)
         $connection.Dispose()
         $connection = $null
 
@@ -554,7 +339,9 @@ while ($true) {
             continue
         }
 
-        $choice = Show-TablePicker -Tables $tables -DatabaseName $settings.Database
+        $choice = Show-TuiCheckList -Items $tables -Title "Tables in [$($settings.Database)]" `
+                       -Label { "$($_.Schema).$($_.Table)" } -Detail { '{0:N0} rows' -f $_.Rows } `
+                       -ItemNoun 'table' -Action 'exported'
         if (-not $choice) { $settings.Database = ''; continue }
 
         if (-not (Show-ExportScreen -Options $exportOptions -Choice $choice -DatabaseName $settings.Database)) { continue }
@@ -573,8 +360,8 @@ while ($true) {
         if ($exportOptions.ReadUncommitted) { $engineArgs['ReadUncommitted'] = $true }
         if ($exportOptions.RemoveFolder) { $engineArgs['RemoveFolderAfterZip'] = $true }
         if ($exportOptions.Force) { $engineArgs['Force'] = $true }
-        if ($choice.Mode -eq 'Include') { $engineArgs['IncludeTable'] = $choice.Names }
-        if ($choice.Mode -eq 'Exclude') { $engineArgs['ExcludeTable'] = $choice.Names }
+        if ($choice.Mode -eq 'Include') { $engineArgs['IncludeTable'] = $choice.Labels }
+        if ($choice.Mode -eq 'Exclude') { $engineArgs['ExcludeTable'] = $choice.Labels }
 
         try {
             $result = & $enginePath @engineArgs

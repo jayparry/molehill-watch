@@ -178,6 +178,314 @@ function Remove-TuiChar {
 }
 
 #==============================================================================
+# Picking things off a list
+#
+# Neither of these knows what it is showing. The caller says how to label a row and, if it wants,
+# how to add a detail on the right and when to grey one out; everything else - paging, the filter,
+# the ticking, the counting - is the same whether the rows are tables, databases or servers.
+#
+# The ticks are kept here rather than written onto the caller's objects: a picker that adds a
+# property to what it was handed makes every caller build objects shaped for the picker.
+#==============================================================================
+
+# runs a caller's label or detail block with the row bound to $_
+function Invoke-TuiBlock {
+    [CmdletBinding()]
+    param([AllowNull()] [scriptblock] $Block, [AllowNull()] $Item)
+
+    if ($null -eq $Block) { return '' }
+    [string](ForEach-Object -InputObject $Item -Process $Block)
+}
+
+<#
+  The rows a filter leaves showing, matched on the label rather than on the object, because the
+  label is what the person can see to type.
+
+  Like everything else here it emits its rows one at a time, and callers wrap the call in @().
+  That is the convention throughout this module, and it is deliberate: Write-Output -NoEnumerate
+  would save a caller from remembering the @(), but a caller who wraps it anyway gets a single
+  item holding an array - a list screen with one row whose label is every label at once.
+#>
+function Select-TuiRows {
+    [CmdletBinding()]
+    param([AllowEmptyCollection()] [object[]] $Rows, [AllowEmptyString()] [string] $Filter)
+
+    if (-not $Filter) { return $Rows }
+    $needle = $Filter.Trim()
+    $Rows | Where-Object { $_.Text -like "*$needle*" }
+}
+
+<#
+  What the three modes mean, which is the one thing on a tick list worth getting right.
+
+  All means all, whatever is ticked. Include means only what is ticked. Exclude means everything
+  except what is ticked - so ticking all of them is a way of asking for nothing, and the screen
+  needs to say so before Enter rather than after.
+#>
+function Get-TuiSelectionSummary {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [ValidateSet('All', 'Include', 'Exclude')] [string] $Mode,
+        [int] $Total, [int] $Ticked,
+        [string] $ItemNoun = 'item', [string] $Action = 'used'
+    )
+
+    $plural = if ($Total -eq 1) { $ItemNoun } else { $ItemNoun + 's' }
+    switch ($Mode) {
+        'All' {
+            return [pscustomobject]@{ Count = $Total; Text = "ALL - all $Total $plural will be $Action" }
+        }
+        'Include' {
+            return [pscustomobject]@{ Count = $Ticked; Text = "INCLUDE - $Ticked of $Total $plural ticked, so $Ticked will be $Action" }
+        }
+        default {
+            $left = $Total - $Ticked
+            return [pscustomobject]@{ Count = $left; Text = "EXCLUDE - $Ticked of $Total $plural ticked, so $left will be $Action" }
+        }
+    }
+}
+
+# the rows a picker works with: labels worked out once, ticks kept beside them
+function New-TuiRows {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()] [object[]] $Items,
+        [AllowNull()] [scriptblock] $Label, [AllowNull()] [scriptblock] $Detail, [AllowNull()] [scriptblock] $Dim
+    )
+
+    $rows = New-Object System.Collections.Generic.List[object]
+    $index = 0
+    foreach ($item in @($Items)) {
+        $rows.Add([pscustomobject]@{
+            Index  = $index
+            Item   = $item
+            Text   = $(if ($Label) { Invoke-TuiBlock $Label $item } else { [string]$item })
+            Detail = Invoke-TuiBlock $Detail $item
+            Dim    = $(if ($Dim) { [bool](ForEach-Object -InputObject $item -Process $Dim) } else { $false })
+            Ticked = $false
+        })
+        $index++
+    }
+    # .ToArray() rather than the list itself: @($genericList) throws "Argument types do not match"
+    # on Windows PowerShell 5.1
+    $rows.ToArray()
+}
+
+<#
+  Pick one thing off a list.
+
+  Returns the item the caller gave, not a copy of it, so the caller gets its own object back with
+  whatever else was on it. Esc gives back nothing.
+#>
+function Show-TuiList {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $Items,
+        [string] $Title = 'Choose one',
+        [scriptblock] $Label, [scriptblock] $Detail, [scriptblock] $Dim,
+        [ValidateRange(5, 60)] [int] $Window = 15,
+        [switch] $AllowFilter
+    )
+
+    $rows = @(New-TuiRows -Items $Items -Label $Label -Detail $Detail -Dim $Dim)
+    if ($rows.Count -eq 0) { return $null }
+    $index = 0
+    $filter = ''
+    $filtering = $false
+
+    while ($true) {
+        $visible = @(Select-TuiRows -Rows $rows -Filter $filter)
+        if ($index -ge $visible.Count) { $index = [math]::Max(0, $visible.Count - 1) }
+
+        Clear-TuiScreen
+        Write-TuiTitle $Title
+        Write-Tui ''
+        if ($filtering -or $filter) {
+            Write-Tui ("  Filter: '{0}'{1} - {2} of {3} shown" -f $filter,
+                       $(if ($filtering) { ' (typing; Enter or Esc to stop)' } else { '' }),
+                       $visible.Count, $rows.Count) $(if ($filtering) { [ConsoleColor]::Yellow } else { [ConsoleColor]::DarkGray })
+            Write-Tui ''
+        }
+        if ($visible.Count -eq 0) { Write-Tui '    nothing matches that filter' DarkGray }
+
+        $first = [math]::Max(0, [math]::Min($index - [int]($Window / 2), $visible.Count - $Window))
+        if ($first -lt 0) { $first = 0 }
+        for ($i = $first; $i -lt [math]::Min($first + $Window, $visible.Count); $i++) {
+            $row = $visible[$i]
+            $marker = if ($i -eq $index) { '>' } else { ' ' }
+            $colour = if ($i -eq $index) { [ConsoleColor]::White } elseif ($row.Dim) { [ConsoleColor]::DarkGray } else { [ConsoleColor]::Gray }
+            Write-Tui ('  {0} {1,-50} {2}' -f $marker, $row.Text, $row.Detail) $colour
+        }
+        Write-Tui ''
+        Write-Tui ("  {0} of {1}" -f $(if ($visible.Count) { $index + 1 } else { 0 }), $visible.Count) DarkGray
+        if ($filtering) { Write-TuiKeys 'type to narrow the list   Backspace   Enter or Esc to stop filtering' }
+        elseif ($AllowFilter) { Write-TuiKeys 'Up/Down   F7 filter   Enter choose   Esc back' }
+        else { Write-TuiKeys 'Up/Down   Enter choose   Esc back' }
+
+        $key = Read-TuiKey
+        if ($filtering) {
+            switch ($key.Name) {
+                'Enter'     { $filtering = $false }
+                'Escape'    { $filtering = $false; $filter = ''; $index = 0 }
+                'Backspace' { $filter = Remove-TuiChar $filter; $index = 0 }
+                'UpArrow'   { $index = [math]::Max(0, $index - 1) }
+                'DownArrow' { $index = [math]::Min([math]::Max(0, $visible.Count - 1), $index + 1) }
+                default     { if ($key.Char) { $filter = Add-TuiChar $filter $key.Char; $index = 0 } }
+            }
+            continue
+        }
+        switch ($key.Name) {
+            'UpArrow'   { $index = [math]::Max(0, $index - 1) }
+            'DownArrow' { $index = [math]::Min([math]::Max(0, $visible.Count - 1), $index + 1) }
+            'PageUp'    { $index = [math]::Max(0, $index - $Window) }
+            'PageDown'  { $index = [math]::Min([math]::Max(0, $visible.Count - 1), $index + $Window) }
+            'Home'      { $index = 0 }
+            'End'       { $index = [math]::Max(0, $visible.Count - 1) }
+            'F7'        { if ($AllowFilter) { $filtering = $true } }
+            'Escape'    { return $null }
+            'Enter'     { if ($visible.Count) { return $visible[$index].Item } }
+            default     { if ($AllowFilter -and $key.Char -eq '/') { $filtering = $true } }
+        }
+    }
+}
+
+<#
+  Pick some things off a list, or say that you want all of them, or all but these.
+
+  Gives back the mode and the items ticked - the caller's own objects, and their labels - leaving
+  it to the caller to turn that into whatever its tool takes. Esc gives back nothing.
+#>
+function Show-TuiCheckList {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $Items,
+        [string] $Title = 'Choose',
+        [scriptblock] $Label, [scriptblock] $Detail, [scriptblock] $Dim,
+        [string] $ItemNoun = 'item', [string] $Action = 'used',
+        [ValidateRange(5, 60)] [int] $Window = 15
+    )
+
+    $rows = @(New-TuiRows -Items $Items -Label $Label -Detail $Detail -Dim $Dim)
+    $mode = 'All'
+    $index = 0
+    $filter = ''
+    $filtering = $false
+    $message = ''
+
+    while ($true) {
+        $visible = @(Select-TuiRows -Rows $rows -Filter $filter)
+        if ($index -ge $visible.Count) { $index = [math]::Max(0, $visible.Count - 1) }
+        $ticked = @($rows | Where-Object { $_.Ticked }).Count
+        $summary = Get-TuiSelectionSummary -Mode $mode -Total $rows.Count -Ticked $ticked -ItemNoun $ItemNoun -Action $Action
+
+        Clear-TuiScreen
+        Write-TuiTitle $Title
+        Write-Tui ''
+        Write-Tui ('  Mode: ' + $summary.Text) $(if ($summary.Count -eq 0) { [ConsoleColor]::Red } else { [ConsoleColor]::Green })
+        if ($filtering -or $filter) {
+            Write-Tui ("  Filter: '{0}'{1} - {2} of {3} shown" -f $filter,
+                       $(if ($filtering) { ' (typing; Enter or Esc to stop)' } else { '' }),
+                       $visible.Count, $rows.Count) $(if ($filtering) { [ConsoleColor]::Yellow } else { [ConsoleColor]::DarkGray })
+        }
+        Write-Tui ''
+        if ($visible.Count -eq 0) { Write-Tui '    nothing matches that filter' DarkGray }
+
+        $first = [math]::Max(0, [math]::Min($index - [int]($Window / 2), $visible.Count - $Window))
+        if ($first -lt 0) { $first = 0 }
+        for ($i = $first; $i -lt [math]::Min($first + $Window, $visible.Count); $i++) {
+            $row = $visible[$i]
+            $marker = if ($i -eq $index) { '>' } else { ' ' }
+            $box = if ($mode -eq 'All') { '   ' } elseif ($row.Ticked) { '[x]' } else { '[ ]' }
+            $colour = if ($i -eq $index) { [ConsoleColor]::White }
+                      elseif ($row.Dim -or ($mode -eq 'Exclude' -and $row.Ticked)) { [ConsoleColor]::DarkGray }
+                      else { [ConsoleColor]::Gray }
+            Write-Tui ('  {0} {1} {2,-50} {3,14}' -f $marker, $box, $row.Text, $row.Detail) $colour
+        }
+        Write-Tui ''
+        Write-Tui ("  {0} of {1} listed" -f $(if ($visible.Count) { $index + 1 } else { 0 }), $visible.Count) DarkGray
+        if ($message) { Write-Tui "  $message" Yellow }
+        if ($filtering) { Write-TuiKeys 'type to narrow the list   Backspace   Enter or Esc to stop filtering' }
+        else { Write-TuiKeys "Up/Down   Space tick   F2 mode (All/Include/Exclude)   F3 all shown   F4 none   F6 invert shown   F7 filter   Enter continue   Esc back" }
+
+        $key = Read-TuiKey
+        $message = ''
+
+        if ($filtering) {
+            switch ($key.Name) {
+                'Enter'     { $filtering = $false }
+                'Escape'    { $filtering = $false; $filter = ''; $index = 0 }
+                'Backspace' { $filter = Remove-TuiChar $filter; $index = 0 }
+                'UpArrow'   { $index = [math]::Max(0, $index - 1) }
+                'DownArrow' { $index = [math]::Min([math]::Max(0, $visible.Count - 1), $index + 1) }
+                default     { if ($key.Char) { $filter = Add-TuiChar $filter $key.Char; $index = 0 } }
+            }
+            continue
+        }
+
+        $handled = $true
+        switch ($key.Name) {
+            'UpArrow'   { $index = [math]::Max(0, $index - 1) }
+            'DownArrow' { $index = [math]::Min([math]::Max(0, $visible.Count - 1), $index + 1) }
+            'PageUp'    { $index = [math]::Max(0, $index - $Window) }
+            'PageDown'  { $index = [math]::Min([math]::Max(0, $visible.Count - 1), $index + $Window) }
+            'Home'      { $index = 0 }
+            'End'       { $index = [math]::Max(0, $visible.Count - 1) }
+            'Escape'    { return $null }
+            'Spacebar'  {
+                if ($mode -eq 'All') { $message = "Ticking does nothing in ALL mode. Press F2 to include or exclude." }
+                elseif ($visible.Count) { $visible[$index].Ticked = -not $visible[$index].Ticked }
+            }
+            'F2'        { $mode = switch ($mode) { 'All' { 'Include' } 'Include' { 'Exclude' } default { 'All' } } }
+            'F3'        {
+                if ($mode -eq 'All') { $message = 'Ticking does nothing in ALL mode. Press F2 to include or exclude.' }
+                else { foreach ($row in $visible) { $row.Ticked = $true } }
+            }
+            'F4'        { foreach ($row in $rows) { $row.Ticked = $false } }
+            'F6'        {
+                if ($mode -eq 'All') { $message = 'Ticking does nothing in ALL mode. Press F2 to include or exclude.' }
+                else { foreach ($row in $visible) { $row.Ticked = -not $row.Ticked } }
+            }
+            'F7'        { $filtering = $true }
+            'Enter'     { $handled = $false }
+            default     { $handled = $false }
+        }
+        if ($handled) { continue }
+
+        if ($key.Name -eq 'Enter') {
+            if ($mode -eq 'All') {
+                return [pscustomobject]@{ Mode = 'All'; Items = @($rows | ForEach-Object { $_.Item }); Labels = @($rows | ForEach-Object { $_.Text }) }
+            }
+            $chosen = @($rows | Where-Object { $_.Ticked })
+            if ($chosen.Count -eq 0) {
+                $message = "Nothing is ticked. Tick some with Space, or press F2 for ALL."
+                continue
+            }
+            if ($mode -eq 'Exclude' -and $chosen.Count -eq $rows.Count) {
+                $message = "Every $ItemNoun is ticked to be excluded, which would leave nothing."
+                continue
+            }
+            return [pscustomobject]@{
+                Mode = $mode
+                Items = @($chosen | ForEach-Object { $_.Item })
+                Labels = @($chosen | ForEach-Object { $_.Text })
+            }
+        }
+
+        # nothing on this screen is typed into, so the old letters still work as shortcuts
+        if ($key.Char) {
+            switch (([string]$key.Char).ToUpperInvariant()) {
+                '/' { $filtering = $true }
+                'M' { $mode = switch ($mode) { 'All' { 'Include' } 'Include' { 'Exclude' } default { 'All' } } }
+                'A' { if ($mode -ne 'All') { foreach ($row in $visible) { $row.Ticked = $true } } }
+                'N' { foreach ($row in $rows) { $row.Ticked = $false } }
+                'V' { if ($mode -ne 'All') { foreach ($row in $visible) { $row.Ticked = -not $row.Ticked } } }
+                default { $message = "Nothing is bound to '$($key.Char)'. F7 or / filters by name." }
+            }
+        }
+    }
+}
+
+#==============================================================================
 # Which driver, and what it can do
 #==============================================================================
 function Get-SqlClientNamespace {
@@ -698,9 +1006,9 @@ WHERE database_id = 1 OR database_id > 4
 ORDER BY name
 "@
     }
-    Write-Output -NoEnumerate @((Invoke-SqlQueryTable -Connection $Connection -Query $query).Rows | ForEach-Object {
+    (Invoke-SqlQueryTable -Connection $Connection -Query $query).Rows | ForEach-Object {
         [pscustomobject]@{ Name = [string]$_['Name']; State = [string]$_['State'] }
-    })
+    }
 }
 function Get-SqlConnectExplanation {
     [CmdletBinding()]
@@ -915,6 +1223,37 @@ function Test-SqlConnectModule {
     Check 'Windows authentication needs nothing else' ((Test-SqlConnectSettings -Settings (Settings @{ Server = 'x' })).Count -eq 0)
     Check 'and Entra integrated needs nothing else' ((Test-SqlConnectSettings -Settings (Settings @{ Server = 'x'; AuthId = 'EntraIntegrated' })).Count -eq 0)
 
+    Write-Host '  the three ways to pick things off a list' -ForegroundColor Gray
+    Check 'all means all' ((Get-TuiSelectionSummary -Mode All -Total 10 -Ticked 0).Count -eq 10)
+    Check 'and says so, in the caller words' ((Get-TuiSelectionSummary -Mode All -Total 10 -Ticked 3 -ItemNoun 'table' -Action 'exported').Text -match 'all 10 tables will be exported')
+    Check 'include takes what is ticked' ((Get-TuiSelectionSummary -Mode Include -Total 10 -Ticked 3).Count -eq 3)
+    Check 'exclude takes the rest' ((Get-TuiSelectionSummary -Mode Exclude -Total 10 -Ticked 3).Count -eq 7)
+    Check 'excluding everything leaves nothing' ((Get-TuiSelectionSummary -Mode Exclude -Total 10 -Ticked 10).Count -eq 0)
+    Check 'including nothing leaves nothing' ((Get-TuiSelectionSummary -Mode Include -Total 10 -Ticked 0).Count -eq 0)
+    Check 'one of a kind is not pluralised' ((Get-TuiSelectionSummary -Mode All -Total 1 -ItemNoun 'database').Text -match 'all 1 database will be')
+
+    $sample = @(
+        [pscustomobject]@{ Schema = 'dbo'; Table = 'Orders'; Rows = 100 }
+        [pscustomobject]@{ Schema = 'dbo'; Table = 'CustomerAudit'; Rows = 5 }
+        [pscustomobject]@{ Schema = 'staging'; Table = 'Load'; Rows = 2 }
+    )
+    $rows = @(New-TuiRows -Items $sample -Label { "$($_.Schema).$($_.Table)" } -Detail { '{0} rows' -f $_.Rows })
+    Check 'a row is labelled by the caller block' ($rows[0].Text -eq 'dbo.Orders')
+    Check 'and detailed by it too' ($rows[0].Detail -eq '100 rows')
+    Check 'the caller object comes back as it was given' ($rows[0].Item.Table -eq 'Orders')
+    Check 'and the picker does not write a Ticked property onto it' ($null -eq $sample[0].PSObject.Properties['Ticked'])
+    Check 'nothing is ticked to start with' (@($rows | Where-Object { $_.Ticked }).Count -eq 0)
+    Check 'no filter shows everything' (@(Select-TuiRows -Rows $rows -Filter '').Count -eq 3)
+    Check 'a filter narrows it' (@(Select-TuiRows -Rows $rows -Filter 'audit').Count -eq 1)
+    Check 'and matches the whole label, schema included' (@(Select-TuiRows -Rows $rows -Filter 'staging').Count -eq 1)
+    Check 'and nothing is nothing' (@(Select-TuiRows -Rows $rows -Filter 'zzz').Count -eq 0)
+    Check 'wrapped in @() a single row counts as one, which is the convention here' (
+        @(Select-TuiRows -Rows $rows -Filter 'CustomerAudit').Count -eq 1)
+    Check 'two rows in, two rows out' (@(New-TuiRows -Items $sample).Count -eq 3)
+    Check 'one row in, one row out rather than one row holding three' (@(New-TuiRows -Items @($sample[0])).Count -eq 1)
+    Check 'an empty list makes no rows' (@(New-TuiRows -Items @()).Count -eq 0)
+    Check 'and a list with no label block falls back to the object itself' ((@(New-TuiRows -Items @('SQL01')))[0].Text -eq 'SQL01')
+
     Write-Host '  explaining a failure to connect' -ForegroundColor Gray
     $s = New-SqlConnectSettings
     Check 'a refused login is not blamed on the network' ((Get-SqlConnectExplanation -Message "Login failed for user 'sa'." -Settings $s) -match 'refused')
@@ -940,6 +1279,7 @@ Export-ModuleMember -Function @(
     'Open-SqlConnection', 'Invoke-SqlQueryTable', 'Get-SqlServerInfo', 'Get-SqlDatabaseList',
     'Get-SqlConnectExplanation',
     'Read-TuiKey', 'ConvertTo-TuiKeys', 'New-TuiKey', 'Set-TuiKeyScript',
+    'Show-TuiList', 'Show-TuiCheckList', 'Get-TuiSelectionSummary', 'Select-TuiRows', 'New-TuiRows',
     'Write-Tui', 'Write-TuiTitle', 'Write-TuiKeys', 'Write-TuiField',
     'Clear-TuiScreen', 'Get-TuiScreenWidth', 'Add-TuiChar', 'Remove-TuiChar',
     'Test-SqlConnectModule'

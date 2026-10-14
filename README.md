@@ -414,12 +414,13 @@ A connect-and-pick front end for the above, for when you do not want to remember
 * **The connect screen is the SSMS one**, with every authentication method SQL Server offers: Windows, SQL, and Entra MFA, password, integrated, service principal, managed identity, device code and default - plus pasting an access token. `F2` opens the options (encryption, certificate trust, host name in certificate, timeout, application name, read-only intent, multi-subnet failover).
 * **The commands are function keys**, so every printable character belongs to the box the caret is in: `F2` options, `F3` driver, `F4` show the password, `F5` connect, `F6` copy the string, `Esc` to leave. On the table screen `F2` changes mode, `F3` ticks everything shown, `F4` clears, `F6` inverts, `F7` filters.
 * **The connection string is shown as you type it**, and it is the same string the export is handed, built by the driver's own builder so there is nothing between what you read and what runs. The password is masked until you press `F4`; `F6` copies the whole thing.
-* **That first screen is not written here.** It lives in `Molehill.SqlConnect.psm1` beside it, which is also what `Get-SqlConnectionString.ps1` below uses.
+* **None of the screens are written here.** They all live in `Molehill.SqlConnect.psm1` beside it: the connect dialog, which `Get-SqlConnectionString.ps1` below also uses, and the two pickers. What is left in this script is the table discovery query, the export form, and the order it all happens in - about 380 lines of the 1,400 it started as.
 * **What each driver can do is asked of the driver, not assumed.** Every authentication keyword is tried against the connection string builder when the screen opens, and anything that will not take it is greyed with the reason - no table of assumptions to go stale.
 * **`Microsoft.Data.SqlClient` is used when it is there**, which is what the `SqlServer` module brings, because it is the only driver with every Entra method and with `Encrypt = Strict` (TDS 8). It takes about two seconds to load and says so while it does. `System.Data.SqlClient` is the fallback and needs nothing installed, so a server that cannot reach the gallery still gets Windows and SQL authentication; `-UseSystemDataSqlClient` insists on it, and `D` switches either way on the screen. No Az modules are used or needed.
 * **Old servers still work**, but only on the fallback driver: `System.Data.SqlClient` is the only one that will talk to SQL Server 2000 or 2005. The export itself needs the catalogue views from 2005, and the screen says so plainly if you connect to a 2000 box.
 * One caveat worth knowing: under Windows PowerShell the fallback driver *accepts* the Entra keywords, so the screen offers them, but completing an interactive sign-in through it also needs ADAL on the machine - which the screen cannot check for you. Where Entra matters, install the `SqlServer` module.
 * **The table screen lists what would be exported**, with row counts, and three ways to choose: `ALL`, `INCLUDE` only the ones you tick, or `EXCLUDE` everything except the ones you tick. `F2` cycles the mode, `Space` ticks, `F3`/`F4`/`F6` tick all shown, none or invert, `F7` filters by name (the letters `M`, `A`, `N`, `V` and `/` still work there, since nothing on that screen is typed into). The line at the top always says how many will actually be exported, so excluding everything is visible before you press Enter rather than after.
+* **The database list is the same picker**, so it filters too - handy on an instance with a hundred databases.
 * `-SelfTest` checks the screen logic - the string built for every method, the masking, the keystroke handling, the picker's sums - with no server. `-KeyScript` drives the screens from a list of keystrokes (`'Down'`, `'Space'`, `'text:Sales'`, `'F5'`), which is how those screens get tested at all, and is handy for a scripted demo.
 
 ## A connection string, from a screen (`Tools\Get-SqlConnectionString.ps1`)
@@ -450,7 +451,19 @@ $connected = Show-SqlConnectDialog -Settings $settings
 $connection = Open-SqlConnection -Settings $connected.Settings -ConnectionString $connected.ConnectionString
 ```
 
-* **The screen**: `Show-SqlConnectDialog` (form plus the connection test), `Show-SqlConnectForm`, `Show-SqlConnectOptions`.
+* **The screens**: `Show-SqlConnectDialog` (form plus the connection test), `Show-SqlConnectForm`, `Show-SqlConnectOptions`.
+* **Picking things off a list**, which is not a SQL idea at all: `Show-TuiList` for one of something and `Show-TuiCheckList` for the all / only these / all but these choice. Neither knows what it is showing - the caller says how to label a row, what to put on the right, and when to grey one out:
+
+  ```powershell
+  $db = Show-TuiList -Items $databases -Title 'Which database' -AllowFilter `
+            -Label { $_.Name } -Detail { $_.State } -Dim { $_.State -ne 'ONLINE' }
+
+  $choice = Show-TuiCheckList -Items $tables -Title 'Tables' -ItemNoun 'table' -Action 'exported' `
+                -Label { "$($_.Schema).$($_.Table)" } -Detail { '{0:N0} rows' -f $_.Rows }
+  # -> @{ Mode = 'Include'; Items = @(...); Labels = @('dbo.Orders', ...) }
+  ```
+
+  The ticks are held inside the picker rather than written onto your objects, so any list works without being shaped for it, and what comes back are the objects you handed in. `Get-TuiSelectionSummary` is the line at the top - the one that says how many will actually be used - and it is tested on its own.
 * **The string**: `New-SqlConnectSettings`, `New-SqlConnectionString`, `Test-SqlConnectSettings`, `Hide-SqlSecret` (for printing one without its password).
 * **Authentication and drivers**: `Get-SqlAuthMethods`, `Get-SqlAuthAvailability` (asked of the driver, not assumed), `Get-SqlClientNamespace`, `Select-SqlClientNamespace`.
 * **Talking to SQL Server**: `Open-SqlConnection`, `Invoke-SqlQueryTable`, `Get-SqlServerInfo`, `Get-SqlDatabaseList`, `Get-SqlConnectExplanation` (what a failure to connect actually means).
