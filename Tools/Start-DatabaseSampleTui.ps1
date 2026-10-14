@@ -45,8 +45,14 @@
     machine - something the screen cannot check for you. Under PowerShell 7 it has no Entra
     support at all and says so. Where Entra matters, the SqlServer module is the answer.
 
-    Press D on the connect screen to switch driver; the list of methods and options changes with
+    Press F3 on the connect screen to switch driver; the list of methods and options changes with
     it. No Az modules are used or needed.
+
+    THE KEYS
+    The commands are function keys throughout, so that every printable character belongs to the box
+    the caret is in: F2 options, F3 driver, F4 show the password, F5 connect, F6 copy the string,
+    Esc to leave. On the table screen F2 changes mode, F3 ticks everything shown, F4 clears, F6
+    inverts and F7 filters, with Space, Enter and Esc as you would expect.
 
 .PARAMETER SqlInstance
     Fills the server box in, so you do not have to type it.
@@ -72,8 +78,8 @@
 
 .PARAMETER KeyScript
     Drive the screens from a list of keystrokes instead of the keyboard, for testing and for
-    recording a walkthrough. 'Down', 'Enter', 'Esc', 'Space', 'F5', 'text:SQLPROD01' and single
-    characters are all understood.
+    recording a walkthrough. 'Down', 'Enter', 'Esc', 'Space', 'F2' to 'F9', 'text:SQLPROD01' and
+    single characters are all understood.
 
 .PARAMETER SelfTest
     Check the screen logic - the connection string built for every authentication method, how
@@ -137,7 +143,8 @@ function ConvertTo-TuiKeys {
         'enter' = 'Enter'; 'return' = 'Enter'; 'esc' = 'Escape'; 'escape' = 'Escape'
         'tab' = 'Tab'; 'backspace' = 'Backspace'; 'delete' = 'Delete'; 'del' = 'Delete'
         'home' = 'Home'; 'end' = 'End'; 'pageup' = 'PageUp'; 'pagedown' = 'PageDown'
-        'f1' = 'F1'; 'f2' = 'F2'; 'f5' = 'F5'; 'f10' = 'F10'
+        'f1' = 'F1'; 'f2' = 'F2'; 'f3' = 'F3'; 'f4' = 'F4'; 'f5' = 'F5'; 'f6' = 'F6'
+        'f7' = 'F7'; 'f8' = 'F8'; 'f9' = 'F9'; 'f12' = 'F12'
     }
     $keys = New-Object System.Collections.Generic.List[object]
     foreach ($item in @($Script)) {
@@ -521,7 +528,7 @@ function Show-ConnectScreen {
         }
 
         if ($message) { Write-Tui ''; Write-Tui "  $message" Yellow }
-        Write-TuiKeys 'Up/Down field   Left/Right change   type to edit   O options   D driver   S show secrets   C copy string   F5 connect   Esc quit'
+        Write-TuiKeys 'Up/Down field   Left/Right change   type to edit   F2 options   F3 driver   F4 show secrets   F6 copy string   F5 connect   Esc quit'
 
         $key = Read-TuiKey
         $message = ''
@@ -532,6 +539,24 @@ function Show-ConnectScreen {
             'Tab'        { $focus = ($focus + 1) % $fields.Count }
             'Escape'     { return $null }
             'F5'         { $handled = $false }
+            'F2'         { Show-OptionsScreen -Settings $Settings }
+            'F3'         {
+                $wanted = if ($Settings.Namespace -eq 'System.Data.SqlClient') { 'Microsoft.Data.SqlClient' } else { 'System.Data.SqlClient' }
+                $got = Get-SqlClientNamespace -Microsoft:($wanted -eq 'Microsoft.Data.SqlClient')
+                if (-not $got) {
+                    $message = 'Microsoft.Data.SqlClient is not here. Run: Install-Module SqlServer -Scope CurrentUser (in this edition of PowerShell), then start this again.'
+                }
+                else {
+                    $Settings.Namespace = $got
+                    $Settings.Encrypt = $script:EncryptChoices[$got][0]
+                    $availability = Get-AuthAvailability -Namespace $got
+                }
+            }
+            'F4'         { $showSecret = -not $showSecret }
+            'F6'         {
+                try { Set-Clipboard -Value $connectionString; $message = 'Connection string copied, password and all.' }
+                catch { $message = 'Could not reach the clipboard here.' }
+            }
             'Backspace'  {
                 switch ($fields[$focus]) {
                     'Server'   { $Settings.Server = Remove-TuiChar $Settings.Server }
@@ -566,36 +591,11 @@ function Show-ConnectScreen {
             return $connectionString
         }
 
-        # the letters that are commands rather than typing. They only mean anything while the
-        # caret is not in a box you can type into, so a server called SALES01 is still typeable.
+        # Everything printable belongs to the box the caret is in. The commands are function keys
+        # precisely so that they cannot be mistaken for typing: a letter used as a command only
+        # works while the caret happens to be somewhere you cannot type, which on a form is most
+        # of the time wrong.
         $char = if ($key.Char) { [string]$key.Char } else { '' }
-        $typeable = @('Server', 'User', 'Password', 'Database')
-        if ($char -and $typeable -notcontains $fields[$focus]) {
-            $command = $true
-            switch ($char.ToUpperInvariant()) {
-                'O' { Show-OptionsScreen -Settings $Settings }
-                'D' {
-                    $wanted = if ($Settings.Namespace -eq 'System.Data.SqlClient') { 'Microsoft.Data.SqlClient' } else { 'System.Data.SqlClient' }
-                    $got = Get-SqlClientNamespace -Microsoft:($wanted -eq 'Microsoft.Data.SqlClient')
-                    if (-not $got) {
-                        $message = 'Microsoft.Data.SqlClient is not here. Run: Install-Module SqlServer -Scope CurrentUser (in this edition of PowerShell), then start this again.'
-                    }
-                    else {
-                        $Settings.Namespace = $got
-                        $Settings.Encrypt = $script:EncryptChoices[$got][0]
-                        $availability = Get-AuthAvailability -Namespace $got
-                    }
-                }
-                'S' { $showSecret = -not $showSecret }
-                'C' {
-                    try { Set-Clipboard -Value $connectionString; $message = 'Connection string copied, password and all.' }
-                    catch { $message = 'Could not reach the clipboard here.' }
-                }
-                default { $command = $false }
-            }
-            if ($command) { continue }
-        }
-
         if ($char) {
             switch ($fields[$focus]) {
                 'Server'   { $Settings.Server = Add-TuiChar $Settings.Server $key.Char }
@@ -641,10 +641,10 @@ function Show-OptionsScreen {
         Write-TuiField -Label 'Read-only intent' -Value $Settings.ReadOnlyIntent -Focused ($fields[$focus] -eq 'ReadOnlyIntent') `
                        -Note 'routes to a readable secondary in an availability group'
         Write-TuiField -Label 'Multi-subnet failover' -Value $Settings.MultiSubnet -Focused ($fields[$focus] -eq 'MultiSubnet')
-        Write-TuiKeys 'Up/Down field   Left/Right or Space change   type to edit text   Esc back'
+        Write-TuiKeys 'Up/Down field   Left/Right or Space change   type to edit text   F5 or Esc back'
 
         $key = Read-TuiKey
-        if ($key.Name -eq 'Escape' -or $key.Name -eq 'Enter') { return }
+        if ($key.Name -in 'Escape', 'Enter', 'F5') { return }
         $handled = $true
         switch ($key.Name) {
             'UpArrow'   { $focus = [math]::Max(0, $focus - 1) }
@@ -899,7 +899,7 @@ function Show-TablePicker {
         Write-Tui ("  {0} of {1} listed" -f $(if (@($visible).Count) { $index + 1 } else { 0 }), @($visible).Count) DarkGray
         if ($message) { Write-Tui "  $message" Yellow }
         if ($filtering) { Write-TuiKeys 'type to narrow the list   Backspace   Enter or Esc to stop filtering' }
-        else { Write-TuiKeys 'Up/Down   Space tick   M mode (All/Include/Exclude)   A all shown   N none   V invert shown   / filter   Enter continue   Esc back' }
+        else { Write-TuiKeys 'Up/Down   Space tick   F2 mode (All/Include/Exclude)   F3 all shown   F4 none   F6 invert shown   F7 filter   Enter continue   Esc back' }
 
         $key = Read-TuiKey
         $message = ''
@@ -930,6 +930,17 @@ function Show-TablePicker {
                 if ($mode -eq 'All') { $message = 'Ticking does nothing in ALL mode. Press M to include or exclude.' }
                 elseif (@($visible).Count) { $visible[$index].Ticked = -not $visible[$index].Ticked }
             }
+            'F2'        { $mode = switch ($mode) { 'All' { 'Include' } 'Include' { 'Exclude' } default { 'All' } } }
+            'F3'        {
+                if ($mode -eq 'All') { $message = 'Ticking does nothing in ALL mode. Press F2 to include or exclude.' }
+                else { foreach ($row in $visible) { $row.Ticked = $true } }
+            }
+            'F4'        { foreach ($row in $Tables) { $row.Ticked = $false } }
+            'F6'        {
+                if ($mode -eq 'All') { $message = 'Ticking does nothing in ALL mode. Press F2 to include or exclude.' }
+                else { foreach ($row in $visible) { $row.Ticked = -not $row.Ticked } }
+            }
+            'F7'        { $filtering = $true; $message = 'Filtering.' }
             'Enter'     { $handled = $false }
             default     { $handled = $false }
         }
@@ -949,14 +960,15 @@ function Show-TablePicker {
             return [pscustomobject]@{ Mode = $mode; Names = $names }
         }
 
+        # nothing on this screen is typed into, so the old letters still work as shortcuts
         if ($key.Char) {
             switch (([string]$key.Char).ToUpperInvariant()) {
                 '/' { $filtering = $true; $message = 'Filtering.' }
                 'M' { $mode = switch ($mode) { 'All' { 'Include' } 'Include' { 'Exclude' } default { 'All' } } }
-                'A' { foreach ($row in $visible) { $row.Ticked = $true } }
+                'A' { if ($mode -ne 'All') { foreach ($row in $visible) { $row.Ticked = $true } } }
                 'N' { foreach ($row in $Tables) { $row.Ticked = $false } }
-                'V' { foreach ($row in $visible) { $row.Ticked = -not $row.Ticked } }
-                default { $message = "Nothing is bound to '$($key.Char)'. Press / to filter by name." }
+                'V' { if ($mode -ne 'All') { foreach ($row in $visible) { $row.Ticked = -not $row.Ticked } } }
+                default { $message = "Nothing is bound to '$($key.Char)'. F7 or / filters by name." }
             }
         }
     }
@@ -1114,6 +1126,9 @@ if ($SelfTest) {
     $threw = $false
     try { [void](ConvertTo-TuiKeys @('Wingding')) } catch { $threw = $true }
     Check 'a key it does not know is refused, not guessed at' $threw
+    Check 'the function keys the screens use' (
+        (-join (ConvertTo-TuiKeys @('F2', 'F3', 'F4', 'F5', 'F6', 'F7')).Name) -eq 'F2F3F4F5F6F7')
+    Check 'and a letter is still just a letter' ((ConvertTo-TuiKeys @('D'))[0].Name -eq 'Character')
 
     Write-Host '  editing a field' -ForegroundColor Gray
     Check 'a character is added' ((Add-TuiChar 'SQL' 'A') -eq 'SQLA')
