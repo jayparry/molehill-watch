@@ -155,7 +155,9 @@ MolehillWatch\
    ├─ Copy-SqlAccess.ps1                    gives one principal the same access another has, on any instance
    ├─ Get-SqlLicensingAudit.ps1             what needs licensing across an estate, and the total to cover it
    ├─ Export-DatabaseSample.ps1             a random sample of every table, as zipped CSVs
-   ├─ Start-DatabaseSampleTui.ps1           the same thing with a connect screen and a table picker
+   ├─ Start-DatabaseSampleTui.ps1           the same thing with a connect screen and a table picker
+   ├─ Get-SqlConnectionString.ps1           the connect screen on its own, string onto the pipeline
+   ├─ Molehill.SqlConnect.psm1              the connect screen, for any script that needs one
    ├─ Test-SqlConnectionString.ps1          tests a list of connection strings (one-shot, no UI)
    ├─ SqlConnectionTester.ps1               the same app in PowerShell, for sites that forbid .exe files
    └─ SqlConnectionTester\                  C# terminal app: build, save and test connection strings
@@ -409,14 +411,52 @@ A connect-and-pick front end for the above, for when you do not want to remember
     ...
 ```
 
-* **The connect screen is the SSMS one**, with every authentication method SQL Server offers: Windows, SQL, and Entra MFA, password, integrated, service principal, managed identity, device code and default - plus pasting an access token. `O` opens the options (encryption, certificate trust, host name in certificate, timeout, application name, read-only intent, multi-subnet failover).
-* **The connection string is shown as you type it**, and it is the same string the export is handed, built by the driver's own builder so there is nothing between what you read and what runs. The password is masked until you press `S`; `C` copies the whole thing.
+* **The connect screen is the SSMS one**, with every authentication method SQL Server offers: Windows, SQL, and Entra MFA, password, integrated, service principal, managed identity, device code and default - plus pasting an access token. `F2` opens the options (encryption, certificate trust, host name in certificate, timeout, application name, read-only intent, multi-subnet failover).
+* **The commands are function keys**, so every printable character belongs to the box the caret is in: `F2` options, `F3` driver, `F4` show the password, `F5` connect, `F6` copy the string, `Esc` to leave. On the table screen `F2` changes mode, `F3` ticks everything shown, `F4` clears, `F6` inverts, `F7` filters.
+* **The connection string is shown as you type it**, and it is the same string the export is handed, built by the driver's own builder so there is nothing between what you read and what runs. The password is masked until you press `F4`; `F6` copies the whole thing.
+* **That first screen is not written here.** It lives in `Molehill.SqlConnect.psm1` beside it, which is also what `Get-SqlConnectionString.ps1` below uses.
 * **What each driver can do is asked of the driver, not assumed.** Every authentication keyword is tried against the connection string builder when the screen opens, and anything that will not take it is greyed with the reason - no table of assumptions to go stale.
 * **`Microsoft.Data.SqlClient` is used when it is there**, which is what the `SqlServer` module brings, because it is the only driver with every Entra method and with `Encrypt = Strict` (TDS 8). It takes about two seconds to load and says so while it does. `System.Data.SqlClient` is the fallback and needs nothing installed, so a server that cannot reach the gallery still gets Windows and SQL authentication; `-UseSystemDataSqlClient` insists on it, and `D` switches either way on the screen. No Az modules are used or needed.
 * **Old servers still work**, but only on the fallback driver: `System.Data.SqlClient` is the only one that will talk to SQL Server 2000 or 2005. The export itself needs the catalogue views from 2005, and the screen says so plainly if you connect to a 2000 box.
 * One caveat worth knowing: under Windows PowerShell the fallback driver *accepts* the Entra keywords, so the screen offers them, but completing an interactive sign-in through it also needs ADAL on the machine - which the screen cannot check for you. Where Entra matters, install the `SqlServer` module.
-* **The table screen lists what would be exported**, with row counts, and three ways to choose: `ALL`, `INCLUDE` only the ones you tick, or `EXCLUDE` everything except the ones you tick. `M` cycles the mode, `Space` ticks, `A`/`N`/`V` tick all shown, none or invert, `/` filters by name. The line at the top always says how many will actually be exported, so excluding everything is visible before you press Enter rather than after.
+* **The table screen lists what would be exported**, with row counts, and three ways to choose: `ALL`, `INCLUDE` only the ones you tick, or `EXCLUDE` everything except the ones you tick. `F2` cycles the mode, `Space` ticks, `F3`/`F4`/`F6` tick all shown, none or invert, `F7` filters by name (the letters `M`, `A`, `N`, `V` and `/` still work there, since nothing on that screen is typed into). The line at the top always says how many will actually be exported, so excluding everything is visible before you press Enter rather than after.
 * `-SelfTest` checks the screen logic - the string built for every method, the masking, the keystroke handling, the picker's sums - with no server. `-KeyScript` drives the screens from a list of keystrokes (`'Down'`, `'Space'`, `'text:Sales'`, `'F5'`), which is how those screens get tested at all, and is handy for a scripted demo.
+
+## A connection string, from a screen (`Tools\Get-SqlConnectionString.ps1`)
+
+The connect screen on its own. It builds the string, opens the connection to prove it works, and puts the string on the pipeline - and nothing else, because everything it draws goes to the host.
+
+```powershell
+$cs = .\Get-SqlConnectionString.ps1                      # fill the screen in, press F5
+.\Get-SqlConnectionString.ps1 | Set-Clipboard
+.\Export-DatabaseSample.ps1 -ConnectionString (.\Get-SqlConnectionString.ps1) -Database Sales
+Invoke-Sqlcmd -ConnectionString (.\Get-SqlConnectionString.ps1) -Query 'SELECT @@VERSION'
+```
+
+* **One string, tried before you get it.** `F5` opens the connection and only hands the string back once it has connected, so what you have is a string that worked rather than one that looked right. `-SkipTest` builds it without connecting, for when the server is somewhere else.
+* **Esc gives back nothing**, and exits 1, so a script can tell a change of mind from a connection string.
+* `-AsObject` returns the driver, the method, the access token, the database and what the server said about itself as well, for a caller that needs more than the string.
+* Same authentication list, same options screen, same function keys as the sample screen above - it is the same code.
+
+### The module behind both (`Tools\Molehill.SqlConnect.psm1`)
+
+The screen, the authentication matrix, the connection string building and the small amount of console plumbing, in one place, because none of it is about sampling databases. Import it by path and use it in anything:
+
+```powershell
+Import-Module (Join-Path $PSScriptRoot 'Molehill.SqlConnect.psm1')
+
+$settings = New-SqlConnectSettings -Namespace (Select-SqlClientNamespace) -Server 'SQLPROD01'
+$connected = Show-SqlConnectDialog -Settings $settings
+$connection = Open-SqlConnection -Settings $connected.Settings -ConnectionString $connected.ConnectionString
+```
+
+* **The screen**: `Show-SqlConnectDialog` (form plus the connection test), `Show-SqlConnectForm`, `Show-SqlConnectOptions`.
+* **The string**: `New-SqlConnectSettings`, `New-SqlConnectionString`, `Test-SqlConnectSettings`, `Hide-SqlSecret` (for printing one without its password).
+* **Authentication and drivers**: `Get-SqlAuthMethods`, `Get-SqlAuthAvailability` (asked of the driver, not assumed), `Get-SqlClientNamespace`, `Select-SqlClientNamespace`.
+* **Talking to SQL Server**: `Open-SqlConnection`, `Invoke-SqlQueryTable`, `Get-SqlServerInfo`, `Get-SqlDatabaseList`, `Get-SqlConnectExplanation` (what a failure to connect actually means).
+* **Console plumbing**: `Read-TuiKey`, `ConvertTo-TuiKeys`, `Set-TuiKeyScript`, `Write-Tui`, `Write-TuiTitle`, `Write-TuiKeys`, `Write-TuiField`, `Clear-TuiScreen`, `Add-TuiChar`, `Remove-TuiChar` - enough to write another screen in the same style.
+* `Test-SqlConnectModule` runs the module's own checks and returns the counts; both scripts call it from their `-SelfTest` so there is one copy of those tests rather than two.
+* Everything drawn goes to the host with `Write-Host`, never to the output stream, so a script built on it can put its own result on the pipeline cleanly.
 
 ## Connection string tester (`Tools\Test-SqlConnectionString.ps1`)
 
