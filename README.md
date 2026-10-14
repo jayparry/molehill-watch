@@ -154,7 +154,8 @@ MolehillWatch\
    ├─ Test-SqlTlsHandshake.ps1              why an instance will not negotiate encryption (old servers)
    ├─ Copy-SqlAccess.ps1                    gives one principal the same access another has, on any instance
    ├─ Get-SqlLicensingAudit.ps1             what needs licensing across an estate, and the total to cover it
-   ├─ Export-DatabaseSample.ps1             a random sample of every table, as zipped CSVs
+   ├─ Export-DatabaseSample.ps1             a random sample of every table, as zipped CSVs
+   ├─ Start-DatabaseSampleTui.ps1           the same thing with a connect screen and a table picker
    ├─ Test-SqlConnectionString.ps1          tests a list of connection strings (one-shot, no UI)
    ├─ SqlConnectionTester.ps1               the same app in PowerShell, for sites that forbid .exe files
    └─ SqlConnectionTester\                  C# terminal app: build, save and test connection strings
@@ -367,10 +368,54 @@ Takes a random sample of rows from every user table in a database, writes one CS
 * **The awkward columns are handled**: `geography`, `geometry` and `hierarchyid` are converted server side so no client assemblies are needed; `binary` and `rowversion` come out as `0x` hex; dates are ISO 8601 and numbers invariant; files are UTF-8 with a BOM and CRLF so Excel opens them without a fight; values are quoted per RFC 4180 only where they need to be. Empty tables still get a header row.
 * **It keeps going**: a table whose column list fails - graph tables, say - is retried once with `SELECT *`, external and diagram tables are skipped, and a failure is reported per table rather than stopping the run. `-ReadUncommitted` keeps it off the locks on a busy production table.
 * Prints a run summary and **returns a result object** (`Exported`, `Failed`, `TotalRows`, `ZipPath`, `Tables`) rather than setting an exit code, so pipe it or assign it when scripting.
+* **Pick the tables**: `-IncludeTable` exports only what you name, `-ExcludeTable` everything except. Both take `schema.table`, a bare table name, or a wildcard - `'dbo.Orders'`, `'Orders'`, `'dbo.*'`, `'*Audit*'` - with brackets allowed and ignored, and a pattern that matches nothing is reported rather than passed over in silence.
+
+  ```powershell
+  .\Export-DatabaseSample.ps1 -SqlInstance SQLPROD01 -Database Sales -ExcludeTable '*Audit*', 'staging.*'
+  .\Export-DatabaseSample.ps1 -SqlInstance SQLPROD01 -Database Sales -IncludeTable 'dbo.Orders', 'ref.Currency'
+  ```
+* `-ConnectionString` runs with a string you built elsewhere - which is how the screen below hands over exactly what it showed you - and `-UseMicrosoftDataSqlClient` runs it on that driver instead.
 * No modules needed for the SQL Server and SQL authentication paths; ADO.NET only, on PowerShell 5.1 or 7.
 
 **It copies real data out of a database.** Where that data is personal or confidential, a sample is still personal or confidential: mind where the zip goes, and whether you should be using masked or synthetic data instead.
 
+## The same thing with a screen (`Tools\Start-DatabaseSampleTui.ps1`)
+
+A connect-and-pick front end for the above, for when you do not want to remember parameters. Four screens: connect, which database, which tables, and the export itself. Nothing is sampled until the last one.
+
+```powershell
+.\Start-DatabaseSampleTui.ps1
+.\Start-DatabaseSampleTui.ps1 -SqlInstance SQLPROD01 -Database Sales      # boxes filled in for you
+```
+
+```
+====================================================================
+  Connect to Server
+====================================================================
+   Server type:              Database Engine
+>  Server name:              SQLPROD01
+   Authentication:           Windows Authentication   (left/right to change)
+   User name:                CONTOSO\jparr
+   Password:
+   Database:                 Sales
+
+   Driver:                   System.Data.SqlClient
+   Encryption:               Encrypt = Yes, TrustServerCertificate = True
+
+  Connection string
+    Data Source=SQLPROD01;
+    Initial Catalog=Sales;
+    Integrated Security=True;
+    ...
+```
+
+* **The connect screen is the SSMS one**, with every authentication method SQL Server offers: Windows, SQL, and Entra MFA, password, integrated, service principal, managed identity, device code and default - plus pasting an access token. `O` opens the options (encryption, certificate trust, host name in certificate, timeout, application name, read-only intent, multi-subnet failover).
+* **The connection string is shown as you type it**, and it is the same string the export is handed, built by the driver's own builder so there is nothing between what you read and what runs. The password is masked until you press `S`; `C` copies the whole thing.
+* **What each driver can do is asked of the driver, not assumed.** Every authentication keyword is tried against the connection string builder when the screen opens, and anything that will not take it is greyed with the reason. That matters because the answer genuinely differs: `System.Data.SqlClient` does Entra MFA, password and integrated under **Windows PowerShell 5.1** and none of them under PowerShell 7, while `Microsoft.Data.SqlClient` (from the `SqlServer` module) adds service principal, managed identity, device code, default and `Encrypt = Strict`. `D` switches driver. No Az modules are used or needed.
+* **Old servers still work**: `System.Data.SqlClient` is the only driver that will talk to SQL Server 2000 or 2005, so it stays the default. The export itself needs the catalogue views from 2005, and the screen says so plainly if you connect to a 2000 box.
+* **The table screen lists what would be exported**, with row counts, and three ways to choose: `ALL`, `INCLUDE` only the ones you tick, or `EXCLUDE` everything except the ones you tick. `M` cycles the mode, `Space` ticks, `A`/`N`/`V` tick all shown, none or invert, `/` filters by name. The line at the top always says how many will actually be exported, so excluding everything is visible before you press Enter rather than after.
+* `-SelfTest` checks the screen logic - the string built for every method, the masking, the keystroke handling, the picker's sums - with no server. `-KeyScript` drives the screens from a list of keystrokes (`'Down'`, `'Space'`, `'text:Sales'`, `'F5'`), which is how those screens get tested at all, and is handy for a scripted demo.
+
 ## Connection string tester (`Tools\Test-SqlConnectionString.ps1`)
 
 Takes a list of SQL Server connection strings, reads `dbo.TestConnection` (one column `TestText`, one row) through each, and reports `ConnectionString`, `TestText`, `Status` and `ErrorMessage`. Useful when an application can't connect and you need to prove which strings work, from which machine, as which account.
