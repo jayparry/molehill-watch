@@ -30,14 +30,20 @@
     builder when the screen opens, and anything the driver in use cannot do is shown greyed with
     the reason. There are two drivers and they differ:
 
-      * System.Data.SqlClient ships with .NET and needs nothing installed. Under Windows
-        PowerShell 5.1 it does Windows, SQL, and Entra interactive, password and integrated. It is
-        also the only one that will talk to SQL Server 2000 or 2005. Under PowerShell 7 it loses
-        the Entra methods entirely.
-      * Microsoft.Data.SqlClient comes with the SqlServer module. It adds Entra service principal,
-        managed identity, device code and default, and Encrypt = Strict (TDS 8). Install it with
-        Install-Module SqlServer -Scope CurrentUser, in the edition of PowerShell you run this in,
-        because the two editions look in different module folders.
+      * Microsoft.Data.SqlClient, which comes with the SqlServer module, is used when it is there.
+        It is the one with every Entra method - interactive, password, integrated, service
+        principal, managed identity, device code and default - and the only one with
+        Encrypt = Strict (TDS 8) and a host name in certificate. Install it with
+        Install-Module SqlServer -Scope CurrentUser.
+      * System.Data.SqlClient is the fallback, and needs nothing installed at all. That is what it
+        is for: a locked-down server that cannot reach the gallery still gets Windows and SQL
+        authentication, and it is the only driver that will talk to SQL Server 2000 or 2005.
+        Pass -UseSystemDataSqlClient to insist on it.
+
+    One caveat about the fallback: under Windows PowerShell it accepts the Entra keywords, so the
+    screen offers them, but completing an interactive sign-in through it also needs ADAL on the
+    machine - something the screen cannot check for you. Under PowerShell 7 it has no Entra
+    support at all and says so. Where Entra matters, the SqlServer module is the answer.
 
     Press D on the connect screen to switch driver; the list of methods and options changes with
     it. No Az modules are used or needed.
@@ -55,7 +61,14 @@
     Rows per table. Default 200. Changeable on the export screen.
 
 .PARAMETER UseMicrosoftDataSqlClient
-    Start on the Microsoft.Data.SqlClient driver rather than System.Data.SqlClient.
+    Insist on Microsoft.Data.SqlClient, and say so plainly if it is not there. It is used by
+    default anyway when the SqlServer module is installed, so this is only needed to turn a quiet
+    fallback into a complaint.
+
+.PARAMETER UseSystemDataSqlClient
+    Start on System.Data.SqlClient instead, skipping the SqlServer module altogether. For SQL
+    Server 2000 and 2005, which the other driver will not talk to, and to avoid the module import
+    on a machine where it is slow or not wanted.
 
 .PARAMETER KeyScript
     Drive the screens from a list of keystrokes instead of the keyboard, for testing and for
@@ -86,6 +99,7 @@ param(
     [string] $OutputPath = (Get-Location).ProviderPath,
     [ValidateRange(1, 2147483647)] [int] $Top = 200,
     [switch] $UseMicrosoftDataSqlClient,
+    [switch] $UseSystemDataSqlClient,
     [string[]] $KeyScript,
     [switch] $SelfTest
 )
@@ -1230,12 +1244,28 @@ if ($KeyScript) {
 $settings = New-TuiSettings
 if ($SqlInstance) { $settings.Server = $SqlInstance.Trim() }
 if ($Database) { $settings.Database = $Database.Trim() }
-if ($UseMicrosoftDataSqlClient) {
+# Microsoft.Data.SqlClient when it is available, because it is the one that can actually do every
+# Entra method; System.Data.SqlClient when it is not, because it needs nothing installed and is
+# the only one that will talk to SQL Server 2000 or 2005. Either way D switches on the screen.
+if ($UseSystemDataSqlClient -and $UseMicrosoftDataSqlClient) {
+    Write-Host '  -UseSystemDataSqlClient and -UseMicrosoftDataSqlClient ask for opposite things.' -ForegroundColor Red
+    exit 2
+}
+if (-not $UseSystemDataSqlClient) {
+    $alreadyLoaded = [bool]('Microsoft.Data.SqlClient.SqlConnection' -as [type])
+    if (-not $alreadyLoaded -and (Get-Module -ListAvailable SqlServer -ErrorAction SilentlyContinue)) {
+        Write-Host '  Loading the SqlServer module for Microsoft.Data.SqlClient...' -ForegroundColor DarkGray
+    }
     $wanted = Get-SqlClientNamespace -Microsoft
     if ($wanted) { $settings.Namespace = $wanted; $settings.Encrypt = $script:EncryptChoices[$wanted][0] }
-    else {
+    elseif ($UseMicrosoftDataSqlClient) {
         Write-Host '  Microsoft.Data.SqlClient is not available here, so this starts on System.Data.SqlClient.' -ForegroundColor Yellow
         Write-Host '  Install-Module SqlServer -Scope CurrentUser  - in this edition of PowerShell.' -ForegroundColor Gray
+        Write-Host ''
+    }
+    else {
+        Write-Host '  System.Data.SqlClient: the SqlServer module is not installed, so the Entra methods are not on offer.' -ForegroundColor DarkGray
+        Write-Host '  Install-Module SqlServer -Scope CurrentUser  adds them. Windows and SQL authentication work as they are.' -ForegroundColor DarkGray
         Write-Host ''
     }
 }
