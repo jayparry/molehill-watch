@@ -129,13 +129,13 @@ if ($SelfTest) {
     exit 0
 }
 
-# only what was actually asked for: the function's parameter sets decide what goes together, and
-# passing an empty -SqlInstance alongside -ConnectionString would break that
-$arguments = @{ Top = $Top; OutputPath = $OutputPath; CommandTimeout = $CommandTimeout }
-foreach ($name in 'SqlInstance', 'Database', 'ConnectionString', 'UseMicrosoftDataSqlClient',
-                  'IncludeTable', 'ExcludeTable', 'SqlCredential', 'UseEntraId', 'AccessToken',
-                  'TrustServerCertificate', 'ReadUncommitted', 'RemoveFolderAfterZip', 'Force') {
-    if ($PSBoundParameters.ContainsKey($name)) { $arguments[$name] = $PSBoundParameters[$name] }
+# handed through by asking the function what it takes, rather than by a list here that can
+# drift: two shims were quietly dropping parameters that way, which looks exactly like the tool
+# ignoring you
+$takes = @((Get-Command Export-MhDatabaseSample).Parameters.Keys)
+$arguments = @{}
+foreach ($name in $PSBoundParameters.Keys) {
+    if ($takes -contains $name) { $arguments[$name] = $PSBoundParameters[$name] }
 }
 
 Export-MhDatabaseSample @arguments

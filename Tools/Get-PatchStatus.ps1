@@ -133,13 +133,16 @@ end {
         if ($one -and -not $collected.Contains($one.Trim())) { $collected.Add($one.Trim()) }
     }
 
-    $arguments = @{ Months = $Months }
-    if ($collected.Count) { $arguments['ComputerName'] = $collected.ToArray() }
-    foreach ($name in 'ServerList', 'SqlCredential', 'ReferenceFile', 'SaveReference', 'OutputPath',
-                      'CsvPath', 'Open', 'SqlGraceDays', 'SqlCuBehindCritical', 'WindowsGraceDays',
-                      'ConnectTimeoutSeconds') {
-        if ($PSBoundParameters.ContainsKey($name)) { $arguments[$name] = $PSBoundParameters[$name] }
+    # handed through by asking the function what it takes, rather than by a list here that can
+    # drift: two shims were quietly dropping parameters that way, which looks exactly like the
+    # tool ignoring you
+    $takes = @((Get-Command Get-MhPatchStatus).Parameters.Keys)
+    $arguments = @{}
+    foreach ($name in $PSBoundParameters.Keys) {
+        if ($takes -contains $name) { $arguments[$name] = $PSBoundParameters[$name] }
     }
+    # what came down the pipeline, which $PSBoundParameters does not account for
+    if ($collected.Count) { $arguments['ComputerName'] = $collected.ToArray() }
 
     $results = @(Get-MhPatchStatus @arguments)
     if (@($results | Where-Object { $_.Severity -eq 'Critical' }).Count) { exit 1 }

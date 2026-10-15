@@ -157,13 +157,13 @@ if ($SelfTest) {
     exit 0
 }
 
-$arguments = @{ ConnectTimeoutSeconds = $ConnectTimeoutSeconds; LogLevel = $LogLevel }
-foreach ($name in 'SourceInstance', 'SourcePrincipal', 'DestinationInstance', 'Principal',
-                  'Database', 'DatabaseMap', 'Password', 'CopyPasswordAndSid', 'AllowPrivileged',
-                  'SkipServerLevel', 'Force', 'ScriptPath', 'SqlCredential', 'SourceSqlCredential',
-                  'DestinationSqlCredential', 'TrustServerCertificate', 'LogFile', 'WhatIf',
-                  'Confirm', 'Verbose', 'Debug') {
-    if ($PSBoundParameters.ContainsKey($name)) { $arguments[$name] = $PSBoundParameters[$name] }
+# handed through by asking the function what it takes, rather than by a list here that can
+# drift: two shims were quietly dropping parameters that way, which looks exactly like the tool
+# ignoring you
+$takes = @((Get-Command Copy-MhSqlAccess).Parameters.Keys)
+$arguments = @{}
+foreach ($name in $PSBoundParameters.Keys) {
+    if ($takes -contains $name) { $arguments[$name] = $PSBoundParameters[$name] }
 }
 
 try {

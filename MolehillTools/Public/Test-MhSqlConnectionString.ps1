@@ -92,7 +92,7 @@ function Test-MhSqlConnectionString {
                 $encryptOption = $null
                 $timer = [System.Diagnostics.Stopwatch]::StartNew()
                 $conn = $null
-                $display = if ($MaskPasswords) { Hide-Password $cs } else { $cs }
+                $display = if ($MaskPasswords) { Hide-MhSqlSecret $cs } else { $cs }
 
                 try {
                     $effective = $cs
@@ -211,6 +211,45 @@ function Test-MhSqlConnectionString {
         return ($lines -join [Environment]::NewLine)
     }
 
-    function Hide-Password([string]$Cs) {
-        return ($Cs -replace '(?i)\b(password|pwd)\s*=\s*[^;]*', '$1=***')
+Register-MhSelfTest -Name 'Test-MhSqlConnectionString' -Test {
+    Test-MhSection 'keeping the password out of what it prints'
+
+    $masked = Hide-MhSqlSecret 'Server=SQL01;User ID=sa;Password=hunter2;Encrypt=True'
+    Test-MhCheck 'a password is masked' ($masked -notmatch 'hunter2' -and $masked -match 'Password=\*+') $masked
+    Test-MhCheck 'and the rest of the string is left alone' ($masked -match 'Server=SQL01' -and $masked -match 'Encrypt=True')
+    $masked = Hide-MhSqlSecret 'Server=SQL01;Pwd=hunter2;'
+    Test-MhCheck 'the Pwd spelling counts too' ($masked -notmatch 'hunter2') $masked
+    # the case that matters: a password with a semicolon in it is quoted, and a pattern that stops
+    # at the first semicolon would show the rest of it
+    $masked = Hide-MhSqlSecret 'Server=SQL01;Password="hun;ter2";Encrypt=True'
+    Test-MhCheck 'a quoted password is masked whole' ($masked -notmatch 'ter2' -and $masked -match 'Encrypt=True') $masked
+    $masked = Hide-MhSqlSecret 'Server=SQL01;Integrated Security=SSPI'
+    Test-MhCheck 'a string with no password is not changed' ($masked -eq 'Server=SQL01;Integrated Security=SSPI')
+    Test-MhCheck 'and nothing at all is still nothing' ((Hide-MhSqlSecret '') -eq '')
+
+    Test-MhSection 'reading the strings to test'
+
+    # nothing listening on port 1 of this machine, so each of these fails at once rather than
+    # waiting: what is being checked is which strings it read, not what the server said
+    $file = Join-Path ([System.IO.Path]::GetTempPath()) "mh-strings-$PID.txt"
+    try {
+        Set-Content -LiteralPath $file -Encoding UTF8 -Value @(
+            '# a comment, which is not a connection string',
+            '',
+            'Server=127.0.0.1,1;Connect Timeout=1',
+            '   Server=127.0.0.1,1;Database=Other;Connect Timeout=1   '
+        )
+        $results = @(Test-MhSqlConnectionString -Path $file -MaskPasswords 6>$null)
+        Test-MhCheck 'comments and blank lines are left out' ($results.Count -eq 2) ("$($results.Count) tested")
+        Test-MhCheck 'and the lines are trimmed' ($results[1].ConnectionString -eq 'Server=127.0.0.1,1;Database=Other;Connect Timeout=1') $results[1].ConnectionString
+        Test-MhCheck 'a string that cannot connect says so rather than throwing' (-not $results[0].Connected -and $results[0].Status -ne 'Success')
+        Test-MhCheck 'with the error it got' ([bool]$results[0].ErrorMessage) $results[0].ErrorMessage
+        Test-MhCheck 'and how long it took' ($null -ne $results[0].ElapsedMs)
     }
+    finally { Remove-Item -LiteralPath $file -ErrorAction SilentlyContinue }
+
+    $threw = ''
+    try { $null = Test-MhSqlConnectionString -Path (Join-Path ([System.IO.Path]::GetTempPath()) 'mh-no-such-file.txt') 6>$null }
+    catch { $threw = $_.Exception.Message }
+    Test-MhCheck 'a file that is not there is said so by name' ($threw -match 'not found') $threw
+}

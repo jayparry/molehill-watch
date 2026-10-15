@@ -337,21 +337,13 @@ if ($SelfTest) {
     exit 0
 }
 
-# only what was actually passed, so the function's own defaults stand
+# handed through by asking the function what it takes, rather than by a list here that can
+# drift: two shims were quietly dropping parameters that way, which looks exactly like the
+# tool ignoring you
+$takes = @((Get-Command Restore-MhDatabaseCopy).Parameters.Keys)
 $arguments = @{}
-foreach ($name in @(
-        'SourceInstance', 'DestinationInstance', 'Database', 'DestinationDatabase',
-        'BackupPathMap', 'SourceHistoryFile', 'StorageAccountName', 'ContainerName',
-        'BlobPrefix', 'SasToken', 'LocalBackupPath', 'KeepLocalCopy',
-        'InstallMissingModules', 'KeepRestoring', 'Standby', 'StandbyPath',
-        'Cutover', 'TailLog', 'TailLogPath', 'DisconnectSource',
-        'DisconnectDestination', 'StopAt', 'NoDifferential', 'DataPath',
-        'LogPath', 'KeepFilePaths', 'DatabaseOwner', 'RepairOrphanUsers',
-        'UpdateStatistics', 'RunCheckDb', 'SqlCredential', 'SourceSqlCredential',
-        'DestinationSqlCredential', 'TrustServerCertificate', 'LogFile', 'CsvPath',
-        'TestConnectionOnly', 'Force'
-        'WhatIf', 'Confirm', 'Verbose', 'Debug')) {
-    if ($PSBoundParameters.ContainsKey($name)) { $arguments[$name] = $PSBoundParameters[$name] }
+foreach ($name in $PSBoundParameters.Keys) {
+    if ($takes -contains $name) { $arguments[$name] = $PSBoundParameters[$name] }
 }
 
 try {

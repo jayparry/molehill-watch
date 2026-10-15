@@ -35,15 +35,21 @@ function Get-MhNameClaim([string] $Kind) {
         $ast = Get-MhFileAst $file.FullName
         $names = @()
         if ($Kind -eq 'function') {
-            $names = $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true).Name
+            # top level only: a function defined inside another one lives and dies with its
+            # parent, so it is not sharing the module's scope and cannot clash in it
+            $names = $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false).Name
         }
         else {
-            # only the top level: a $script: assignment inside a function runs when the function
-            # is called, so it cannot clash at load time the way these can
-            foreach ($statement in $ast.EndBlock.Statements) {
-                if ($statement -is [System.Management.Automation.Language.AssignmentStatementAst] -and
-                    $statement.Left.Extent.Text -like '$script:*') {
-                    $names += $statement.Left.Extent.Text.Substring(8)
+            # anywhere in the file, not just the top level: a $script: assignment inside a
+            # function still writes a variable that belongs to the whole module, so two files
+            # assigning the same name are sharing it whether they meant to or not. Two restore
+            # tools each wrote $script:Blobs from inside their own functions, which this missed
+            # while it only looked at the top level.
+            foreach ($assignment in $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)) {
+                $left = $assignment.Left
+                if ($left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                    $left.VariablePath.DriveName -eq 'script') {
+                    $names += $left.VariablePath.UserPath.Substring('script:'.Length)
                 }
             }
         }
@@ -101,6 +107,15 @@ Register-MhSelfTest -Name 'The module itself' -Test {
         'Get-TlsCipherSuite', 'New-SelfSignedCertificate', 'Get-WindowsFeature'
     )
 
+    # every function the module defines, at any depth: a nested one is perfectly callable from
+    # its parent, and Get-Command cannot see it because it only exists while the parent runs
+    $defined = @{}
+    foreach ($file in $files) {
+        foreach ($fn in (Get-MhFileAst $file.FullName).FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
+            $defined[$fn.Name] = $true
+        }
+    }
+
     $unknown = @()
     foreach ($file in $files) {
         $ast = Get-MhFileAst $file.FullName
@@ -109,6 +124,7 @@ Register-MhSelfTest -Name 'The module itself' -Test {
             # a call through a variable or an expression has no name to check
             if (-not $name -or $name -notmatch '^[A-Za-z][\w]*-[\w]+$') { continue }
             if ($expectedElsewhere -contains $name) { continue }
+            if ($defined.ContainsKey($name)) { continue }
             if (Get-Command $name -ErrorAction SilentlyContinue) { continue }
             $unknown += "$($file.Name):$($call.Extent.StartLineNumber) $name"
         }
@@ -164,4 +180,56 @@ Register-MhSelfTest -Name 'The module itself' -Test {
     Test-MhCheck 'every script in Tools parses' (-not $broken.Count) ($broken -join '; ')
     Test-MhCheck 'at least one of them is a shim over this module' ($shims -gt 0) "$shims found"
     Test-MhCheck 'no shim re-imports the module with -Force' (-not $forced.Count) ($forced -join ', ')
+
+    Test-MhSection 'the shims and the functions agree'
+
+    # a shim is only a shim if it takes the same arguments and means the same thing by them
+    $common = @([System.Management.Automation.PSCmdlet]::CommonParameters) +
+              @([System.Management.Automation.PSCmdlet]::OptionalCommonParameters)
+    # the shims have these of their own: the self test runner, and the trailing arguments that
+    # powershell.exe -File hands over as separate strings
+    $shimOnlyIsFine = 'SelfTest', 'Remaining'
+
+    $mismatched = @()
+    $differentDefaults = @()
+    foreach ($tool in $tools) {
+        $text = Get-Content -Raw -LiteralPath $tool.FullName
+        if ($text -notmatch '([A-Z][\w]+-Mh[\w]+) @arguments') { continue }
+        $function = $Matches[1]
+        $command = Get-Command $function -ErrorAction SilentlyContinue
+        if (-not $command) { $mismatched += "$($tool.Name) calls $function, which does not exist"; continue }
+
+        $shimAst = Get-MhFileAst $tool.FullName
+        if (-not $shimAst.ParamBlock) { $mismatched += "$($tool.Name) has no param block"; continue }
+
+        $shimParameters = @{}
+        foreach ($p in $shimAst.ParamBlock.Parameters) {
+            $shimParameters[$p.Name.VariablePath.UserPath] = $(if ($p.DefaultValue) { $p.DefaultValue.Extent.Text } else { '' })
+        }
+        $functionNames = @($command.Parameters.Keys | Where-Object { $common -notcontains $_ })
+
+        foreach ($name in $shimParameters.Keys) {
+            if ($shimOnlyIsFine -contains $name) { continue }
+            if ($functionNames -notcontains $name) { $mismatched += "$($tool.Name) takes -$name and $function does not" }
+        }
+        foreach ($name in $functionNames) {
+            if (-not $shimParameters.ContainsKey($name)) { $mismatched += "$function takes -$name and $($tool.Name) does not" }
+        }
+
+        # defaults, where both sides wrote one down
+        $functionAst = (Get-Command $function).ScriptBlock.Ast
+        if ($functionAst.Body -and $functionAst.Body.ParamBlock) { $functionAst = $functionAst.Body }
+        foreach ($p in $functionAst.ParamBlock.Parameters) {
+            $name = $p.Name.VariablePath.UserPath
+            if (-not $shimParameters.ContainsKey($name)) { continue }
+            $theirs = $(if ($p.DefaultValue) { $p.DefaultValue.Extent.Text } else { '' })
+            $ours = $shimParameters[$name]
+            if ($ours -and $theirs -and $ours -ne $theirs) {
+                $differentDefaults += "$($tool.Name) -$name is $ours, $function is $theirs"
+            }
+        }
+    }
+
+    Test-MhCheck 'every shim takes exactly what its function takes' (-not $mismatched.Count) ($mismatched -join '; ')
+    Test-MhCheck 'and means the same thing by each default' (-not $differentDefaults.Count) ($differentDefaults -join '; ')
 }

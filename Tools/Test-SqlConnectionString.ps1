@@ -50,6 +50,9 @@
 .PARAMETER Detailed
     Print everything found about each connection rather than one line per string.
 
+.PARAMETER SelfTest
+    Check the reasoning - how a connection string is read and reported - with no server at all.
+
 .PARAMETER CsvPath
     Write the results to this file as well.
 
@@ -71,7 +74,8 @@ param(
     [ValidateRange(1, 86400)] [int] $CommandTimeoutSeconds = 30,
     [switch] $MaskPasswords,
     [switch] $Detailed,
-    [string] $CsvPath
+    [string] $CsvPath,
+    [switch] $SelfTest
 )
 
 begin {
@@ -89,17 +93,28 @@ begin {
     # scripted run of the sample screen lost its input halfway through before this was guarded.
     if (-not (Get-Module MolehillTools)) { Import-Module $manifest }
 
+    if ($SelfTest) {
+        $results = Invoke-MhSelfTest -ModuleOnly -Name 'Test-MhSqlConnectionString'
+        if (@($results | Where-Object { $_.Failed -gt 0 }).Count) { exit 1 }
+        exit 0
+    }
+
     $collected = New-Object System.Collections.Generic.List[string]
 }
 process {
     foreach ($one in $ConnectionString) { if ($one) { $collected.Add($one) } }
 }
 end {
-    $arguments = @{ CommandTimeoutSeconds = $CommandTimeoutSeconds }
-    if ($collected.Count) { $arguments['ConnectionString'] = $collected.ToArray() }
-    foreach ($name in 'Path', 'Query', 'ConnectTimeoutSeconds', 'MaskPasswords', 'Detailed', 'CsvPath') {
-        if ($PSBoundParameters.ContainsKey($name)) { $arguments[$name] = $PSBoundParameters[$name] }
+    # handed through by asking the function what it takes, rather than by a list here that can
+    # drift: two shims were quietly dropping parameters that way, which looks exactly like the
+    # tool ignoring you
+    $takes = @((Get-Command Test-MhSqlConnectionString).Parameters.Keys)
+    $arguments = @{}
+    foreach ($name in $PSBoundParameters.Keys) {
+        if ($takes -contains $name) { $arguments[$name] = $PSBoundParameters[$name] }
     }
+    # what came down the pipeline, which $PSBoundParameters does not account for
+    if ($collected.Count) { $arguments['ConnectionString'] = $collected.ToArray() }
 
     $results = @(Test-MhSqlConnectionString @arguments)
     $results

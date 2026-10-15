@@ -140,13 +140,16 @@ process {
     foreach ($instance in $SqlInstance) { if ($instance) { $collected.Add($instance.Trim()) } }
 }
 end {
-    $arguments = @{ ConnectTimeoutSeconds = $ConnectTimeoutSeconds }
-    if ($collected.Count) { $arguments['SqlInstance'] = $collected.ToArray() }
-    foreach ($name in 'ServerList', 'SqlCredential', 'SoftwareAssurance', 'IncludeHostInventory',
-                      'HardwareOverride', 'UserCount', 'CorePackPrice', 'ServerLicencePrice',
-                      'CalPrice', 'OutputPath', 'CsvPath', 'NoHtml', 'Open') {
-        if ($PSBoundParameters.ContainsKey($name)) { $arguments[$name] = $PSBoundParameters[$name] }
+    # handed through by asking the function what it takes, rather than by a list here that can
+    # drift: two shims were quietly dropping parameters that way, which looks exactly like the
+    # tool ignoring you
+    $takes = @((Get-Command Get-MhSqlLicensingAudit).Parameters.Keys)
+    $arguments = @{}
+    foreach ($name in $PSBoundParameters.Keys) {
+        if ($takes -contains $name) { $arguments[$name] = $PSBoundParameters[$name] }
     }
+    # what came down the pipeline, which $PSBoundParameters does not account for
+    if ($collected.Count) { $arguments['SqlInstance'] = $collected.ToArray() }
 
     $audit = Get-MhSqlLicensingAudit @arguments
     if (-not $audit) { exit 2 }

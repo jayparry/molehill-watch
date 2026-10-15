@@ -655,10 +655,18 @@ function New-MhSqlConnectionString {
 
     $builder.ConnectionString
 }
+<#
+  Masks the password in a connection string for anything that is going to be read by someone:
+  a log, a ticket, the screen.
+
+  Both spellings - Password and Pwd - and a quoted value, which is the case that matters: a
+  password containing a semicolon is quoted, and a pattern that stops at the first semicolon
+  shows the rest of it.
+#>
 function Hide-MhSqlSecret {
     [CmdletBinding()]
     param([AllowEmptyString()] [string] $ConnectionString)
-    [regex]::Replace($ConnectionString, '(?i)(password\s*=\s*)("(?:[^"]|"")*"|''(?:[^'']|'''')*''|[^;]*)', '$1********')
+    [regex]::Replace($ConnectionString, '(?i)\b(password|pwd)(\s*=\s*)("(?:[^"]|"")*"|''(?:[^'']|'''')*''|[^;]*)', '$1$2********')
 }
 function Test-MhSqlConnectSettings {
     [CmdletBinding()]

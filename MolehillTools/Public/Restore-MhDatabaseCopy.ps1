@@ -420,8 +420,8 @@ ORDER BY rh.restore_history_id DESC;
     $script:DbCopyDestinationInstance = $script:DbCopyDestinationInstance.Trim()
     $stopAtValue = if ($PSBoundParameters.ContainsKey('StopAt')) { $StopAt } else { $null }
     $dryRun = $WhatIfPreference -eq $true
-    $script:Blobs = $null
-    $script:Staged = New-Object System.Collections.Generic.List[string]
+    $script:DbCopyBlobList = $null
+    $script:DbCopyStagedList = New-Object System.Collections.Generic.List[string]
     $runStart = Get-Date
     $setupDone = $false
     $results = New-Object System.Collections.Generic.List[object]
@@ -526,7 +526,7 @@ ORDER BY rh.restore_history_id DESC;
             }
             finally { $WhatIfPreference = $savedWhatIf }
 
-            $script:Blobs = Connect-DbCopyBlobContainer -AccountName $StorageAccountName -Container $script:DbCopyContainerName `
+            $script:DbCopyBlobList = Connect-DbCopyBlobContainer -AccountName $StorageAccountName -Container $script:DbCopyContainerName `
                                                   -Prefix $BlobPrefix -Sas $SasToken
 
             if (-not (Test-Path -LiteralPath $script:DbCopyLocalBackupPath)) {
@@ -557,7 +557,7 @@ ORDER BY rh.restore_history_id DESC;
         foreach ($dbName in $databases) {
             $dstName = if ($DestinationDatabase) { $DestinationDatabase } else { $dbName }
             Set-MhLogPrefix $(if ($databases.Count -gt 1) { $dbName } else { '' })
-            $script:Staged.Clear()
+            $script:DbCopyStagedList.Clear()
 
             $outcome = [pscustomobject]@{
                 SourceInstance = $script:DbCopySourceInstance; Database = $dbName
@@ -654,7 +654,7 @@ ORDER BY rh.restore_history_id DESC;
 
                 # with storage in the way, only what has finished uploading can be restored
                 if ($From -eq 'AzureBlob') {
-                    $availability = Select-DbCopyAvailableSets -BackupSets $sets -AvailableFiles @($script:Blobs.Index.Keys)
+                    $availability = Select-DbCopyAvailableSets -BackupSets $sets -AvailableFiles @($script:DbCopyBlobList.Index.Keys)
                     foreach ($skip in $availability.Skipped) {
                         Write-MhLog ('Passing over the {0} backup finished {1}: not in storage yet ({2})' -f
                                    $(switch ($skip.Set.Type) { 'D' { 'full' } 'I' { 'differential' } default { 'log' } }),
@@ -1102,9 +1102,9 @@ ORDER BY rh.restore_history_id DESC;
                 #endregion
 
                 #region Tidy up and say how it went
-                if ($From -eq 'AzureBlob' -and -not $KeepLocalCopy -and $script:Staged.Count -gt 0) {
+                if ($From -eq 'AzureBlob' -and -not $KeepLocalCopy -and $script:DbCopyStagedList.Count -gt 0) {
                     Start-MhStep 'Remove the staged copy'
-                    foreach ($file in $script:Staged) {
+                    foreach ($file in $script:DbCopyStagedList) {
                         Write-MhDetail "  removing $file"
                         try { Remove-Item -LiteralPath $file -Force } catch { Write-MhLog ('  could not remove ' + $file + ': ' + $_.Exception.Message) -Level WARN }
                     }
@@ -1150,7 +1150,7 @@ ORDER BY rh.restore_history_id DESC;
                 }
                 Write-MhDeep ('full exception: ' + $exception.ToString())
                 if ($_.ScriptStackTrace) { Write-MhDeep ('at: ' + $_.ScriptStackTrace) }
-                if ($script:Staged.Count -gt 0 -and -not $restored) {
+                if ($script:DbCopyStagedList.Count -gt 0 -and -not $restored) {
                     Write-MhLog ('  the staged file(s) have been left in {0} for investigation' -f $script:DbCopyLocalBackupPath) -Level WARN
                 }
                 if ($databases.Count -gt 1) { Write-MhLog '  carrying on with the remaining database(s)' -Level WARN }
@@ -1433,14 +1433,14 @@ function Resolve-DbCopyBackupFiles {
     foreach ($file in $Files) {
         $leaf = [System.IO.Path]::GetFileName($file)
         if ($Download) {
-            if (-not $script:Blobs.Index.ContainsKey($leaf)) {
+            if (-not $script:DbCopyBlobList.Index.ContainsKey($leaf)) {
                 throw "The container has no blob called '$leaf'. The blob name after any folder must match the file name recorded in msdb."
             }
             $target = Join-Path -Path $script:DbCopyLocalBackupPath -ChildPath $leaf
             if ($PSCmdlet.ShouldProcess($leaf, "Download to $target")) {
-                $bytes += Get-MhBlobToFile -Context $script:Blobs.Context -Container $script:DbCopyContainerName `
-                                         -Blob $script:Blobs.Index[$leaf] -TargetPath $target
-                $script:Staged.Add($target)
+                $bytes += Get-MhBlobToFile -Context $script:DbCopyBlobList.Context -Container $script:DbCopyContainerName `
+                                         -Blob $script:DbCopyBlobList.Index[$leaf] -TargetPath $target
+                $script:DbCopyStagedList.Add($target)
             }
             $resolved.Add($target)
             continue

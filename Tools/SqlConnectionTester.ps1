@@ -103,9 +103,13 @@ if ($SelfTest) {
     exit 0
 }
 
+# handed through by asking the function what it takes, rather than by a list here that can
+# drift: two shims were quietly dropping parameters that way, which looks exactly like the tool
+# ignoring you
+$takes = @((Get-Command Invoke-MhSqlConnectionTester).Parameters.Keys)
 $arguments = @{}
-foreach ($name in 'File', 'Test', 'Csv', 'ConnectionString', 'SqlClientDll', 'Remaining') {
-    if ($PSBoundParameters.ContainsKey($name)) { $arguments[$name] = $PSBoundParameters[$name] }
+foreach ($name in $PSBoundParameters.Keys) {
+    if ($takes -contains $name) { $arguments[$name] = $PSBoundParameters[$name] }
 }
 
 try {

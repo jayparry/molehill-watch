@@ -40,6 +40,7 @@
         'Read-MhTuiKey',
         'Remove-MhTuiChar',
         'Restore-MhDatabaseCopy',
+        'Restore-MhLatestAzureBackup',
         'Select-MhSqlClientNamespace',
         'Set-MhTuiKeyScript',
         'Show-MhSqlConnectDialog',
