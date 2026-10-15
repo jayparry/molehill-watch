@@ -109,10 +109,10 @@ begin {
         Write-Host '  Copy the MolehillTools folder alongside Tools, or import it yourself and call Get-MhPatchStatus.' -ForegroundColor Gray
         exit 2
     }
-    # not -Force: one shim calling another - the sample screen calls the export - would re-import
-# the module underneath it and reset everything it holds, which is how a scripted run of the
-# screen lost the keys it was being driven with halfway through
-if (-not (Get-Module MolehillTools)) { Import-Module $manifest }
+    # not -Force: one shim can call another - the sample screen calls the export - and a forced
+    # re-import would reset the module underneath the caller, discarding everything it holds. A
+    # scripted run of the sample screen lost its input halfway through before this was guarded.
+    if (-not (Get-Module MolehillTools)) { Import-Module $manifest }
 
     if ($SelfTest) {
         $results = Invoke-MhSelfTest -ModuleOnly -Name 'Get-MhPatchStatus'
