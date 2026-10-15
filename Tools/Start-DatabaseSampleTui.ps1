@@ -126,7 +126,10 @@ if (-not (Test-Path -LiteralPath $manifest)) {
     Write-Host "  Looked for: $manifest" -ForegroundColor Gray
     exit 2
 }
-Import-Module $manifest -Force
+# not -Force: one shim calling another - the sample screen calls the export - would re-import
+# the module underneath it and reset everything it holds, which is how a scripted run of the
+# screen lost the keys it was being driven with halfway through
+if (-not (Get-Module MolehillTools)) { Import-Module $manifest }
 
 #==============================================================================
 # The tables this database would export

@@ -2,748 +2,140 @@
 
 <#
 .SYNOPSIS
-    Exports a random sample of rows from every user table in a database to CSV, then zips the output.
+    Exports a random sample of rows from every user table in a database to CSV, then zips the lot.
 
 .DESCRIPTION
     Molehill Data Services | Export-DatabaseSample
 
-    For a screen that builds the connection for you, lists the tables and lets you pick them,
-    run Start-DatabaseSampleTui.ps1 instead. It calls this script to do the work.
+    A single file that can be copied to a server, over the real thing: everything this does lives
+    in MolehillTools (Export-MhDatabaseSample). With the module imported you would call that
+    directly; this exists because copying one script to a box is how this estate works.
 
-    For each user table, runs SELECT TOP (n) ... ORDER BY NEWID() and writes the result to
-    <OutputPath>\<Database>\<schema>.<table>.csv. Every file has a header row, including files
-    for empty tables. When all tables are processed, the <Database> folder is zipped to
-    <OutputPath>\<Database>.zip.
+    For handing a developer realistically shaped data, reproducing a problem somewhere safe, or
+    seeing what is actually in a database you have just been given.
 
-    Supported targets:
-      - SQL Server on-premises or on an IaaS (Infrastructure as a Service) virtual machine
-      - Azure SQL Managed Instance
-      - Azure SQL Database
-    The script connects straight to the target database, so no USE statement is needed
-    (Azure SQL Database does not support one).
+    SELECT TOP (n) ... ORDER BY NEWID() per table, to <OutputPath>\<Database>\<schema>.<table>.csv
+    and then into <Database>.zip. Every file has a header row, including the ones for empty tables.
+    geography, geometry and hierarchyid are converted server side, binary comes out as 0x hex,
+    dates are ISO 8601, and the files are UTF-8 with a BOM so Excel opens them without a fight.
 
-    No modules are required. ADO.NET (System.Data.SqlClient) is used directly, which ships with
-    both Windows PowerShell 5.1 and PowerShell 7. Az.Accounts is only needed for -UseEntraId.
+    For a screen that builds the connection and lets you pick the tables, run
+    Start-DatabaseSampleTui.ps1, which calls this.
 
-    Column handling:
-      - CLR (Common Language Runtime) types such as geography, geometry and hierarchyid are
-        converted server side with .ToString(), so no client assemblies are needed
-      - Binary and rowversion columns are written as 0x hex strings
-      - Dates use ISO 8601 style formatting; numbers use invariant culture
-      - Files are UTF-8 with a BOM (byte order mark) and CRLF line endings, so Excel opens them cleanly
-      - Values are quoted per RFC 4180 only where needed (commas, quotes, line breaks)
+    IT COPIES REAL DATA OUT OF A DATABASE. Where that data is personal or confidential, a sample
+    of it is still personal or confidential: mind where the zip goes.
 
-    External tables and SSMS (SQL Server Management Studio) diagram support tables are skipped.
-    If the explicit column list fails for a table (graph tables, for example), the script retries
-    that table once with SELECT *.
+    Returns a summary object rather than setting an exit code, so pipe it or assign it.
 
 .PARAMETER SqlInstance
-    Server or instance name. Examples: SQLPROD01, SQLPROD01\INST2, myserver.database.windows.net,
-    mymi.public.abc123.database.windows.net,3342
-
-.PARAMETER ConnectionString
-    Use this connection string instead of building one from -SqlInstance and the authentication
-    parameters. Start-DatabaseSampleTui.ps1 passes the string it shows you, so what runs is exactly
-    what you saw. -Database is taken from its Initial Catalog unless you give it separately.
-
-.PARAMETER UseMicrosoftDataSqlClient
-    Connect with Microsoft.Data.SqlClient rather than System.Data.SqlClient. It comes with the
-    SqlServer module, and it is the one that can do Entra service principal, managed identity,
-    device code and default authentication, and Encrypt = Strict. A connection string written for
-    it has to be run with it, so pass this alongside one that came from there.
-
-.PARAMETER IncludeTable
-    Export only these tables. Each entry is schema.table, a bare table name, or a wildcard:
-    'dbo.Orders', 'Orders', 'dbo.*', '*Audit*'. Brackets are allowed and ignored. A pattern that
-    matches nothing is reported rather than passed over.
-
-.PARAMETER ExcludeTable
-    Export everything except these tables, in the same forms as -IncludeTable. Applied after
-    -IncludeTable, so the two can be combined.
+    Server or instance name.
 
 .PARAMETER Database
-    Database to sample. Also used as the output folder and zip file name.
+    The database to sample. Also used as the output folder and zip file name.
+
+.PARAMETER ConnectionString
+    Use this connection string instead of building one. -Database is taken from its Initial
+    Catalog unless given separately.
+
+.PARAMETER UseMicrosoftDataSqlClient
+    Connect with Microsoft.Data.SqlClient rather than System.Data.SqlClient.
+
+.PARAMETER IncludeTable
+    Export only these tables: schema.table, a bare name, or a wildcard.
+
+.PARAMETER ExcludeTable
+    Export everything except these. Applied after -IncludeTable.
 
 .PARAMETER Top
-    Rows to sample per table. Default 200. Alias: -n
+    Rows to sample per table. Default 200.
 
 .PARAMETER OutputPath
-    Existing folder that will receive the <Database> folder and <Database>.zip. Default: current location.
+    An existing folder to receive the folder and the zip. Default: here.
 
 .PARAMETER SqlCredential
-    SQL authentication login. Omit all authentication parameters to use Windows authentication.
+    SQL authentication. Omit every authentication parameter for Windows authentication.
 
 .PARAMETER UseEntraId
-    Use Microsoft Entra ID authentication with a token from Get-AzAccessToken.
-    Run Connect-AzAccount first.
+    Entra ID authentication with a token from Get-AzAccessToken. Needs Az.Accounts.
 
 .PARAMETER AccessToken
-    Supply your own Entra ID access token for https://database.windows.net/
+    Your own Entra ID access token for https://database.windows.net/
 
 .PARAMETER TrustServerCertificate
-    Skip server certificate validation. Usually needed for on-premises servers using a self-signed
-    certificate, because the connection always requests encryption.
+    Skip certificate validation, which an on-premises instance with a self-signed one needs.
 
 .PARAMETER ReadUncommitted
-    Sample under READ UNCOMMITTED to avoid taking shared locks on busy production tables.
+    Sample under READ UNCOMMITTED, so no shared locks are taken.
 
 .PARAMETER CommandTimeout
-    Per-table query timeout in seconds. Default 600. 0 means no timeout.
+    Per-table query timeout in seconds. Default 600.
 
 .PARAMETER RemoveFolderAfterZip
-    Delete the <Database> folder once the zip has been created.
+    Delete the folder once the zip is made.
 
 .PARAMETER Force
-    Replace an existing <Database> folder and <Database>.zip in OutputPath.
+    Replace an existing folder and zip of the same name.
 
 .PARAMETER SelfTest
-    Check the table filtering - the include and exclude patterns, and the forms a table name can
-    be written in - with no server at all.
+    Check the table filtering, with no server at all.
 
 .EXAMPLE
     .\Export-DatabaseSample.ps1 -SqlInstance SQLPROD01 -Database Sales -TrustServerCertificate
 
 .EXAMPLE
-    # everything except the audit tables and anything in the staging schema
-    .\Export-DatabaseSample.ps1 -SqlInstance SQLPROD01 -Database Sales `
-        -ExcludeTable '*Audit*', 'staging.*' -TrustServerCertificate
+    .\Export-DatabaseSample.ps1 -SqlInstance SQLPROD01 -Database Sales -ExcludeTable '*Audit*', 'staging.*'
 
-.EXAMPLE
-    # just three tables, named exactly
-    .\Export-DatabaseSample.ps1 -SqlInstance SQLPROD01 -Database Sales `
-        -IncludeTable 'dbo.Orders', 'dbo.OrderLines', 'ref.Currency'
-
-.EXAMPLE
-    .\Export-DatabaseSample.ps1 -SqlInstance myserver.database.windows.net -Database Sales -SqlCredential (Get-Credential) -Top 500
-
-.EXAMPLE
-    Connect-AzAccount
-    .\Export-DatabaseSample.ps1 -SqlInstance mymi.public.abc123.database.windows.net,3342 -Database Sales -UseEntraId -OutputPath D:\Samples -Force
+.NOTES
+    Molehill Data Services. It reads data and writes files locally; nothing on the server changes.
 #>
 [CmdletBinding(DefaultParameterSetName = 'Windows')]
 param(
-    [Parameter(Mandatory, Position = 0, ParameterSetName = 'Windows')]
-    [Parameter(Mandatory, Position = 0, ParameterSetName = 'SqlAuth')]
-    [Parameter(Mandatory, Position = 0, ParameterSetName = 'Entra')]
-    [Parameter(Mandatory, Position = 0, ParameterSetName = 'Token')]
-    [ValidateNotNullOrEmpty()]
-    [string]$SqlInstance,
-
-    [Parameter(Mandatory, Position = 1, ParameterSetName = 'Windows')]
-    [Parameter(Mandatory, Position = 1, ParameterSetName = 'SqlAuth')]
-    [Parameter(Mandatory, Position = 1, ParameterSetName = 'Entra')]
-    [Parameter(Mandatory, Position = 1, ParameterSetName = 'Token')]
-    [Parameter(ParameterSetName = 'ConnectionString')]
-    [string]$Database,
-
-    [Parameter(Mandatory, ParameterSetName = 'ConnectionString')]
-    [ValidateNotNullOrEmpty()]
+    [Parameter(Position = 0)] [string]$SqlInstance,
+    [Parameter(Position = 1)] [string]$Database,
     [string]$ConnectionString,
-
     [switch]$UseMicrosoftDataSqlClient,
-
     [string[]]$IncludeTable,
     [string[]]$ExcludeTable,
-
-    [Parameter(Mandatory, ParameterSetName = 'SelfTest')]
-    [switch]$SelfTest,
-
-    [Alias('n')]
-    [ValidateRange(1, 2147483647)]
-    [int]$Top = 200,
-
+    [Alias('n')] [ValidateRange(1, 2147483647)] [int]$Top = 200,
     [string]$OutputPath = (Get-Location).ProviderPath,
-
-    [Parameter(Mandatory, ParameterSetName = 'SqlAuth')]
     [System.Management.Automation.PSCredential]$SqlCredential,
-
-    [Parameter(Mandatory, ParameterSetName = 'Entra')]
     [switch]$UseEntraId,
-
-    [Parameter(Mandatory, ParameterSetName = 'Token')]
-    [Parameter(ParameterSetName = 'ConnectionString')]
-    [ValidateNotNullOrEmpty()]
     [string]$AccessToken,
-
     [switch]$TrustServerCertificate,
-
     [switch]$ReadUncommitted,
-
-    [ValidateRange(0, 86400)]
-    [int]$CommandTimeout = 600,
-
+    [ValidateRange(0, 86400)] [int]$CommandTimeout = 600,
     [switch]$RemoveFolderAfterZip,
-
-    [switch]$Force
+    [switch]$Force,
+    [switch]$SelfTest
 )
 
-Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-#region Helpers
-
-$Invariant        = [System.Globalization.CultureInfo]::InvariantCulture
-$CsvSpecialChars  = [char[]]@(',', '"', "`r", "`n")
-$InvalidFileChars = [System.IO.Path]::GetInvalidFileNameChars()
-
-function Write-Status {
-    param(
-        [Parameter(Mandatory)][string]$Message,
-        [ConsoleColor]$Colour = [ConsoleColor]::Gray
-    )
-    Write-Host ('{0:HH:mm:ss}  {1}' -f (Get-Date), $Message) -ForegroundColor $Colour
+$manifest = Join-Path $PSScriptRoot '..\MolehillTools\MolehillTools.psd1'
+if (-not (Test-Path -LiteralPath $manifest)) {
+    Write-Host '  MolehillTools is not where this script expects it.' -ForegroundColor Red
+    Write-Host "  Looked for: $manifest" -ForegroundColor Gray
+    Write-Host '  Copy the MolehillTools folder alongside Tools, or import it yourself and call Export-MhDatabaseSample.' -ForegroundColor Gray
+    exit 2
 }
-
-function Get-SafeFileName {
-    param([Parameter(Mandatory)][string]$Name)
-    foreach ($c in $InvalidFileChars) { $Name = $Name.Replace($c, '_') }
-    return $Name
-}
-
-function Format-CsvField {
-    param([object]$Value)
-
-    if ($null -eq $Value -or $Value -is [System.DBNull]) { return '' }
-
-    if     ($Value -is [byte[]])           { $text = '0x' + [System.BitConverter]::ToString($Value).Replace('-', '') }
-    elseif ($Value -is [datetime])         { $text = $Value.ToString('yyyy-MM-dd HH:mm:ss.fffffff', $Invariant) }
-    elseif ($Value -is [datetimeoffset])   { $text = $Value.ToString('yyyy-MM-dd HH:mm:ss.fffffff zzz', $Invariant) }
-    elseif ($Value -is [timespan])         { $text = $Value.ToString('c', $Invariant) }
-    elseif ($Value -is [bool])             { $text = if ($Value) { '1' } else { '0' } }
-    elseif ($Value -is [double] -or $Value -is [single]) { $text = $Value.ToString('R', $Invariant) }
-    elseif ($Value -is [System.IFormattable]) { $text = $Value.ToString($null, $Invariant) }
-    else                                   { $text = [string]$Value }
-
-    if ($text.IndexOfAny($CsvSpecialChars) -ge 0) {
-        return '"' + $text.Replace('"', '""') + '"'
-    }
-    return $text
-}
-
-<#
-  Whether one table is named by one of the given patterns.
-
-  A table can be asked for in any of the ways someone would reasonably write it: schema.table,
-  the bare table name, with brackets, or with wildcards. Matching is case-insensitive, which is
-  what anyone typing a table name expects, whatever the database collation says.
-#>
-function Test-TableMatch {
-    param(
-        [Parameter(Mandatory)][AllowEmptyString()][string]$Schema,
-        [Parameter(Mandatory)][AllowEmptyString()][string]$Table,
-        [AllowEmptyCollection()][string[]]$Patterns = @()
-    )
-
-    $qualified = "$Schema.$Table"
-    foreach ($raw in $Patterns) {
-        if ($null -eq $raw) { continue }
-        $pattern = ([string]$raw).Trim().Replace('[', '').Replace(']', '')
-        if (-not $pattern) { continue }
-
-        # an exact name wins before anything is treated as a wildcard, so a table whose name
-        # contains a bracket or a dot can still be asked for by name
-        if ($pattern -eq $qualified -or $pattern -eq $Table) { return $true }
-        if ($qualified -like $pattern) { return $true }
-        if ($pattern -notlike '*.*' -and $Table -like $pattern) { return $true }
-    }
-    return $false
-}
-
-<#
-  The tables to export, after -IncludeTable and -ExcludeTable have had their say.
-
-  Returns the kept tables and, separately, the patterns that matched nothing: a pattern with a
-  typo in it silently exports the wrong set, and that is the mistake nobody notices until the
-  sample is already with whoever asked for it.
-#>
-function Select-SampleTable {
-    param(
-        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Tables,
-        [AllowEmptyCollection()][string[]]$Include = @(),
-        [AllowEmptyCollection()][string[]]$Exclude = @()
-    )
-
-    # @($null).Count is 1, not 0, so an unsupplied list has to be emptied properly or it reads as
-    # a filter of one blank pattern - which quietly keeps nothing at all
-    $wantedPatterns = @($Include | Where-Object { $null -ne $_ -and ([string]$_).Trim() })
-    $unwantedPatterns = @($Exclude | Where-Object { $null -ne $_ -and ([string]$_).Trim() })
-
-    $kept = [System.Collections.Generic.List[object]]::new()
-    foreach ($t in $Tables) {
-        $wanted = $true
-        if ($wantedPatterns.Count -gt 0) { $wanted = Test-TableMatch -Schema $t.Schema -Table $t.Table -Patterns $wantedPatterns }
-        if ($wanted -and $unwantedPatterns.Count -gt 0 -and (Test-TableMatch -Schema $t.Schema -Table $t.Table -Patterns $unwantedPatterns)) {
-            $wanted = $false
-        }
-        if ($wanted) { $kept.Add($t) }
-    }
-
-    $idle = [System.Collections.Generic.List[string]]::new()
-    foreach ($pattern in ($wantedPatterns + $unwantedPatterns)) {
-        if ($null -eq $pattern -or -not ([string]$pattern).Trim()) { continue }
-        $hit = $false
-        foreach ($t in $Tables) {
-            if (Test-TableMatch -Schema $t.Schema -Table $t.Table -Patterns @($pattern)) { $hit = $true; break }
-        }
-        if (-not $hit) { $idle.Add(([string]$pattern).Trim()) }
-    }
-
-    return [pscustomobject]@{ Kept = $kept.ToArray(); Unmatched = $idle.ToArray() }
-}
-
-<#
-  The namespace of the ADO.NET driver to use, loaded if it needs loading.
-
-  System.Data.SqlClient ships with the framework and is the only one that will talk to SQL Server
-  2000 or 2005. Microsoft.Data.SqlClient comes with the SqlServer module and is the only one that
-  does Entra service principal, managed identity, device code or default authentication, or
-  Encrypt = Strict. Loading it by file path does not work - its dependencies do not resolve from
-  the module folder, and the attempt ends in a stack overflow rather than an error - so the module
-  is imported, which is the supported way and the one that works.
-#>
-function Get-SqlClientNamespace {
-    param([switch]$Microsoft)
-
-    if (-not $Microsoft) { return 'System.Data.SqlClient' }
-    if ('Microsoft.Data.SqlClient.SqlConnection' -as [type]) { return 'Microsoft.Data.SqlClient' }
-
-    try { Import-Module SqlServer -DisableNameChecking -ErrorAction Stop }
-    catch {
-        throw ("Microsoft.Data.SqlClient needs the SqlServer module, and it could not be loaded in this PowerShell ({0} {1}): {2}" -f
-               $PSVersionTable.PSEdition, $PSVersionTable.PSVersion, $_.Exception.Message +
-               " Run: Install-Module SqlServer -Scope CurrentUser  - in this edition of PowerShell, because the two editions look in different module folders.")
-    }
-    if (-not ('Microsoft.Data.SqlClient.SqlConnection' -as [type])) {
-        throw 'The SqlServer module loaded but Microsoft.Data.SqlClient did not come with it.'
-    }
-    return 'Microsoft.Data.SqlClient'
-}
-
-function Get-EntraSqlToken {
-    if (-not (Get-Command -Name Get-AzAccessToken -ErrorAction SilentlyContinue)) {
-        throw 'Az.Accounts is required for -UseEntraId. Run: Install-Module Az.Accounts -Scope CurrentUser; Connect-AzAccount'
-    }
-    $tokenInfo = Get-AzAccessToken -ResourceUrl 'https://database.windows.net/'
-    # Az.Accounts 14+ returns a SecureString; older versions return plain text
-    if ($tokenInfo.Token -is [System.Security.SecureString]) {
-        return [System.Net.NetworkCredential]::new('', $tokenInfo.Token).Password
-    }
-    return [string]$tokenInfo.Token
-}
-
-function Invoke-SqlQuery {
-    # DbConnection rather than SqlConnection: both drivers derive from it, so the same code runs
-    # whichever one the connection came from
-    param(
-        [Parameter(Mandatory)][System.Data.Common.DbConnection]$Connection,
-        [Parameter(Mandatory)][string]$Query
-    )
-    $cmd = $Connection.CreateCommand()
-    $cmd.CommandText    = $Query
-    $cmd.CommandTimeout = $CommandTimeout
-    $table  = [System.Data.DataTable]::new()
-    $reader = $null
-    try {
-        $reader = $cmd.ExecuteReader()
-        $table.Load($reader)
-    }
-    finally {
-        if ($null -ne $reader) { $reader.Dispose() }
-        $cmd.Dispose()
-    }
-    return , $table
-}
-
-function Export-TableSample {
-    param(
-        [Parameter(Mandatory)][System.Data.Common.DbConnection]$Connection,
-        [Parameter(Mandatory)][string]$Query,
-        [Parameter(Mandatory)][string]$FilePath
-    )
-
-    if ($Connection.State -ne [System.Data.ConnectionState]::Open) {
-        $Connection.Close()
-        $Connection.Open()
-    }
-
-    $cmd = $Connection.CreateCommand()
-    $cmd.CommandText    = $Query
-    $cmd.CommandTimeout = $CommandTimeout
-    # built through the generic factory so it works on either driver. Not called $top: variable
-    # names are case-insensitive, so that shadows the script's own $Top and the parameter ends up
-    # being handed itself as its value.
-    $topParam = $cmd.CreateParameter()
-    $topParam.ParameterName = '@Top'
-    $topParam.DbType = [System.Data.DbType]::Int32
-    $topParam.Value = $Top
-    $null = $cmd.Parameters.Add($topParam)
-
-    $reader = $null
-    $writer = $null
-    $rows   = 0
-    try {
-        $reader = $cmd.ExecuteReader([System.Data.CommandBehavior]::SequentialAccess)
-
-        $writer = [System.IO.StreamWriter]::new($FilePath, $false, [System.Text.UTF8Encoding]::new($true))
-        $writer.NewLine = "`r`n"
-
-        $fieldCount = $reader.FieldCount
-        $fields     = [string[]]::new($fieldCount)
-
-        # Header row, written even when the table is empty
-        for ($c = 0; $c -lt $fieldCount; $c++) { $fields[$c] = Format-CsvField $reader.GetName($c) }
-        $writer.WriteLine([string]::Join(',', $fields))
-
-        while ($reader.Read()) {
-            for ($c = 0; $c -lt $fieldCount; $c++) { $fields[$c] = Format-CsvField $reader.GetValue($c) }
-            $writer.WriteLine([string]::Join(',', $fields))
-            $rows++
-        }
-    }
-    finally {
-        if ($null -ne $writer) { $writer.Dispose() }
-        if ($null -ne $reader) { $reader.Dispose() }
-        $cmd.Dispose()
-    }
-    return $rows
-}
-
-#endregion Helpers
-
-#region Self test
+# not -Force: one shim calling another - the sample screen calls the export - would re-import
+# the module underneath it and reset everything it holds, which is how a scripted run of the
+# screen lost the keys it was being driven with halfway through
+if (-not (Get-Module MolehillTools)) { Import-Module $manifest }
 
 if ($SelfTest) {
-    $script:failed = 0
-    function Check([string]$Name, [bool]$Ok, [string]$Detail = '') {
-        if ($Ok) { Write-Host "  PASS  $Name" -ForegroundColor Green }
-        else { Write-Host "  FAIL  $Name $Detail" -ForegroundColor Red; $script:failed++ }
-    }
-    function T([string]$Schema, [string]$Table) { [pscustomobject]@{ Schema = $Schema; Table = $Table } }
-    $all = @(
-        (T 'dbo' 'Orders'), (T 'dbo' 'OrderLines'), (T 'dbo' 'CustomerAudit'),
-        (T 'sales' 'Orders'), (T 'sales' 'Targets'), (T 'staging' 'Load'), (T 'ref' 'Currency')
-    )
-    function Names($result) { (@($result.Kept | ForEach-Object { "$($_.Schema).$($_.Table)" }) -join ',') }
-
-    Write-Host 'Export-DatabaseSample self test'
-    Write-Host '  the ways a table can be named' -ForegroundColor Gray
-    Check 'schema and table' (Test-TableMatch -Schema 'dbo' -Table 'Orders' -Patterns @('dbo.Orders'))
-    Check 'the table on its own' (Test-TableMatch -Schema 'dbo' -Table 'Orders' -Patterns @('Orders'))
-    Check 'in brackets' (Test-TableMatch -Schema 'dbo' -Table 'Orders' -Patterns @('[dbo].[Orders]'))
-    Check 'case does not matter' (Test-TableMatch -Schema 'dbo' -Table 'Orders' -Patterns @('DBO.orders'))
-    Check 'a whole schema' (Test-TableMatch -Schema 'staging' -Table 'Load' -Patterns @('staging.*'))
-    Check 'a wildcard on the name' (Test-TableMatch -Schema 'dbo' -Table 'CustomerAudit' -Patterns @('*Audit*'))
-    Check 'and one that does not match' (-not (Test-TableMatch -Schema 'dbo' -Table 'Orders' -Patterns @('dbo.Invoices')))
-    Check 'a bare name does not reach into another schema' (-not (Test-TableMatch -Schema 'sales' -Table 'Targets' -Patterns @('dbo.Targets')))
-    Check 'the same name in two schemas matches both' (
-        (Test-TableMatch -Schema 'dbo' -Table 'Orders' -Patterns @('Orders')) -and
-        (Test-TableMatch -Schema 'sales' -Table 'Orders' -Patterns @('Orders')))
-    Check 'nothing asked for matches nothing' (-not (Test-TableMatch -Schema 'dbo' -Table 'Orders' -Patterns @()))
-    Check 'and an empty pattern is ignored rather than matching everything' (-not (Test-TableMatch -Schema 'dbo' -Table 'Orders' -Patterns @('', '   ')))
-
-    Write-Host '  choosing the set to export' -ForegroundColor Gray
-    Check 'no filter keeps every table' ((Select-SampleTable -Tables $all).Kept.Count -eq 7)
-    Check 'include keeps only what was named' ((Names (Select-SampleTable -Tables $all -Include @('dbo.Orders', 'ref.Currency'))) -eq 'dbo.Orders,ref.Currency')
-    Check 'include keeps the order they came in' ((Names (Select-SampleTable -Tables $all -Include @('ref.Currency', 'dbo.Orders'))) -eq 'dbo.Orders,ref.Currency')
-    Check 'exclude drops what was named' ((Select-SampleTable -Tables $all -Exclude @('staging.*', '*Audit*')).Kept.Count -eq 5)
-    Check 'and keeps everything else' ((Names (Select-SampleTable -Tables $all -Exclude @('staging.*', '*Audit*'))) -eq 'dbo.Orders,dbo.OrderLines,sales.Orders,sales.Targets,ref.Currency')
-    Check 'the two together, exclude last' ((Names (Select-SampleTable -Tables $all -Include @('dbo.*') -Exclude @('*Audit*'))) -eq 'dbo.Orders,dbo.OrderLines')
-    Check 'excluding everything leaves nothing' ((Select-SampleTable -Tables $all -Exclude @('*')).Kept.Count -eq 0)
-    Check 'a pattern that matches nothing is named' (((Select-SampleTable -Tables $all -Include @('dbo.Orders', 'dbo.Nope')).Unmatched -join ',') -eq 'dbo.Nope')
-    Check 'and one that matches is not' ((Select-SampleTable -Tables $all -Include @('dbo.Orders')).Unmatched.Count -eq 0)
-    Check 'an unmatched exclude is reported too' (((Select-SampleTable -Tables $all -Exclude @('nosuch.*')).Unmatched -join ',') -eq 'nosuch.*')
-
-    Check 'an unsupplied list is not a filter of one blank pattern' ((Select-SampleTable -Tables $all -Include $null -Exclude $null).Kept.Count -eq 7)
-    Check 'nor is a list of blanks' ((Select-SampleTable -Tables $all -Include @($null, '', '  ')).Kept.Count -eq 7)
-    Check 'and a blank among real patterns is just ignored' ((Names (Select-SampleTable -Tables $all -Include @('', 'ref.Currency'))) -eq 'ref.Currency')
-
-    Write-Host '  which driver' -ForegroundColor Gray
-    Check 'the framework one by default' ((Get-SqlClientNamespace) -eq 'System.Data.SqlClient')
-    Check 'and it has a connection string builder' ($null -ne ('System.Data.SqlClient.SqlConnectionStringBuilder' -as [type]))
-
-    Write-Host ''
-    if ($script:failed -eq 0) { Write-Host 'All self tests passed.' -ForegroundColor Green; exit 0 }
-    Write-Host "$script:failed self test(s) failed." -ForegroundColor Red
-    exit 1
+    $results = Invoke-MhSelfTest -ModuleOnly -Name 'Export-MhDatabaseSample'
+    if (@($results | Where-Object { $_.Failed -gt 0 }).Count) { exit 1 }
+    exit 0
 }
 
-#endregion Self test
-
-#region Validate output location
-
-if (-not (Test-Path -LiteralPath $OutputPath -PathType Container)) {
-    throw "OutputPath '$OutputPath' does not exist or is not a folder."
-}
-$OutputPath = (Resolve-Path -LiteralPath $OutputPath).ProviderPath
-
-# with a connection string, the server and the database come out of it rather than off the command
-# line, because the folder and the zip are named after the database and both are settled here
-$clientNamespace = Get-SqlClientNamespace -Microsoft:$UseMicrosoftDataSqlClient
-if ($PSCmdlet.ParameterSetName -eq 'ConnectionString') {
-    $parsed = New-Object "$clientNamespace.SqlConnectionStringBuilder" $ConnectionString
-    if (-not $Database) { $Database = [string]$parsed['Initial Catalog'] }
-    if (-not $Database) {
-        throw 'The connection string names no database (Initial Catalog), so pass -Database as well: it is what the folder and the zip are named after.'
-    }
-    $SqlInstance = [string]$parsed['Data Source']
-}
-if (-not $Database) { throw 'No database to sample.' }
-$serverLabel = $SqlInstance.ToUpperInvariant()
-$exportDir   = Join-Path $OutputPath (Get-SafeFileName $Database)
-$zipPath     = "$exportDir.zip"
-
-foreach ($existing in @($exportDir, $zipPath)) {
-    if ((Test-Path -LiteralPath $existing) -and -not $Force) {
-        throw "'$existing' already exists. Use -Force to replace it."
-    }
+# only what was actually asked for: the function's parameter sets decide what goes together, and
+# passing an empty -SqlInstance alongside -ConnectionString would break that
+$arguments = @{ Top = $Top; OutputPath = $OutputPath; CommandTimeout = $CommandTimeout }
+foreach ($name in 'SqlInstance', 'Database', 'ConnectionString', 'UseMicrosoftDataSqlClient',
+                  'IncludeTable', 'ExcludeTable', 'SqlCredential', 'UseEntraId', 'AccessToken',
+                  'TrustServerCertificate', 'ReadUncommitted', 'RemoveFolderAfterZip', 'Force') {
+    if ($PSBoundParameters.ContainsKey($name)) { $arguments[$name] = $PSBoundParameters[$name] }
 }
 
-#endregion Validate output location
-
-#region Connect
-
-if ($PSCmdlet.ParameterSetName -eq 'ConnectionString') {
-    $conn = New-Object "$clientNamespace.SqlConnection" $ConnectionString
-    if ($AccessToken) { $conn.AccessToken = $AccessToken }
-}
-else {
-    $csb = New-Object "$clientNamespace.SqlConnectionStringBuilder"
-    $csb['Data Source']            = $SqlInstance
-    $csb['Initial Catalog']        = $Database
-    $csb['Application Name']       = 'Molehill Export-DatabaseSample'
-    $csb['Encrypt']                = $true
-    $csb['TrustServerCertificate'] = [bool]$TrustServerCertificate
-    $csb['Connect Timeout']        = 30
-    if ($PSCmdlet.ParameterSetName -eq 'Windows') { $csb['Integrated Security'] = $true }
-
-    $conn = New-Object "$clientNamespace.SqlConnection" $csb.ConnectionString
-
-    switch ($PSCmdlet.ParameterSetName) {
-        'SqlAuth' {
-            $pw = $SqlCredential.Password.Copy()
-            $pw.MakeReadOnly()
-            $conn.Credential = New-Object "$clientNamespace.SqlCredential" $SqlCredential.UserName, $pw
-        }
-        'Entra' { $conn.AccessToken = Get-EntraSqlToken }
-        'Token' { $conn.AccessToken = $AccessToken }
-    }
-}
-
-$runTimer = [System.Diagnostics.Stopwatch]::StartNew()
-$results  = [System.Collections.Generic.List[object]]::new()
-$includePatterns = @($IncludeTable | Where-Object { $null -ne $_ -and ([string]$_).Trim() })
-$excludePatterns = @($ExcludeTable | Where-Object { $null -ne $_ -and ([string]$_).Trim() })
-
-try {
-    Write-Status "Connecting to $serverLabel, database [$Database] ($($PSCmdlet.ParameterSetName) authentication, $clientNamespace)" Cyan
-    $conn.Open()
-
-    $info = Invoke-SqlQuery -Connection $conn -Query @"
-SELECT  EngineEdition = CAST(SERVERPROPERTY('EngineEdition') AS int),
-        ProductVersion = CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(128)),
-        CurrentDb = DB_NAME();
-"@
-    $platform = switch ([int]$info.Rows[0].EngineEdition) {
-        5       { 'Azure SQL Database' }
-        8       { 'Azure SQL Managed Instance' }
-        default { 'SQL Server' }
-    }
-    Write-Status "Connected: $platform $($info.Rows[0].ProductVersion), database [$($info.Rows[0].CurrentDb)]" Cyan
-
-    #endregion Connect
-
-    #region Discover tables
-
-    # sys.objects type 'U' excludes external tables (type 'ET') on every version
-    $columnRows = Invoke-SqlQuery -Connection $conn -Query @"
-SELECT  ObjectKey    = CAST(o.object_id AS varchar(20)),
-        SchemaName   = s.name,
-        TableName    = o.name,
-        QuotedSchema = QUOTENAME(s.name),
-        QuotedTable  = QUOTENAME(o.name),
-        QuotedColumn = QUOTENAME(c.name),
-        IsClrType    = CAST(CASE WHEN c.system_type_id = 240 THEN 1 ELSE 0 END AS bit)
-FROM    sys.objects AS o
-JOIN    sys.schemas AS s ON s.schema_id = o.schema_id
-JOIN    sys.columns AS c ON c.object_id = o.object_id
-WHERE   o.type = 'U'
-AND     o.is_ms_shipped = 0
-AND     NOT EXISTS (SELECT 1
-                    FROM   sys.extended_properties AS ep
-                    WHERE  ep.class = 1
-                    AND    ep.major_id = o.object_id
-                    AND    ep.minor_id = 0
-                    AND    ep.name = N'microsoft_database_tools_support')
-ORDER BY s.name, o.name, c.column_id;
-"@
-
-    $tables = [ordered]@{}
-    foreach ($row in $columnRows.Rows) {
-        $key = [string]$row.ObjectKey
-        if (-not $tables.Contains($key)) {
-            $tables[$key] = [pscustomobject]@{
-                Schema       = [string]$row.SchemaName
-                Table        = [string]$row.TableName
-                QuotedSchema = [string]$row.QuotedSchema
-                QuotedTable  = [string]$row.QuotedTable
-                Columns      = [System.Collections.Generic.List[string]]::new()
-            }
-        }
-        $col = [string]$row.QuotedColumn
-        if ([bool]$row.IsClrType) {
-            $tables[$key].Columns.Add("CAST($col.ToString() AS nvarchar(max)) AS $col")
-        }
-        else {
-            $tables[$key].Columns.Add($col)
-        }
-    }
-
-    $found = $tables.Count
-    if ($includePatterns.Count -gt 0 -or $excludePatterns.Count -gt 0) {
-        $choice = Select-SampleTable -Tables @($tables.Values) -Include $includePatterns -Exclude $excludePatterns
-        foreach ($idle in $choice.Unmatched) {
-            Write-Status "  '$idle' matched no table in [$Database]. Check the spelling: nothing was exported for it." Yellow
-        }
-        $keptKeys = @{}
-        foreach ($t in $choice.Kept) { $keptKeys["$($t.Schema).$($t.Table)"] = $true }
-        $filtered = [ordered]@{}
-        foreach ($entry in $tables.GetEnumerator()) {
-            if ($keptKeys.ContainsKey("$($entry.Value.Schema).$($entry.Value.Table)")) { $filtered[$entry.Key] = $entry.Value }
-        }
-        $tables = $filtered
-        Write-Status ("Found {0} user table(s); {1} after the include and exclude lists." -f $found, $tables.Count) Cyan
-    }
-
-    $tableCount = $tables.Count
-    Write-Status "Sampling TOP ($Top) rows per table, $tableCount table(s)." Cyan
-    if ($tableCount -eq 0) { Write-Status 'Nothing to export.' Yellow }
-
-    #endregion Discover tables
-
-    #region Prepare output
-
-    foreach ($existing in @($exportDir, $zipPath)) {
-        if (Test-Path -LiteralPath $existing) { Remove-Item -LiteralPath $existing -Recurse -Force }
-    }
-    $null = New-Item -ItemType Directory -Path $exportDir
-
-    $isolation = if ($ReadUncommitted) { 'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED; ' } else { '' }
-
-    #endregion Prepare output
-
-    #region Export
-
-    $i = 0
-    foreach ($t in $tables.Values) {
-        $i++
-        $displayName = "$($t.Schema).$($t.Table)"
-        $filePath    = Join-Path $exportDir (Get-SafeFileName "$displayName.csv")
-        $from        = "$($t.QuotedSchema).$($t.QuotedTable)"
-
-        Write-Progress -Activity "Sampling [$Database] on $serverLabel" -Status "$i of $tableCount : $displayName" `
-            -PercentComplete ([int](($i - 1) / [math]::Max($tableCount, 1) * 100))
-
-        $attempts = @(
-            "${isolation}SELECT TOP (@Top) $($t.Columns -join ', ') FROM $from ORDER BY NEWID();",
-            "${isolation}SELECT TOP (@Top) * FROM $from ORDER BY NEWID();"
-        )
-
-        $timer  = [System.Diagnostics.Stopwatch]::StartNew()
-        $status = 'Failed'
-        $rows   = 0
-        $err    = $null
-
-        for ($a = 0; $a -lt $attempts.Count; $a++) {
-            try {
-                $rows   = Export-TableSample -Connection $conn -Query $attempts[$a] -FilePath $filePath
-                $status = if ($a -eq 0) { 'OK' } else { 'OK (SELECT *)' }
-                $err    = $null
-                break
-            }
-            catch {
-                $err = $_.Exception.GetBaseException().Message
-                if (Test-Path -LiteralPath $filePath) { Remove-Item -LiteralPath $filePath -Force }
-                if ($a -eq 0) { Write-Status "  $displayName : column list failed, retrying with SELECT *. $err" Yellow }
-            }
-        }
-        $timer.Stop()
-
-        if ($null -eq $err) {
-            Write-Status ("[{0}/{1}] {2} : {3} row(s) in {4:N1}s" -f $i, $tableCount, $displayName, $rows, $timer.Elapsed.TotalSeconds) Green
-        }
-        else {
-            Write-Status ("[{0}/{1}] {2} : FAILED. {3}" -f $i, $tableCount, $displayName, $err) Red
-        }
-
-        $results.Add([pscustomobject]@{
-            Table   = $displayName
-            Rows    = $rows
-            Status  = $status
-            Seconds = [math]::Round($timer.Elapsed.TotalSeconds, 1)
-            Error   = $err
-        })
-    }
-    Write-Progress -Activity "Sampling [$Database] on $serverLabel" -Completed
-
-    #endregion Export
-
-    #region Zip
-
-    Write-Status "Creating $zipPath" Cyan
-    Add-Type -AssemblyName System.IO.Compression
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    [System.IO.Compression.ZipFile]::CreateFromDirectory(
-        $exportDir, $zipPath, [System.IO.Compression.CompressionLevel]::Optimal, $true)
-
-    if ($RemoveFolderAfterZip) {
-        Remove-Item -LiteralPath $exportDir -Recurse -Force
-        Write-Status "Removed working folder $exportDir" Gray
-    }
-
-    #endregion Zip
-}
-finally {
-    $conn.Dispose()
-}
-
-#region Summary
-
-$runTimer.Stop()
-$failed  = @($results | Where-Object { $null -ne $_.Error })
-$okCount = $results.Count - $failed.Count
-$rowSum = 0
-if ($results.Count -gt 0) {
-    $measured = $results | Measure-Object -Property Rows -Sum
-    if ($null -ne $measured -and $null -ne $measured.Sum) { $rowSum = $measured.Sum }
-}
-
-Write-Host ''
-Write-Status '===== Run summary =====' Cyan
-Write-Status "Server      : $serverLabel ($platform)"
-Write-Status "Database    : $Database"
-Write-Status "Tables      : $okCount exported, $($failed.Count) failed, $tableCount selected"
-if ($includePatterns.Count -gt 0) { Write-Status ("Included    : " + ($includePatterns -join ', ')) }
-if ($excludePatterns.Count -gt 0) { Write-Status ("Excluded    : " + ($excludePatterns -join ', ')) }
-Write-Status "Rows        : $rowSum"
-Write-Status "Zip         : $zipPath"
-Write-Status ("Elapsed     : {0:hh\:mm\:ss}" -f $runTimer.Elapsed)
-
-if ($failed.Count -gt 0) {
-    Write-Status 'Failed tables:' Red
-    foreach ($f in $failed) { Write-Status "  $($f.Table) : $($f.Error)" Red }
-}
-
-[pscustomobject]@{
-    SqlInstance = $serverLabel
-    Platform    = $platform
-    Database    = $Database
-    Top         = $Top
-    Exported    = $okCount
-    Failed      = $failed.Count
-    TotalRows   = $rowSum
-    ZipPath     = $zipPath
-    Elapsed     = $runTimer.Elapsed
-    Tables      = $results
-}
-
-#endregion Summary
+Export-MhDatabaseSample @arguments
