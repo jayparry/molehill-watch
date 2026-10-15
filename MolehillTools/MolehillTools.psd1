@@ -32,6 +32,7 @@
         'Read-MhTuiKey',
         'Remove-MhTuiChar',
         'Select-MhSqlClientNamespace',
+        'Test-MhDatabaseStatus',
         'Set-MhTuiKeyScript',
         'Show-MhSqlConnectDialog',
         'Show-MhTuiCheckList',

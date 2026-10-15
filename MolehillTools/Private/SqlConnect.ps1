@@ -1082,22 +1082,7 @@ function Show-MhSqlConnectDialog {
   secrets are masked, the keystroke handling, what the form insists on, and how a failure to
   connect is explained. Both scripts that use this module call it from their own -SelfTest.
 #>
-function Test-ConnectLayer {
-    [CmdletBinding()]
-    param()
-
-    $script:failed = 0
-    $script:skipped = 0
-    $script:failed = 0
-    $script:skipped = 0
-    function Check([string] $Name, [bool] $Ok, [string] $Detail = '') {
-        if ($Ok) { Write-Host "  PASS  $Name" -ForegroundColor Green }
-        else { Write-Host "  FAIL  $Name $Detail" -ForegroundColor Red; $script:failed++ }
-    }
-    function Skip([string] $Name, [string] $Why) {
-        Write-Host "  SKIP  $Name ($Why)" -ForegroundColor DarkGray
-        $script:skipped++
-    }
+Register-MhSelfTest -Name 'The connect screen and the pickers' -Test {
     function Settings([hashtable] $Change) {
         $s = New-MhSqlConnectSettings
         foreach ($key in $Change.Keys) { $s.$key = $Change[$key] }
@@ -1105,103 +1090,103 @@ function Test-ConnectLayer {
     }
 
 
-    Write-Host '  the keyboard' -ForegroundColor Gray
-    Check 'a named key' ((ConvertTo-MhTuiKeys @('Down'))[0].Name -eq 'DownArrow')
-    Check 'however it is spelled' ((ConvertTo-MhTuiKeys @('DOWN'))[0].Name -eq 'DownArrow')
-    Check 'enter' ((ConvertTo-MhTuiKeys @('Enter'))[0].Name -eq 'Enter')
-    Check 'escape' ((ConvertTo-MhTuiKeys @('Esc'))[0].Name -eq 'Escape')
-    Check 'space carries its character' (
+    Test-MhSection 'the keyboard'
+    Test-MhCheck 'a named key' ((ConvertTo-MhTuiKeys @('Down'))[0].Name -eq 'DownArrow')
+    Test-MhCheck 'however it is spelled' ((ConvertTo-MhTuiKeys @('DOWN'))[0].Name -eq 'DownArrow')
+    Test-MhCheck 'enter' ((ConvertTo-MhTuiKeys @('Enter'))[0].Name -eq 'Enter')
+    Test-MhCheck 'escape' ((ConvertTo-MhTuiKeys @('Esc'))[0].Name -eq 'Escape')
+    Test-MhCheck 'space carries its character' (
         ((ConvertTo-MhTuiKeys @('Space'))[0].Name -eq 'Spacebar') -and ((ConvertTo-MhTuiKeys @('Space'))[0].Char -eq ' '))
-    Check 'typed text becomes one key per character' ((ConvertTo-MhTuiKeys @('text:Sales')).Count -eq 5)
-    Check 'and keeps the characters' ((-join (ConvertTo-MhTuiKeys @('text:Sales')).Char) -eq 'Sales')
-    Check 'a single character is itself' ((ConvertTo-MhTuiKeys @('x'))[0].Char -eq 'x')
-    Check 'a list is taken in order' ((-join (ConvertTo-MhTuiKeys @('text:ab', 'Enter', 'c')).Name) -match 'CharacterCharacterEnterCharacter')
-    Check 'nothing is nothing' ((ConvertTo-MhTuiKeys @()).Count -eq 0)
+    Test-MhCheck 'typed text becomes one key per character' ((ConvertTo-MhTuiKeys @('text:Sales')).Count -eq 5)
+    Test-MhCheck 'and keeps the characters' ((-join (ConvertTo-MhTuiKeys @('text:Sales')).Char) -eq 'Sales')
+    Test-MhCheck 'a single character is itself' ((ConvertTo-MhTuiKeys @('x'))[0].Char -eq 'x')
+    Test-MhCheck 'a list is taken in order' ((-join (ConvertTo-MhTuiKeys @('text:ab', 'Enter', 'c')).Name) -match 'CharacterCharacterEnterCharacter')
+    Test-MhCheck 'nothing is nothing' ((ConvertTo-MhTuiKeys @()).Count -eq 0)
     $threw = $false
     try { [void](ConvertTo-MhTuiKeys @('Wingding')) } catch { $threw = $true }
-    Check 'a key it does not know is refused, not guessed at' $threw
-    Check 'the function keys the screens use' (
+    Test-MhCheck 'a key it does not know is refused, not guessed at' $threw
+    Test-MhCheck 'the function keys the screens use' (
         (-join (ConvertTo-MhTuiKeys @('F2', 'F3', 'F4', 'F5', 'F6', 'F7')).Name) -eq 'F2F3F4F5F6F7')
-    Check 'and a letter is still just a letter' ((ConvertTo-MhTuiKeys @('D'))[0].Name -eq 'Character')
+    Test-MhCheck 'and a letter is still just a letter' ((ConvertTo-MhTuiKeys @('D'))[0].Name -eq 'Character')
 
-    Write-Host '  editing a field' -ForegroundColor Gray
-    Check 'a character is added' ((Add-MhTuiChar 'SQL' 'A') -eq 'SQLA')
-    Check 'a control character is not' ((Add-MhTuiChar 'SQL' ([char]9)) -eq 'SQL')
-    Check 'backspace removes one' ((Remove-MhTuiChar 'SQL') -eq 'SQ')
-    Check 'and stops at empty' ((Remove-MhTuiChar '') -eq '')
+    Test-MhSection 'editing a field'
+    Test-MhCheck 'a character is added' ((Add-MhTuiChar 'SQL' 'A') -eq 'SQLA')
+    Test-MhCheck 'a control character is not' ((Add-MhTuiChar 'SQL' ([char]9)) -eq 'SQL')
+    Test-MhCheck 'backspace removes one' ((Remove-MhTuiChar 'SQL') -eq 'SQ')
+    Test-MhCheck 'and stops at empty' ((Remove-MhTuiChar '') -eq '')
 
-    Write-Host '  the connection string it builds' -ForegroundColor Gray
+    Test-MhSection 'the connection string it builds'
     $windows = New-MhSqlConnectionString -Settings (Settings @{ Server = 'SQL01'; Database = 'Sales'; AuthId = 'Windows' })
-    Check 'Windows authentication is integrated security' ($windows -match 'Integrated Security=True')
-    Check 'with the server' ($windows -match 'Data Source=SQL01')
-    Check 'and the database' ($windows -match 'Initial Catalog=Sales')
-    Check 'and no user name' ($windows -notmatch 'User ID')
+    Test-MhCheck 'Windows authentication is integrated security' ($windows -match 'Integrated Security=True')
+    Test-MhCheck 'with the server' ($windows -match 'Data Source=SQL01')
+    Test-MhCheck 'and the database' ($windows -match 'Initial Catalog=Sales')
+    Test-MhCheck 'and no user name' ($windows -notmatch 'User ID')
     $sql = New-MhSqlConnectionString -Settings (Settings @{ Server = 'SQL01'; AuthId = 'Sql'; User = 'sa'; Password = 'p@ss;word' })
-    Check 'a SQL login carries its user' ($sql -match 'User ID=sa')
-    Check 'and its password, quoted because of the semicolon' ($sql -match 'Password="p@ss;word"')
-    Check 'and is not integrated security' ($sql -notmatch 'Integrated Security=True')
+    Test-MhCheck 'a SQL login carries its user' ($sql -match 'User ID=sa')
+    Test-MhCheck 'and its password, quoted because of the semicolon' ($sql -match 'Password="p@ss;word"')
+    Test-MhCheck 'and is not integrated security' ($sql -notmatch 'Integrated Security=True')
     $token = New-MhSqlConnectionString -Settings (Settings @{ Server = 'x.database.windows.net'; AuthId = 'Token' })
-    Check 'an access token puts nothing in the string' (($token -notmatch 'Authentication') -and ($token -notmatch 'User ID') -and ($token -notmatch 'Password'))
+    Test-MhCheck 'an access token puts nothing in the string' (($token -notmatch 'Authentication') -and ($token -notmatch 'User ID') -and ($token -notmatch 'Password'))
     $named = New-MhSqlConnectionString -Settings (Settings @{ Server = 'SQL01'; ApplicationName = 'Molehill TUI'; TimeoutSeconds = 45 })
-    Check 'the application name goes in' ($named -match 'Application Name="?Molehill TUI"?')
-    Check 'and the timeout' ($named -match 'Connect Timeout=45')
+    Test-MhCheck 'the application name goes in' ($named -match 'Application Name="?Molehill TUI"?')
+    Test-MhCheck 'and the timeout' ($named -match 'Connect Timeout=45')
     $plain = New-MhSqlConnectionString -Settings (Settings @{ Server = 'SQL01'; Encrypt = 'No'; TrustCert = $false })
-    Check 'encryption can be turned off on this driver' ($plain -match 'Encrypt=False')
-    Check 'and trust with it' ($plain -match 'TrustServerCertificate=False')
+    Test-MhCheck 'encryption can be turned off on this driver' ($plain -match 'Encrypt=False')
+    Test-MhCheck 'and trust with it' ($plain -match 'TrustServerCertificate=False')
 
-    Write-Host '  the Entra methods, where the driver has them' -ForegroundColor Gray
+    Test-MhSection 'the Entra methods, where the driver has them'
     $available = Get-MhSqlAuthAvailability -Namespace 'System.Data.SqlClient'
-    Check 'every method gets an answer' ($available.Count -eq $script:AuthMethods.Count)
-    Check 'Windows is always there' ($available['Windows'])
-    Check 'so is SQL' ($available['Sql'])
-    Check 'and an access token' ($available['Token'])
+    Test-MhCheck 'every method gets an answer' ($available.Count -eq $script:AuthMethods.Count)
+    Test-MhCheck 'Windows is always there' ($available['Windows'])
+    Test-MhCheck 'so is SQL' ($available['Sql'])
+    Test-MhCheck 'and an access token' ($available['Token'])
     foreach ($id in 'EntraMfa', 'EntraPassword', 'EntraIntegrated') {
         $method = Get-SqlAuthMethod $id
         if ($available[$id]) {
             $built = New-MhSqlConnectionString -Settings (Settings @{ Server = 'x.database.windows.net'; AuthId = $id; User = 'me@contoso.com'; Password = 'pw' })
-            Check "$($method.Name) names its keyword" ($built -match [regex]::Escape($method.Keyword))
+            Test-MhCheck "$($method.Name) names its keyword" ($built -match [regex]::Escape($method.Keyword))
         }
-        else { Skip "$($method.Name)" 'not on System.Data.SqlClient in this PowerShell' }
+        else { Test-MhSkip "$($method.Name)" 'not on System.Data.SqlClient in this PowerShell' }
     }
     $mdsNamespace = Get-MhSqlClientNamespace -Microsoft
     if ($mdsNamespace) {
         $mdsAvailable = Get-MhSqlAuthAvailability -Namespace $mdsNamespace
         foreach ($id in 'EntraServicePrincipal', 'EntraManagedIdentity', 'EntraDeviceCode', 'EntraDefault') {
             $method = Get-SqlAuthMethod $id
-            if (-not $mdsAvailable[$id]) { Skip "$($method.Name) on Microsoft.Data.SqlClient" 'this build does not have it'; continue }
+            if (-not $mdsAvailable[$id]) { Test-MhSkip "$($method.Name) on Microsoft.Data.SqlClient" 'this build does not have it'; continue }
             $built = New-MhSqlConnectionString -Settings (Settings @{ Namespace = $mdsNamespace; Server = 'x.database.windows.net'; AuthId = $id; User = 'appid'; Password = 'secret'; Encrypt = 'Mandatory' })
-            Check "$($method.Name) builds on Microsoft.Data.SqlClient" ($built -match 'Authentication=')
+            Test-MhCheck "$($method.Name) builds on Microsoft.Data.SqlClient" ($built -match 'Authentication=')
         }
         $strict = New-MhSqlConnectionString -Settings (Settings @{ Namespace = $mdsNamespace; Server = 'SQL01'; Encrypt = 'Strict'; HostNameInCert = 'sql01.contoso.com' })
-        Check 'Encrypt = Strict is accepted there' ($strict -match 'Encrypt=Strict')
-        Check 'and a host name in the certificate' ($strict -match 'Host Name In Certificate=sql01\.contoso\.com')
+        Test-MhCheck 'Encrypt = Strict is accepted there' ($strict -match 'Encrypt=Strict')
+        Test-MhCheck 'and a host name in the certificate' ($strict -match 'Host Name In Certificate=sql01\.contoso\.com')
     }
-    else { Skip 'Microsoft.Data.SqlClient' 'the SqlServer module is not available in this PowerShell' }
+    else { Test-MhSkip 'Microsoft.Data.SqlClient' 'the SqlServer module is not available in this PowerShell' }
 
-    Write-Host '  keeping the password off the screen' -ForegroundColor Gray
-    Check 'a password is masked' ((Hide-MhSqlSecret 'Data Source=x;Password=hunter2;Encrypt=True') -eq 'Data Source=x;Password=********;Encrypt=True')
-    Check 'a quoted one too' ((Hide-MhSqlSecret 'Password="p;w";Encrypt=True') -eq 'Password=********;Encrypt=True')
-    Check 'however it is spelled' ((Hide-MhSqlSecret 'password=abc') -eq 'password=********')
-    Check 'and nothing else is touched' ((Hide-MhSqlSecret 'Data Source=x;User ID=sa') -eq 'Data Source=x;User ID=sa')
+    Test-MhSection 'keeping the password off the screen'
+    Test-MhCheck 'a password is masked' ((Hide-MhSqlSecret 'Data Source=x;Password=hunter2;Encrypt=True') -eq 'Data Source=x;Password=********;Encrypt=True')
+    Test-MhCheck 'a quoted one too' ((Hide-MhSqlSecret 'Password="p;w";Encrypt=True') -eq 'Password=********;Encrypt=True')
+    Test-MhCheck 'however it is spelled' ((Hide-MhSqlSecret 'password=abc') -eq 'password=********')
+    Test-MhCheck 'and nothing else is touched' ((Hide-MhSqlSecret 'Data Source=x;User ID=sa') -eq 'Data Source=x;User ID=sa')
 
-    Write-Host '  what it insists on before connecting' -ForegroundColor Gray
-    Check 'a server name' ((Test-MhSqlConnectSettings -Settings (Settings @{ })) -contains 'a server name')
-    Check 'a user for SQL authentication' ((Test-MhSqlConnectSettings -Settings (Settings @{ Server = 'x'; AuthId = 'Sql' })) -contains 'a user name')
-    Check 'and a password' ((Test-MhSqlConnectSettings -Settings (Settings @{ Server = 'x'; AuthId = 'Sql'; User = 'sa' })) -contains 'a password')
-    Check 'the application id for a service principal' (
+    Test-MhSection 'what it insists on before connecting'
+    Test-MhCheck 'a server name' ((Test-MhSqlConnectSettings -Settings (Settings @{ })) -contains 'a server name')
+    Test-MhCheck 'a user for SQL authentication' ((Test-MhSqlConnectSettings -Settings (Settings @{ Server = 'x'; AuthId = 'Sql' })) -contains 'a user name')
+    Test-MhCheck 'and a password' ((Test-MhSqlConnectSettings -Settings (Settings @{ Server = 'x'; AuthId = 'Sql'; User = 'sa' })) -contains 'a password')
+    Test-MhCheck 'the application id for a service principal' (
         (Test-MhSqlConnectSettings -Settings (Settings @{ Server = 'x'; AuthId = 'EntraServicePrincipal' })) -contains 'the application id, in the user box')
-    Check 'a token when that is the method' ((Test-MhSqlConnectSettings -Settings (Settings @{ Server = 'x'; AuthId = 'Token' })) -contains 'an access token')
-    Check 'Windows authentication needs nothing else' ((Test-MhSqlConnectSettings -Settings (Settings @{ Server = 'x' })).Count -eq 0)
-    Check 'and Entra integrated needs nothing else' ((Test-MhSqlConnectSettings -Settings (Settings @{ Server = 'x'; AuthId = 'EntraIntegrated' })).Count -eq 0)
+    Test-MhCheck 'a token when that is the method' ((Test-MhSqlConnectSettings -Settings (Settings @{ Server = 'x'; AuthId = 'Token' })) -contains 'an access token')
+    Test-MhCheck 'Windows authentication needs nothing else' ((Test-MhSqlConnectSettings -Settings (Settings @{ Server = 'x' })).Count -eq 0)
+    Test-MhCheck 'and Entra integrated needs nothing else' ((Test-MhSqlConnectSettings -Settings (Settings @{ Server = 'x'; AuthId = 'EntraIntegrated' })).Count -eq 0)
 
-    Write-Host '  the three ways to pick things off a list' -ForegroundColor Gray
-    Check 'all means all' ((Get-MhTuiSelectionSummary -Mode All -Total 10 -Ticked 0).Count -eq 10)
-    Check 'and says so, in the caller words' ((Get-MhTuiSelectionSummary -Mode All -Total 10 -Ticked 3 -ItemNoun 'table' -Action 'exported').Text -match 'all 10 tables will be exported')
-    Check 'include takes what is ticked' ((Get-MhTuiSelectionSummary -Mode Include -Total 10 -Ticked 3).Count -eq 3)
-    Check 'exclude takes the rest' ((Get-MhTuiSelectionSummary -Mode Exclude -Total 10 -Ticked 3).Count -eq 7)
-    Check 'excluding everything leaves nothing' ((Get-MhTuiSelectionSummary -Mode Exclude -Total 10 -Ticked 10).Count -eq 0)
-    Check 'including nothing leaves nothing' ((Get-MhTuiSelectionSummary -Mode Include -Total 10 -Ticked 0).Count -eq 0)
-    Check 'one of a kind is not pluralised' ((Get-MhTuiSelectionSummary -Mode All -Total 1 -ItemNoun 'database').Text -match 'all 1 database will be')
+    Test-MhSection 'the three ways to pick things off a list'
+    Test-MhCheck 'all means all' ((Get-MhTuiSelectionSummary -Mode All -Total 10 -Ticked 0).Count -eq 10)
+    Test-MhCheck 'and says so, in the caller words' ((Get-MhTuiSelectionSummary -Mode All -Total 10 -Ticked 3 -ItemNoun 'table' -Action 'exported').Text -match 'all 10 tables will be exported')
+    Test-MhCheck 'include takes what is ticked' ((Get-MhTuiSelectionSummary -Mode Include -Total 10 -Ticked 3).Count -eq 3)
+    Test-MhCheck 'exclude takes the rest' ((Get-MhTuiSelectionSummary -Mode Exclude -Total 10 -Ticked 3).Count -eq 7)
+    Test-MhCheck 'excluding everything leaves nothing' ((Get-MhTuiSelectionSummary -Mode Exclude -Total 10 -Ticked 10).Count -eq 0)
+    Test-MhCheck 'including nothing leaves nothing' ((Get-MhTuiSelectionSummary -Mode Include -Total 10 -Ticked 0).Count -eq 0)
+    Test-MhCheck 'one of a kind is not pluralised' ((Get-MhTuiSelectionSummary -Mode All -Total 1 -ItemNoun 'database').Text -match 'all 1 database will be')
 
     $sample = @(
         [pscustomobject]@{ Schema = 'dbo'; Table = 'Orders'; Rows = 100 }
@@ -1209,34 +1194,32 @@ function Test-ConnectLayer {
         [pscustomobject]@{ Schema = 'staging'; Table = 'Load'; Rows = 2 }
     )
     $rows = @(New-TuiRows -Items $sample -Label { "$($_.Schema).$($_.Table)" } -Detail { '{0} rows' -f $_.Rows })
-    Check 'a row is labelled by the caller block' ($rows[0].Text -eq 'dbo.Orders')
-    Check 'and detailed by it too' ($rows[0].Detail -eq '100 rows')
-    Check 'the caller object comes back as it was given' ($rows[0].Item.Table -eq 'Orders')
-    Check 'and the picker does not write a Ticked property onto it' ($null -eq $sample[0].PSObject.Properties['Ticked'])
-    Check 'nothing is ticked to start with' (@($rows | Where-Object { $_.Ticked }).Count -eq 0)
-    Check 'no filter shows everything' (@(Select-TuiRows -Rows $rows -Filter '').Count -eq 3)
-    Check 'a filter narrows it' (@(Select-TuiRows -Rows $rows -Filter 'audit').Count -eq 1)
-    Check 'and matches the whole label, schema included' (@(Select-TuiRows -Rows $rows -Filter 'staging').Count -eq 1)
-    Check 'and nothing is nothing' (@(Select-TuiRows -Rows $rows -Filter 'zzz').Count -eq 0)
-    Check 'wrapped in @() a single row counts as one, which is the convention here' (
+    Test-MhCheck 'a row is labelled by the caller block' ($rows[0].Text -eq 'dbo.Orders')
+    Test-MhCheck 'and detailed by it too' ($rows[0].Detail -eq '100 rows')
+    Test-MhCheck 'the caller object comes back as it was given' ($rows[0].Item.Table -eq 'Orders')
+    Test-MhCheck 'and the picker does not write a Ticked property onto it' ($null -eq $sample[0].PSObject.Properties['Ticked'])
+    Test-MhCheck 'nothing is ticked to start with' (@($rows | Where-Object { $_.Ticked }).Count -eq 0)
+    Test-MhCheck 'no filter shows everything' (@(Select-TuiRows -Rows $rows -Filter '').Count -eq 3)
+    Test-MhCheck 'a filter narrows it' (@(Select-TuiRows -Rows $rows -Filter 'audit').Count -eq 1)
+    Test-MhCheck 'and matches the whole label, schema included' (@(Select-TuiRows -Rows $rows -Filter 'staging').Count -eq 1)
+    Test-MhCheck 'and nothing is nothing' (@(Select-TuiRows -Rows $rows -Filter 'zzz').Count -eq 0)
+    Test-MhCheck 'wrapped in @() a single row counts as one, which is the convention here' (
         @(Select-TuiRows -Rows $rows -Filter 'CustomerAudit').Count -eq 1)
-    Check 'two rows in, two rows out' (@(New-TuiRows -Items $sample).Count -eq 3)
-    Check 'one row in, one row out rather than one row holding three' (@(New-TuiRows -Items @($sample[0])).Count -eq 1)
-    Check 'an empty list makes no rows' (@(New-TuiRows -Items @()).Count -eq 0)
-    Check 'and a list with no label block falls back to the object itself' ((@(New-TuiRows -Items @('SQL01')))[0].Text -eq 'SQL01')
+    Test-MhCheck 'two rows in, two rows out' (@(New-TuiRows -Items $sample).Count -eq 3)
+    Test-MhCheck 'one row in, one row out rather than one row holding three' (@(New-TuiRows -Items @($sample[0])).Count -eq 1)
+    Test-MhCheck 'an empty list makes no rows' (@(New-TuiRows -Items @()).Count -eq 0)
+    Test-MhCheck 'and a list with no label block falls back to the object itself' ((@(New-TuiRows -Items @('SQL01')))[0].Text -eq 'SQL01')
 
-    Write-Host '  explaining a failure to connect' -ForegroundColor Gray
+    Test-MhSection 'explaining a failure to connect'
     $s = New-MhSqlConnectSettings
-    Check 'a refused login is not blamed on the network' ((Get-MhSqlConnectExplanation -Message "Login failed for user 'sa'." -Settings $s) -match 'refused')
-    Check 'a handshake failure mentions the certificate switch' (
+    Test-MhCheck 'a refused login is not blamed on the network' ((Get-MhSqlConnectExplanation -Message "Login failed for user 'sa'." -Settings $s) -match 'refused')
+    Test-MhCheck 'a handshake failure mentions the certificate switch' (
         (Get-MhSqlConnectExplanation -Message 'A connection was successfully established ... pre-login handshake' -Settings (Settings @{ TrustCert = $false })) -match 'Trust server certificate')
-    Check 'and sends you to the TLS tool' ((Get-MhSqlConnectExplanation -Message 'pre-login handshake' -Settings $s) -match 'Test-SqlTlsHandshake')
-    Check 'a timeout blames the firewall, not the password' ((Get-MhSqlConnectExplanation -Message 'Connection Timeout Expired' -Settings $s) -match 'firewall')
-    Check 'a name that does not resolve is explained' ((Get-MhSqlConnectExplanation -Message 'The network path was not found.' -Settings $s) -match 'did not resolve')
-    Check 'and a named instance is pointed at SQL Browser' ((Get-MhSqlConnectExplanation -Message 'error: 26 - Error Locating Server/Instance Specified, server was not found' -Settings $s) -match 'SQL Browser')
-    Check 'an SSPI failure is not called a bad password' ((Get-MhSqlConnectExplanation -Message 'The target principal name is incorrect. Cannot generate SSPI context.' -Settings $s) -match 'Kerberos')
-    Check 'an unknown error explains nothing rather than guessing' ((Get-MhSqlConnectExplanation -Message 'Something odd' -Settings $s) -eq '')
+    Test-MhCheck 'and sends you to the TLS tool' ((Get-MhSqlConnectExplanation -Message 'pre-login handshake' -Settings $s) -match 'Test-SqlTlsHandshake')
+    Test-MhCheck 'a timeout blames the firewall, not the password' ((Get-MhSqlConnectExplanation -Message 'Connection Timeout Expired' -Settings $s) -match 'firewall')
+    Test-MhCheck 'a name that does not resolve is explained' ((Get-MhSqlConnectExplanation -Message 'The network path was not found.' -Settings $s) -match 'did not resolve')
+    Test-MhCheck 'and a named instance is pointed at SQL Browser' ((Get-MhSqlConnectExplanation -Message 'error: 26 - Error Locating Server/Instance Specified, server was not found' -Settings $s) -match 'SQL Browser')
+    Test-MhCheck 'an SSPI failure is not called a bad password' ((Get-MhSqlConnectExplanation -Message 'The target principal name is incorrect. Cannot generate SSPI context.' -Settings $s) -match 'Kerberos')
+    Test-MhCheck 'an unknown error explains nothing rather than guessing' ((Get-MhSqlConnectExplanation -Message 'Something odd' -Settings $s) -eq '')
 
-    Write-Host ''
-    [pscustomobject]@{ Failed = $script:failed; Skipped = $script:skipped }
 }

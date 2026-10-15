@@ -21,8 +21,8 @@
     so with -ToolPath.
 
 .PARAMETER Name
-    Only the tools whose file name matches this - a wildcard is fine, so 'Copy*' or '*Sample*'.
-    The module's own checks always run.
+    Only the things whose name matches this - a wildcard is fine, so 'Copy*' or '*Sample*'. It is
+    matched against the registered check names as well as the tool file names.
 
 .PARAMETER ToolPath
     Where the tool scripts are. Default: the Tools folder beside the module.
@@ -60,24 +60,20 @@ function Invoke-MhSelfTest {
     Write-Host ''
     Write-Host 'MolehillTools self test' -ForegroundColor Cyan
 
-    # the module's own, which print as they go because they are this module's detail
-    Write-Host '  MolehillTools (the connect screen and the pickers)' -ForegroundColor Gray
-    $connect = $null
-    if ($Detailed) { $connect = Test-ConnectLayer }
-    else {
-        $captured = Test-ConnectLayer 6>&1
-        $connect = @($captured | Where-Object { $_ -is [pscustomobject] })[-1]
-        foreach ($line in ($captured | Where-Object { $_ -is [string] -and $_ -match '^\s*FAIL\s' })) {
-            Write-Host "    $line" -ForegroundColor Red
-        }
+    # whatever has registered itself: each tool adds its own checks as it loads, so this list
+    # grows with the module rather than being kept somewhere else and going stale
+    foreach ($registered in $script:SelfTests) {
+        if ($registered.Name -notlike $Name -and $Name -ne '*') { continue }
+        Write-Host "  $($registered.Name)" -ForegroundColor Gray
+        $outcome = Invoke-MhRegisteredTest -Registered $registered
+        Write-Host ("    {0} passed, {1} failed, {2} skipped" -f $outcome.Passed, $outcome.Failed, $outcome.Skipped) `
+            -ForegroundColor $(if ($outcome.Failed) { 'Red' } else { 'Green' })
+        $results.Add([pscustomobject]@{
+            Name = $registered.Name; Passed = $outcome.Passed; Failed = $outcome.Failed
+            Skipped = $outcome.Skipped; ExitCode = $(if ($outcome.Failed) { 1 } else { 0 })
+            Result = $(if ($outcome.Failed -eq 0) { 'PASS' } else { 'FAIL' })
+        })
     }
-    Write-Host ("    {0} failed, {1} skipped" -f $connect.Failed, $connect.Skipped) `
-        -ForegroundColor $(if ($connect.Failed) { 'Red' } else { 'Green' })
-    $results.Add([pscustomobject]@{
-        Name = 'MolehillTools'; Passed = $null; Failed = $connect.Failed
-        Skipped = $connect.Skipped; ExitCode = $(if ($connect.Failed) { 1 } else { 0 })
-        Result = $(if ($connect.Failed -eq 0) { 'PASS' } else { 'FAIL' })
-    })
 
     if (-not $ModuleOnly) {
         if (-not $ToolPath) { $ToolPath = Join-Path (Split-Path $PSScriptRoot -Parent) '..\Tools' }
