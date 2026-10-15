@@ -231,7 +231,6 @@ function Get-MhPatchStatus {
         $order = @{ Critical = 0; Warning = 1; Info = 2; OK = 3 }
         $sorted = $results | Sort-Object Server, @{ Expression = { if ($_.Component -eq 'Windows') { 0 } else { 1 } } }, Instance
         $counts = @{}; foreach ($s in 'Critical', 'Warning', 'Info', 'OK') { $counts[$s] = @($results | Where-Object { $_.Severity -eq $s }).Count }
-        $counts = @{}; foreach ($s in 'Critical', 'Warning', 'Info', 'OK') { $counts[$s] = @($results | Where-Object { $_.Severity -eq $s }).Count }
         Write-Host ''
         $sorted | Format-Table Server, Component, Instance, Installed, Status, Severity -AutoSize | Out-String -Width 220 | Write-Host
         if ($CsvPath) { $sorted | Export-Csv -Path $CsvPath -NoTypeInformation -Encoding UTF8; Write-Host "CSV saved: $CsvPath" }
@@ -278,7 +277,6 @@ $rowsHtml
         [System.IO.File]::WriteAllText($OutputPath, $html, [System.Text.Encoding]::UTF8)
         Write-Host "Report saved: $OutputPath" -ForegroundColor Green
         if ($Open) { Start-Process $OutputPath }
-        if ($counts.Critical) { exit 2 } elseif ($counts.Warning) { exit 1 } else { exit 0 }
     }
 }
 

@@ -641,8 +641,4 @@ Register-MhSelfTest -Name 'Export-MhDatabaseSample' -Test {
     Test-MhCheck 'the framework one needs nothing installed' ((Get-MhSqlClientNamespace) -eq 'System.Data.SqlClient')
     Test-MhCheck 'and it has a connection string builder' ($null -ne ('System.Data.SqlClient.SqlConnectionStringBuilder' -as [type]))
 
-    Write-Host ''
-    if ($script:failed -eq 0) { Write-Host 'All self tests passed.' -ForegroundColor Green; exit 0 }
-    Write-Host "$script:failed self test(s) failed." -ForegroundColor Red
-    return
 }

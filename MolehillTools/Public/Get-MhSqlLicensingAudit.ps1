@@ -144,7 +144,7 @@ function Get-MhSqlLicensingAudit {
     end {
         if ($script:targets.Count -eq 0 -and $SqlInstance) { Add-LicensingTarget $SqlInstance }
         if ($ServerList) {
-            if (-not (Test-Path -LiteralPath $ServerList)) { Write-Host "  No such list: $ServerList" -ForegroundColor Red; exit 2 }
+            if (-not (Test-Path -LiteralPath $ServerList)) { Write-Host "  No such list: $ServerList" -ForegroundColor Red; return }
             foreach ($line in (Get-Content -LiteralPath $ServerList)) {
                 $t = $line.Trim()
                 if ($t -and -not $t.StartsWith('#')) { $script:targets.Add($t) }
@@ -163,7 +163,7 @@ function Get-MhSqlLicensingAudit {
             }
             elseif ($answer) { Add-LicensingTarget $answer }
         }
-        if ($script:targets.Count -eq 0) { Write-Host '  Nothing to audit.' -ForegroundColor Yellow; exit 2 }
+        if ($script:targets.Count -eq 0) { Write-Host '  Nothing to audit.' -ForegroundColor Yellow; return }
         $runAt = Get-Date
         Write-Host ''
         Write-Host '  SQL Server licensing audit  ' -NoNewline -ForegroundColor Black -BackgroundColor Cyan
