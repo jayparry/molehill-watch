@@ -165,7 +165,8 @@ MolehillWatch\
    ├─ Test-DatabaseStatus.ps1               "is everything back?" after a patch, reboot or restore
    ├─ Restore-DatabaseCopy.ps1              restores databases to another server, directly or via Azure Blob Storage
    ├─ Export-BackupHistory.sql              run on a source you cannot connect to, feeds the above
-   ├─ Restore-LatestAzureBackup.ps1         restores the newest backup in a container, then tidies each copy
+   ├─ Restore-LatestAzureBackup.ps1         restores the newest backup in a container, then tidies each copy
+   ├─ Clone-DatabasesFromBlob.ps1           the same job for one job: straight from the container, managed identity, no module
    ├─ Test-SqlTlsHandshake.ps1              why an instance will not negotiate encryption (old servers)
    ├─ Copy-SqlAccess.ps1                    gives one principal the same access another has, on any instance
    ├─ Get-SqlLicensingAudit.ps1             what needs licensing across an estate, and the total to cover it
@@ -350,6 +351,44 @@ FULL/DAILY/<database name>/<something>.bak
 
 **Run it on the destination server if you can.** `-LocalBackupPath` has to be readable by the SQL Server service account, not just by you, so a path under `C:\Users` will not do.
 
+## The same job as one scheduled step (`Tools\Clone-DatabasesFromBlob.ps1`)
+
+The tool above is the general answer. This is the specific one: clone a set of databases out of a container onto this server, every night, as one step of a SQL Agent job. One file, no module, no `Az` modules, nothing to install, and **nothing is downloaded** - each backup is restored from its URL, so the server needs room for the database and not for a copy of the backup as well.
+
+```powershell
+# a CmdExec job step, which fails the step on a non-zero exit code
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "D:\Scripts\Clone-DatabasesFromBlob.ps1" `
+    -Database Sales,Stock -StorageAccountName mycompany -ContainerName backups `
+    -EnableTde -TdeCertificateName MySuperSecureCertificate
+```
+
+* **The managed identity is used twice, by two different things**, and it is worth knowing which is which when one of them fails. The script lists the container over the Blob REST API to find the newest backup per database, with a token it asks the machine's own metadata service for - no modules, and no proxy, which is why it uses `HttpWebRequest` and turns the proxy off explicitly. SQL Server then reads the backup itself, through a credential named after the container:
+
+  ```sql
+  CREATE CREDENTIAL [https://mycompany.blob.core.windows.net/backups]
+      WITH IDENTITY = 'MANAGED IDENTITY';
+  ```
+
+  The identity needs **Storage Blob Data Reader** on the container for both. SQL Server 2022 is the first version that can use a managed identity this way, and the script refuses on anything older rather than failing inside `RESTORE`.
+
+* **Everything it needs is checked before any database is touched, and reported together.** The credential, the certificate and master key for `-EnableTde`, and the token - all three at once, each with the statement or the fix, because a job being set up usually has more than one of them waiting and finding them one run at a time is three runs:
+
+  ```
+  nothing has been restored, because these 4 things have to be sorted out first:
+    - SQL01 has no credential for https://mycompany.blob.core.windows.net/backups, so SQL Server cannot read the backups. Run this on it once, as a sysadmin:
+          CREATE CREDENTIAL [https://mycompany.blob.core.windows.net/backups] WITH IDENTITY = 'MANAGED IDENTITY';
+    - there is no database master key in master. Create one, back it up and keep the password: CREATE MASTER KEY ENCRYPTION BY PASSWORD = '<a long random string>';
+    ...
+  ```
+
+* **Then, per database**: the newest backup under `FULL/DAILY/<database>/` is found, its header is read before the existing copy is touched (right database, full backup, not a version this instance cannot restore), it is restored under the same name with its files moved to this instance's data and log paths, and then it is settled before the next one is even looked at - users dropped, owner set, recovery model set, the users you asked for added, encrypted, read-only last. The order is the same as the general tool's and for the same reasons: a copy of production should not sit with production's users in it, and a read-only database cannot have an encryption key created.
+
+* **A striped backup is restored rather than refused.** One file of a set is not reported as striped by `RESTORE HEADERONLY`, it is refused - so on that refusal the script tries again with the blobs written beside it, and only gives up if the set is still incomplete.
+
+* **No prompts anywhere.** A mandatory parameter would prompt, and a prompt in a job step is a hang rather than a failure, so the arguments are checked and refused with a message instead. `-WhatIf` prints the exact `RESTORE` statement and what would be done to each copy afterwards, and changes nothing.
+
+* Exit codes: `0` every database done (or a clean `-WhatIf`), `1` at least one failed, `2` it could not start. `-SelfTest` runs 65 checks over the choosing, the URLs, the statements and the refusals, with no Azure and no SQL Server at all.
+
 ## Why encryption will not negotiate (`Tools\Test-SqlTlsHandshake.ps1`)
 
 SQL Server encrypts the login packet whatever else you ask for, so every connection begins with a TLS handshake - and on an old instance that is where connections die. The error a client hands back ("pre-login handshake", "certificate chain", "no common algorithm") rarely says which side refused or why, and `-TrustServerCertificate` only fixes one of the possible causes.
