@@ -1,63 +1,74 @@
+#Requires -Version 5.1
+
 <#
 .SYNOPSIS
-    Tests SQL Server connection strings by reading dbo.TestConnection, and reports the result of each.
+    Tests a list of SQL Server connection strings and says, for each one, whether it connects and
+    what it connected to.
 
 .DESCRIPTION
-    For every connection string given it:
-      1. opens a connection using that string exactly as supplied
-      2. runs  SELECT TestText FROM dbo.TestConnection
-      3. returns ConnectionString, TestText, Status (Success or Failure) and ErrorMessage
+    Molehill Data Services | Test-SqlConnectionString
 
-    ErrorMessage is the COMPLETE error: every error in a SqlException's Errors collection (number,
-    severity, state, procedure, line), every inner exception, and the client connection id. Nothing
-    is truncated or reworded.
+    A single file that can be copied to a server, over the real thing: everything this does lives
+    in MolehillTools (Test-MhSqlConnectionString). With the module imported you would call that
+    directly; this exists because copying one script to a box is how this estate works.
 
-    Objects are written to the pipeline, so the full text survives:
-        .\Test-SqlConnectionString.ps1 -ConnectionString $strings | Format-List
-        .\Test-SqlConnectionString.ps1 -Path .\connections.txt -CsvPath .\results.csv
-    A plain run prints PowerShell's default table, which shortens long errors on screen - pipe to
-    Format-List (or use -Detailed) to read them in full.
+    For when an application has a connection string that does not work and nobody can say why.
+    Each string is tried as written - no tidying, no defaults added - so what is tested is what
+    the application is using.
 
-    The script only reads. It creates nothing and changes nothing.
+    For each one: whether it opened, how long it took, the server and database it reached, the
+    edition and version, who it signed in as, and whether the connection was encrypted. Where it
+    failed, the error as the driver gave it, with the SQL Server error number where there is one.
+
+    The query it runs by default is SELECT TestText FROM dbo.TestConnection, which is the table
+    these applications expect to be able to read. Connecting and reading are reported separately,
+    because "the string is wrong" and "that table is not in this database" need different fixes.
+    -Query points it at something else.
+
+    Exit code: 0 = every string succeeded, 1 = at least one did not, 2 = nothing to test.
 
 .PARAMETER ConnectionString
-    One or more connection strings. Also accepted from the pipeline.
+    The strings to test. Also takes a pipeline, including objects with a ConnectionString
+    property.
 
 .PARAMETER Path
-    A text file of connection strings, one per line. Blank lines and lines starting with # are ignored.
+    A file of connection strings, one per line. Blank lines and # comments are ignored.
+
+.PARAMETER Query
+    The query to run once connected. Default: SELECT TestText FROM dbo.TestConnection;
 
 .PARAMETER ConnectTimeoutSeconds
-    Overrides the connect timeout in every connection string. Without it, each string's own setting
-    (or the 15 second default) applies.
+    Override the timeout in the strings themselves. Left alone when not given, because the
+    timeout is part of what is being tested.
 
 .PARAMETER CommandTimeoutSeconds
-    Query timeout. Default 30.
+    How long the query may take. Default 30.
 
 .PARAMETER MaskPasswords
-    Replaces the password in the returned ConnectionString with ***, for results you are sharing.
+    Mask the password in anything printed, for a string that is going into a ticket.
 
 .PARAMETER Detailed
-    Also prints every result in full to the screen as it runs.
+    Print everything found about each connection rather than one line per string.
 
 .PARAMETER CsvPath
-    Saves the results to a CSV file as well.
+    Write the results to this file as well.
 
 .EXAMPLE
-    .\Test-SqlConnectionString.ps1 -ConnectionString 'Server=SQL01;Database=AppDb;Integrated Security=SSPI' | Format-List
+    .\Test-SqlConnectionString.ps1 'Server=SQL01;Database=Sales;Integrated Security=True'
 
 .EXAMPLE
-    $cs = 'Server=SQL01;Database=AppDb;Integrated Security=SSPI', 'Server=SQL02,14330;Database=AppDb;User ID=app;Password=***'
-    .\Test-SqlConnectionString.ps1 -ConnectionString $cs -CsvPath .\results.csv
+    .\Test-SqlConnectionString.ps1 -Path .\strings.txt -MaskPasswords -CsvPath .\results.csv
 
-.EXAMPLE
-    Get-Content .\connections.txt | .\Test-SqlConnectionString.ps1 -Detailed
+.NOTES
+    Molehill Data Services. Read-only: it connects and asks what it reached.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Position = 0, ValueFromPipeline, ValueFromPipelineByPropertyName)] [string[]] $ConnectionString,
     [string] $Path,
+    [string] $Query,
     [int] $ConnectTimeoutSeconds,
-    [int] $CommandTimeoutSeconds = 30,
+    [ValidateRange(1, 86400)] [int] $CommandTimeoutSeconds = 30,
     [switch] $MaskPasswords,
     [switch] $Detailed,
     [string] $CsvPath
@@ -65,119 +76,31 @@ param(
 
 begin {
     $ErrorActionPreference = 'Stop'
-    $all = New-Object System.Collections.Generic.List[string]
-    $results = New-Object System.Collections.Generic.List[object]
 
-    # Everything the exception chain knows, in full
-    function Get-FullErrorText($Exception) {
-        $lines = New-Object System.Collections.Generic.List[string]
-        $e = $Exception
-        # PowerShell wraps .NET calls in MethodInvocationException ("Exception calling ..."), which only
-        # repeats the real message: start at the genuine exception instead.
-        while ($e -is [System.Management.Automation.MethodInvocationException] -and $e.InnerException) { $e = $e.InnerException }
-        $level = 0
-        while ($e) {
-            $prefix = if ($level -eq 0) { '' } else { "Inner exception ($level): " }
-            $lines.Add("$prefix[$($e.GetType().FullName)] $($e.Message)")
-            if ($e -is [System.Data.SqlClient.SqlException]) {
-                if ($e.ClientConnectionId -and $e.ClientConnectionId -ne [guid]::Empty) { $lines.Add("Client connection id: $($e.ClientConnectionId)") }
-                $n = 0
-                foreach ($err in $e.Errors) {
-                    $n++
-                    $detail = "SQL error $n of $($e.Errors.Count): Msg $($err.Number), Level $($err.Class), State $($err.State)"
-                    if ($err.Procedure) { $detail += ", Procedure $($err.Procedure)" }
-                    if ($err.LineNumber) { $detail += ", Line $($err.LineNumber)" }
-                    if ($err.Server) { $detail += ", Server $($err.Server)" }
-                    $lines.Add($detail)
-                    $lines.Add($err.Message)
-                }
-            }
-            $e = $e.InnerException
-            $level++
-        }
-        return ($lines -join [Environment]::NewLine)
+    $manifest = Join-Path $PSScriptRoot '..\MolehillTools\MolehillTools.psd1'
+    if (-not (Test-Path -LiteralPath $manifest)) {
+        Write-Host '  MolehillTools is not where this script expects it.' -ForegroundColor Red
+        Write-Host "  Looked for: $manifest" -ForegroundColor Gray
+        Write-Host '  Copy the MolehillTools folder alongside Tools, or import it yourself and call Test-MhSqlConnectionString.' -ForegroundColor Gray
+        exit 2
     }
+    Import-Module $manifest -Force
 
-    function Hide-Password([string]$Cs) {
-        return ($Cs -replace '(?i)\b(password|pwd)\s*=\s*[^;]*', '$1=***')
-    }
+    $collected = New-Object System.Collections.Generic.List[string]
 }
-
 process {
-    foreach ($cs in $ConnectionString) { if ($cs -and $cs.Trim()) { $all.Add($cs.Trim()) } }
+    foreach ($one in $ConnectionString) { if ($one) { $collected.Add($one) } }
 }
-
 end {
-    if ($Path) {
-        if (-not (Test-Path $Path)) { throw "Connection string file not found: $Path" }
-        Get-Content -Path $Path | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') } | ForEach-Object { $all.Add($_) }
-    }
-    if ($all.Count -eq 0) { throw 'Give at least one connection string with -ConnectionString, -Path, or from the pipeline.' }
-
-    foreach ($cs in $all) {
-        $status = 'Failure'
-        $testText = $null
-        $errorText = $null
-        $conn = $null
-        $display = if ($MaskPasswords) { Hide-Password $cs } else { $cs }
-
-        try {
-            $effective = $cs
-            if ($PSBoundParameters.ContainsKey('ConnectTimeoutSeconds')) {
-                $builder = New-Object System.Data.SqlClient.SqlConnectionStringBuilder $cs   # throws on a malformed string
-                $builder['Connect Timeout'] = $ConnectTimeoutSeconds
-                $effective = $builder.ConnectionString
-            }
-
-            $conn = New-Object System.Data.SqlClient.SqlConnection $effective
-            $conn.Open()
-
-            $cmd = $conn.CreateCommand()
-            $cmd.CommandText = 'SELECT TestText FROM dbo.TestConnection;'
-            $cmd.CommandTimeout = $CommandTimeoutSeconds
-            $table = New-Object System.Data.DataTable
-            $table.Load($cmd.ExecuteReader())
-
-            if ($table.Rows.Count -eq 0) {
-                $errorText = 'Connected and read dbo.TestConnection, but the table contains no rows.'
-            }
-            else {
-                $value = $table.Rows[0]['TestText']
-                $testText = if ($value -is [DBNull]) { $null } else { [string]$value }
-                $status = 'Success'
-                if ($table.Rows.Count -gt 1) { $errorText = "Note: dbo.TestConnection returned $($table.Rows.Count) rows; the first was used." }
-            }
-        }
-        catch {
-            $errorText = Get-FullErrorText $_.Exception
-        }
-        finally {
-            if ($conn) { $conn.Dispose() }
-        }
-
-        $result = [pscustomobject]@{
-            ConnectionString = $display
-            TestText         = $testText
-            Status           = $status
-            ErrorMessage     = $errorText
-        }
-        $results.Add($result)
-
-        if ($Detailed) {
-            $colour = if ($status -eq 'Success') { 'Green' } else { 'Red' }
-            Write-Host ''
-            Write-Host "ConnectionString : $display"
-            Write-Host "Status           : $status" -ForegroundColor $colour
-            Write-Host "TestText         : $testText"
-            if ($errorText) { Write-Host "ErrorMessage     : $errorText" -ForegroundColor $(if ($status -eq 'Success') { 'Yellow' } else { 'Red' }) }
-        }
+    $arguments = @{ CommandTimeoutSeconds = $CommandTimeoutSeconds }
+    if ($collected.Count) { $arguments['ConnectionString'] = $collected.ToArray() }
+    foreach ($name in 'Path', 'Query', 'ConnectTimeoutSeconds', 'MaskPasswords', 'Detailed', 'CsvPath') {
+        if ($PSBoundParameters.ContainsKey($name)) { $arguments[$name] = $PSBoundParameters[$name] }
     }
 
-    if ($CsvPath) {
-        $results | Export-Csv -Path $CsvPath -NoTypeInformation -Encoding UTF8
-        Write-Host ''
-        Write-Host "Results saved: $CsvPath ($(@($results | Where-Object Status -eq 'Success').Count) of $($results.Count) succeeded)" -ForegroundColor Cyan
-    }
-
+    $results = @(Test-MhSqlConnectionString @arguments)
     $results
+    if ($results.Count -eq 0) { exit 2 }
+    if (@($results | Where-Object { $_.Status -ne 'Success' }).Count) { exit 1 }
+    exit 0
 }
