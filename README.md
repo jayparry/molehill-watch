@@ -145,6 +145,11 @@ MolehillWatch\
 ├─ Docs\
 │  ├─ Admin-Guide.md                        your day-to-day runbook
 │  └─ Client-Onboarding-Guide.md            send to the client
+├─ MolehillTools\                           ← the module the tools are becoming
+│  ├─ MolehillTools.psd1                    manifest: version and what it exports
+│  ├─ MolehillTools.psm1                    loader
+│  ├─ Private\SqlConnect.ps1                the connect screen, the pickers, the plumbing
+│  └─ Public\                               Get-MhSqlConnectionString, Invoke-MhSelfTest
 └─ Tools\
    ├─ Get-PatchStatus.ps1                   standalone patch check for any server (no install)
    ├─ Test-DatabaseStatus.ps1               "is everything back?" after a patch, reboot or restore
@@ -156,8 +161,7 @@ MolehillWatch\
    ├─ Get-SqlLicensingAudit.ps1             what needs licensing across an estate, and the total to cover it
    ├─ Export-DatabaseSample.ps1             a random sample of every table, as zipped CSVs
    ├─ Start-DatabaseSampleTui.ps1           the same thing with a connect screen and a table picker
-   ├─ Get-SqlConnectionString.ps1           the connect screen on its own, string onto the pipeline
-   ├─ Molehill.SqlConnect.psm1              the connect screen, for any script that needs one
+   ├─ Get-SqlConnectionString.ps1           the connect screen on its own, string onto the pipeline
    ├─ Test-SqlConnectionString.ps1          tests a list of connection strings (one-shot, no UI)
    ├─ SqlConnectionTester.ps1               the same app in PowerShell, for sites that forbid .exe files
    └─ SqlConnectionTester\                  C# terminal app: build, save and test connection strings
@@ -439,37 +443,42 @@ Invoke-Sqlcmd -ConnectionString (.\Get-SqlConnectionString.ps1) -Query 'SELECT @
 * `-AsObject` returns the driver, the method, the access token, the database and what the server said about itself as well, for a caller that needs more than the string.
 * Same authentication list, same options screen, same function keys as the sample screen above - it is the same code.
 
-### The module behind both (`Tools\Molehill.SqlConnect.psm1`)
+### MolehillTools, the module underneath (`MolehillTools\`)
 
-The screen, the authentication matrix, the connection string building and the small amount of console plumbing, in one place, because none of it is about sampling databases. Import it by path and use it in anything:
+The screens, the authentication matrix, the connection string building and the console plumbing live in a module now, because none of that is about sampling databases - and because the same helpers had been copied into tool after tool. `Invoke-Sql` existed in **seven** copies before this started, `New-ConnectionString` in six: when a bug was found in one, it had to be found again in the other six.
 
 ```powershell
-Import-Module (Join-Path $PSScriptRoot 'Molehill.SqlConnect.psm1')
+Import-Module .\MolehillTools\MolehillTools.psd1
+Get-Command -Module MolehillTools
 
-$settings = New-SqlConnectSettings -Namespace (Select-SqlClientNamespace) -Server 'SQLPROD01'
-$connected = Show-SqlConnectDialog -Settings $settings
-$connection = Open-SqlConnection -Settings $connected.Settings -ConnectionString $connected.ConnectionString
+$cs = Get-MhSqlConnectionString -SqlInstance SQLPROD01
+Invoke-MhSelfTest
 ```
 
-* **The screens**: `Show-SqlConnectDialog` (form plus the connection test), `Show-SqlConnectForm`, `Show-SqlConnectOptions`.
-* **Picking things off a list**, which is not a SQL idea at all: `Show-TuiList` for one of something and `Show-TuiCheckList` for the all / only these / all but these choice. Neither knows what it is showing - the caller says how to label a row, what to put on the right, and when to grey one out:
+Functions are prefixed `Mh`, the way dbatools uses `Dba`, so nothing collides with the `SqlServer` module or anything else in the session:
+
+* **A connection**: `Get-MhSqlConnectionString`, `Show-MhSqlConnectDialog`, `New-MhSqlConnectSettings`, `New-MhSqlConnectionString`, `Test-MhSqlConnectSettings`, `Hide-MhSqlSecret`.
+* **Authentication and drivers**: `Get-MhSqlAuthMethods`, `Get-MhSqlAuthAvailability` (asked of the driver, not assumed), `Get-MhSqlClientNamespace`, `Select-MhSqlClientNamespace`.
+* **Talking to SQL Server**: `Open-MhSqlConnection`, `Invoke-MhSqlQuery`, `Get-MhSqlServerInfo`, `Get-MhSqlDatabaseList`, `Get-MhSqlConnectExplanation`.
+* **Picking things off a list**, which is not a SQL idea at all: `Show-MhTuiList` for one of something, `Show-MhTuiCheckList` for the all / only these / all but these choice, `Get-MhTuiSelectionSummary` for the line that says how many will actually be used. Neither picker knows what it is showing - the caller says how to label a row, what to put on the right, and when to grey one out:
 
   ```powershell
-  $db = Show-TuiList -Items $databases -Title 'Which database' -AllowFilter `
+  $db = Show-MhTuiList -Items $databases -Title 'Which database' -AllowFilter `
             -Label { $_.Name } -Detail { $_.State } -Dim { $_.State -ne 'ONLINE' }
 
-  $choice = Show-TuiCheckList -Items $tables -Title 'Tables' -ItemNoun 'table' -Action 'exported' `
+  $choice = Show-MhTuiCheckList -Items $tables -Title 'Tables' -ItemNoun 'table' -Action 'exported' `
                 -Label { "$($_.Schema).$($_.Table)" } -Detail { '{0:N0} rows' -f $_.Rows }
   # -> @{ Mode = 'Include'; Items = @(...); Labels = @('dbo.Orders', ...) }
   ```
 
-  The ticks are held inside the picker rather than written onto your objects, so any list works without being shaped for it, and what comes back are the objects you handed in. `Get-TuiSelectionSummary` is the line at the top - the one that says how many will actually be used - and it is tested on its own.
-* **The string**: `New-SqlConnectSettings`, `New-SqlConnectionString`, `Test-SqlConnectSettings`, `Hide-SqlSecret` (for printing one without its password).
-* **Authentication and drivers**: `Get-SqlAuthMethods`, `Get-SqlAuthAvailability` (asked of the driver, not assumed), `Get-SqlClientNamespace`, `Select-SqlClientNamespace`.
-* **Talking to SQL Server**: `Open-SqlConnection`, `Invoke-SqlQueryTable`, `Get-SqlServerInfo`, `Get-SqlDatabaseList`, `Get-SqlConnectExplanation` (what a failure to connect actually means).
-* **Console plumbing**: `Read-TuiKey`, `ConvertTo-TuiKeys`, `Set-TuiKeyScript`, `Write-Tui`, `Write-TuiTitle`, `Write-TuiKeys`, `Write-TuiField`, `Clear-TuiScreen`, `Add-TuiChar`, `Remove-TuiChar` - enough to write another screen in the same style.
-* `Test-SqlConnectModule` runs the module's own checks and returns the counts; both scripts call it from their `-SelfTest` so there is one copy of those tests rather than two.
+  The ticks are held inside the picker rather than written onto your objects, so any list works without being shaped for it.
+* **Writing another screen in the same style**: `Read-MhTuiKey`, `ConvertTo-MhTuiKeys`, `Set-MhTuiKeyScript`, `Write-MhTui`, `Write-MhTuiTitle`, `Write-MhTuiKeys`, `Write-MhTuiField`, `Clear-MhTuiScreen`, `Add-MhTuiChar`, `Remove-MhTuiChar`.
+* **One command to check everything**: `Invoke-MhSelfTest` runs the module's own checks and every tool's `-SelfTest` - 406 of them at the time of writing - and reports a line per tool. `-Name '*Access*'` narrows it, `-Detailed` shows every check. A tool that will not even start is reported as that tool failing rather than taking the run down with it.
 * Everything drawn goes to the host with `Write-Host`, never to the output stream, so a script built on it can put its own result on the pipeline cleanly.
+
+**The `Tools\*.ps1` scripts are staying.** Copying a single file to a locked-down server is how this estate works, so each one that has moved into the module is now a few lines that import it and call the function - `Get-SqlConnectionString.ps1` is 104 lines of help and three of code. Nothing you or a client currently runs has changed its name or its arguments.
+
+**Still to move**: the other eight tools, one at a time, each with its tests. Until then they keep their own copies of the plumbing and work exactly as they did.
 
 ## Connection string tester (`Tools\Test-SqlConnectionString.ps1`)
 

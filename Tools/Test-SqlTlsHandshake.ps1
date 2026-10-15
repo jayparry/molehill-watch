@@ -90,7 +90,70 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-Add-Type -TypeDefinition @'
+<#
+  The assemblies the probe's C# has to be compiled against.
+
+  Naming them by hand is how this used to be wrong: "System.Net" on .NET Framework is a facade that
+  forwards SslProtocols to System.Net.Primitives, so the compile failed with "the type name
+  'SslProtocols' could not be found" - intermittently, depending on what else had been loaded.
+
+  Asking the runtime where each type lives does not work either, and the reason is worth keeping:
+  on .NET a type like System.Threading.Thread lives in System.Private.CoreLib at run time, and the
+  compiler will not take a reference to that - it wants the reference assembly, System.Threading.
+  Thread.dll, which the type itself never mentions.
+
+  So: on .NET, point the compiler at the framework's own assemblies, which is where the reference
+  assemblies are. On .NET Framework the simple names are enough and always have been.
+#>
+function Get-TlsProbeReferences {
+    if ($PSVersionTable.PSEdition -ne 'Core') {
+        return @('System', 'System.Core', 'System.Net', 'System.Security')
+    }
+
+    $references = New-Object System.Collections.Generic.List[string]
+    $frameworkDir = [System.IO.Path]::GetDirectoryName([object].Assembly.Location)
+    if ($frameworkDir -and (Test-Path -LiteralPath $frameworkDir)) {
+        foreach ($file in (Get-ChildItem -LiteralPath $frameworkDir -Filter 'System*.dll' -ErrorAction SilentlyContinue)) {
+            # never System.Private.*: referencing the implementation assembly alongside the
+            # facades that forward into it is what produces "the type name 'Thread' could not be
+            # found ... this type has been forwarded", with the assembly right there in the list
+            if ($file.Name -like 'System.Private.*') { continue }
+            # the folder holds native libraries as well, and handing one to the compiler is an
+            # error rather than something it ignores: "PE image doesn't contain managed metadata"
+            try { $null = [System.Reflection.AssemblyName]::GetAssemblyName($file.FullName) }
+            catch { continue }
+            $references.Add($file.FullName)
+        }
+        $netstandard = Join-Path $frameworkDir 'netstandard.dll'
+        if (Test-Path -LiteralPath $netstandard) { $references.Add($netstandard) }
+    }
+    if ($references.Count -eq 0) {
+        throw 'Could not find the framework assemblies to compile the TLS probe against.'
+    }
+    $references.ToArray()
+}
+
+<#
+  The C# is a template in one respect only: how to name the cipher that was negotiated.
+
+  SslStream.CipherAlgorithm, CipherStrength and HashAlgorithm are obsolete on .NET and reported as
+  errors rather than warnings, and NegotiatedCipherSuite - which replaces them - does not exist on
+  .NET Framework at all. One line each way, chosen here, rather than a tool that compiles on one
+  edition and not the other. The modern one is the better answer anyway: a suite name like
+  TLS_AES_256_GCM_SHA384 says more than "Aes 256-bit, Sha384".
+#>
+$cipherLine = if ($PSVersionTable.PSEdition -eq 'Core') {
+    'r.Cipher = ssl.NegotiatedCipherSuite.ToString();'
+} else {
+    'r.Cipher = ssl.CipherAlgorithm + " " + ssl.CipherStrength + "-bit, " + ssl.HashAlgorithm;'
+}
+$cipherLineLocal = if ($PSVersionTable.PSEdition -eq 'Core') {
+    'r.Cipher = s.NegotiatedCipherSuite.ToString();'
+} else {
+    'r.Cipher = s.CipherAlgorithm + " " + s.CipherStrength + "-bit";'
+}
+
+$probeSource = @'
 using System;
 using System.IO;
 using System.Net;
@@ -295,14 +358,25 @@ namespace Molehill
                             r.CertFrom = c2.NotBefore;
                             r.CertTo = c2.NotAfter;
                             r.CertSelfSigned = (c2.Subject == c2.Issuer);
-                            try { r.CertKeyBits = c2.PublicKey.Key.KeySize; } catch { r.CertKeyBits = 0; }
+                            r.CertKeyBits = 0;
+                        try {
+                            // PublicKey.Key is obsolete on .NET and an error, not a warning, and
+                            // it only ever understood RSA: an ECDSA certificate threw and came
+                            // back as nought bits
+                            var rsaKey = c2.GetRSAPublicKey();
+                            if (rsaKey != null) { r.CertKeyBits = rsaKey.KeySize; }
+                            else {
+                                var ecKey = c2.GetECDsaPublicKey();
+                                if (ecKey != null) { r.CertKeyBits = ecKey.KeySize; }
+                            }
+                        } catch { r.CertKeyBits = 0; }
                         }
                         return true;      // we are measuring the handshake, not trusting anything
                     });
                 ssl.AuthenticateAsClient(host, null, asked, false);
                 r.Ok = true;
                 r.Negotiated = ssl.SslProtocol.ToString();
-                r.Cipher = ssl.CipherAlgorithm + " " + ssl.CipherStrength + "-bit, " + ssl.HashAlgorithm;
+                /*CIPHER*/
             }
             catch (Exception ex) { r.Error = Innermost(ex); }
             finally { try { tcp.Close(); } catch { } }
@@ -343,7 +417,7 @@ namespace Molehill
                         s.AuthenticateAsClient("molehill-tls-probe", null, clientAsks, false);
                         r.Ok = true;
                         r.Negotiated = s.SslProtocol.ToString();
-                        r.Cipher = s.CipherAlgorithm + " " + s.CipherStrength + "-bit";
+                        /*CIPHER_LOCAL*/
                     }
                 }
             }
@@ -357,7 +431,36 @@ namespace Molehill
         }
     }
 }
-'@ -ReferencedAssemblies System.Net, System.Security
+'@
+$probeSource = $probeSource.Replace('/*CIPHER_LOCAL*/', $cipherLineLocal).Replace('/*CIPHER*/', $cipherLine)
+
+<#
+  The probe is C# because it has to speak TDS and drive the TLS handshake itself, and that C# has
+  to be compiled here.
+
+  Under Windows PowerShell this works and is tested. Under PowerShell 7 it does not yet: the
+  compiler wants reference assemblies rather than the implementation assemblies the runtime loads,
+  and System.Threading.Thread comes back as "forwarded" however it is referenced. Rather than
+  print a page of compiler output, say what it is and where it does work - everything else in this
+  tool, the reasoning about what a result means, is checked by -SelfTest either way.
+#>
+try {
+    Add-Type -TypeDefinition $probeSource -ReferencedAssemblies (Get-TlsProbeReferences) -ErrorAction Stop
+}
+catch {
+    if ($SelfTest) {
+        Write-Host '  NOTE: the handshake probe did not compile in this PowerShell, so only the reasoning is checked.' -ForegroundColor Yellow
+        Write-Host '        Run this tool in Windows PowerShell 5.1 to use it against a server.' -ForegroundColor Gray
+        Write-Host ''
+        $script:ProbeUnavailable = $true
+    }
+    else {
+        Write-Host '  This tool cannot run in this PowerShell: its handshake probe will not compile here.' -ForegroundColor Red
+        Write-Host ("  " + (($_.Exception.Message -split "`r?`n")[0])) -ForegroundColor DarkGray
+        Write-Host '  Run it in Windows PowerShell 5.1 instead - powershell.exe -File .\Test-SqlTlsHandshake.ps1 SERVERNAME' -ForegroundColor Yellow
+        exit 2
+    }
+}
 
 #==============================================================================
 # Helpers

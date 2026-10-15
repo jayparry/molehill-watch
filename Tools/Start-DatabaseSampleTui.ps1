@@ -27,8 +27,8 @@
 
     None of the screens are written here. They come from Molehill.SqlConnect.psm1 beside this
     script: the connect dialog, which Get-SqlConnectionString.ps1 also uses to hand a connection
-    string to the pipeline, and the two pickers - Show-TuiList for one of something and
-    Show-TuiCheckList for the all / only these / all but these choice. What is left in this script
+    string to the pipeline, and the two pickers - Show-MhTuiList for one of something and
+    Show-MhTuiCheckList for the all / only these / all but these choice. What is left in this script
     is the table discovery, the export form, and the order it all happens in.
 
     AUTHENTICATION, AND WHICH DRIVER CAN DO WHAT
@@ -118,15 +118,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# the screen, the authentication matrix and the connection string building all live in the module
-# beside this script, so that anything else can use them too
-$modulePath = Join-Path $PSScriptRoot 'Molehill.SqlConnect.psm1'
-if (-not (Test-Path -LiteralPath $modulePath)) {
-    Write-Host "  Molehill.SqlConnect.psm1 is not next to this script, and it is what draws the connect screen." -ForegroundColor Red
-    Write-Host "  Looked in: $PSScriptRoot" -ForegroundColor Gray
+# the screens, the authentication matrix and the connection string building all live in
+# MolehillTools, so that anything else can use them too
+$manifest = Join-Path $PSScriptRoot '..\MolehillTools\MolehillTools.psd1'
+if (-not (Test-Path -LiteralPath $manifest)) {
+    Write-Host '  MolehillTools is not where this script expects it, and it is what draws the screens.' -ForegroundColor Red
+    Write-Host "  Looked for: $manifest" -ForegroundColor Gray
     exit 2
 }
-Import-Module $modulePath -Force -DisableNameChecking
+Import-Module $manifest -Force
 
 #==============================================================================
 # The tables this database would export
@@ -164,7 +164,7 @@ AND     NOT EXISTS (SELECT 1 FROM sys.extended_properties AS ep
 ORDER BY s.name, o.name
 "@
     }
-    (Invoke-SqlQueryTable -Connection $Connection -Query $query).Rows | ForEach-Object {
+    (Invoke-MhSqlQuery -Connection $Connection -Query $query).Rows | ForEach-Object {
         [pscustomobject]@{ Schema = [string]$_['SchemaName']; Table = [string]$_['TableName']; Rows = [int64]$_['Rows'] }
     }
 }
@@ -180,28 +180,28 @@ function Show-ExportScreen {
     $focus = 0
     $message = ''
     while ($true) {
-        Clear-TuiScreen
-        Write-TuiTitle "Export a sample of [$DatabaseName]"
-        Write-Tui ''
-        Write-TuiField -Label 'Rows per table' -Value $Options.Top -Focused ($fields[$focus] -eq 'Top') -Note 'TOP (n) ... ORDER BY NEWID()'
-        Write-TuiField -Label 'Output folder' -Value $Options.OutputPath -Focused ($fields[$focus] -eq 'OutputPath') `
+        Clear-MhTuiScreen
+        Write-MhTuiTitle "Export a sample of [$DatabaseName]"
+        Write-MhTui ''
+        Write-MhTuiField -Label 'Rows per table' -Value $Options.Top -Focused ($fields[$focus] -eq 'Top') -Note 'TOP (n) ... ORDER BY NEWID()'
+        Write-MhTuiField -Label 'Output folder' -Value $Options.OutputPath -Focused ($fields[$focus] -eq 'OutputPath') `
                        -Note "the zip lands here as $DatabaseName.zip"
-        Write-TuiField -Label 'Read uncommitted' -Value $Options.ReadUncommitted -Focused ($fields[$focus] -eq 'ReadUncommitted') `
+        Write-MhTuiField -Label 'Read uncommitted' -Value $Options.ReadUncommitted -Focused ($fields[$focus] -eq 'ReadUncommitted') `
                        -Note 'no shared locks taken, for a busy production table'
-        Write-TuiField -Label 'Delete folder after zip' -Value $Options.RemoveFolder -Focused ($fields[$focus] -eq 'RemoveFolder')
-        Write-TuiField -Label 'Replace what is there' -Value $Options.Force -Focused ($fields[$focus] -eq 'Force') `
+        Write-MhTuiField -Label 'Delete folder after zip' -Value $Options.RemoveFolder -Focused ($fields[$focus] -eq 'RemoveFolder')
+        Write-MhTuiField -Label 'Replace what is there' -Value $Options.Force -Focused ($fields[$focus] -eq 'Force') `
                        -Note 'overwrite an existing folder and zip of the same name'
-        Write-Tui ''
+        Write-MhTui ''
         $what = switch ($Choice.Mode) {
             'All'     { 'every table' }
             'Include' { "only these $(@($Choice.Labels).Count): " + (@($Choice.Labels) -join ', ') }
             default   { "everything except these $(@($Choice.Labels).Count): " + (@($Choice.Labels) -join ', ') }
         }
-        Write-Tui "  Tables: $what" Cyan
-        if ($message) { Write-Tui ''; Write-Tui "  $message" Yellow }
-        Write-TuiKeys 'Up/Down field   Space toggle   type to edit   F5 export   Esc back'
+        Write-MhTui "  Tables: $what" Cyan
+        if ($message) { Write-MhTui ''; Write-MhTui "  $message" Yellow }
+        Write-MhTuiKeys 'Up/Down field   Space toggle   type to edit   F5 export   Esc back'
 
-        $key = Read-TuiKey
+        $key = Read-MhTuiKey
         $message = ''
         $handled = $true
         switch ($key.Name) {
@@ -210,8 +210,8 @@ function Show-ExportScreen {
             'Escape'    { return $false }
             'Backspace' {
                 switch ($fields[$focus]) {
-                    'Top'        { $Options.Top = [int]((Remove-TuiChar ([string]$Options.Top)) + '0') }
-                    'OutputPath' { $Options.OutputPath = Remove-TuiChar $Options.OutputPath }
+                    'Top'        { $Options.Top = [int]((Remove-MhTuiChar ([string]$Options.Top)) + '0') }
+                    'OutputPath' { $Options.OutputPath = Remove-MhTuiChar $Options.OutputPath }
                 }
             }
             'Spacebar'  {
@@ -244,7 +244,7 @@ function Show-ExportScreen {
                         if ($text.Length -le 9) { $Options.Top = [int]$text }
                     }
                 }
-                'OutputPath' { $Options.OutputPath = Add-TuiChar $Options.OutputPath $key.Char }
+                'OutputPath' { $Options.OutputPath = Add-MhTuiChar $Options.OutputPath $key.Char }
             }
         }
     }
@@ -258,16 +258,9 @@ function Show-ExportScreen {
 # form, and both of those need a server to mean anything.
 #==============================================================================
 if ($SelfTest) {
-    Write-Host 'Start-DatabaseSampleTui self test'
-    Write-Host '  the screens it uses (Molehill.SqlConnect)' -ForegroundColor Gray
-    $module = Test-SqlConnectModule
-    Write-Host ''
-    if ($module.Failed -eq 0) {
-        Write-Host ("All self tests passed{0}." -f $(if ($module.Skipped) { ", $($module.Skipped) skipped" } else { '' })) -ForegroundColor Green
-        exit 0
-    }
-    Write-Host "$($module.Failed) self test(s) failed." -ForegroundColor Red
-    exit 1
+    $results = Invoke-MhSelfTest -ModuleOnly
+    if (@($results | Where-Object { $_.Failed -gt 0 }).Count) { exit 1 }
+    exit 0
 }
 
 #==============================================================================
@@ -284,10 +277,10 @@ if ($UseSystemDataSqlClient -and $UseMicrosoftDataSqlClient) {
     Write-Host '  -UseSystemDataSqlClient and -UseMicrosoftDataSqlClient ask for opposite things.' -ForegroundColor Red
     exit 2
 }
-Set-TuiKeyScript -Script $KeyScript
-$namespace = Select-SqlClientNamespace -PreferSystemData:$UseSystemDataSqlClient -RequireMicrosoftData:$UseMicrosoftDataSqlClient
+Set-MhTuiKeyScript -Script $KeyScript
+$namespace = Select-MhSqlClientNamespace -PreferSystemData:$UseSystemDataSqlClient -RequireMicrosoftData:$UseMicrosoftDataSqlClient
 
-$settings = New-SqlConnectSettings -Namespace $namespace -Server $SqlInstance -Database $Database `
+$settings = New-MhSqlConnectSettings -Namespace $namespace -Server $SqlInstance -Database $Database `
                                    -ApplicationName 'Molehill Export-DatabaseSample'
 $exportOptions = [pscustomobject]@{
     Top = $Top; OutputPath = $OutputPath; ReadUncommitted = $false; RemoveFolder = $false; Force = $false
@@ -295,60 +288,60 @@ $exportOptions = [pscustomobject]@{
 $exitCode = 0
 
 while ($true) {
-    $connected = Show-SqlConnectDialog -Settings $settings
+    $connected = Show-MhSqlConnectDialog -Settings $settings
     if (-not $connected) { Write-Host ''; Write-Host '  Nothing done.' -ForegroundColor Gray; break }
     $connectionString = $connected.ConnectionString
     $info = $connected.ServerInfo
     if ($info.Major -gt 0 -and $info.Major -lt 9) {
-        Write-Tui '  This is SQL Server 2000. The export needs the catalogue views that arrived in 2005, so it will not run against it.' Yellow
+        Write-MhTui '  This is SQL Server 2000. The export needs the catalogue views that arrived in 2005, so it will not run against it.' Yellow
     }
 
     $connection = $null
     try {
-        $connection = Open-SqlConnection -Settings $settings -ConnectionString $connectionString
+        $connection = Open-MhSqlConnection -Settings $settings -ConnectionString $connectionString
 
         # a database has to be settled before the tables can be listed, and the connection string
         # has to be rebuilt for it: Initial Catalog is part of what you were shown
         if (-not $settings.Database) {
-            Write-Tui ''
-            Write-Tui '  Reading the database list...' DarkGray
-            $databases = @(Get-SqlDatabaseList -Connection $connection -Info $info)
-            $chosen = Show-TuiList -Items $databases -Title 'Which database' -AllowFilter `
+            Write-MhTui ''
+            Write-MhTui '  Reading the database list...' DarkGray
+            $databases = @(Get-MhSqlDatabaseList -Connection $connection -Info $info)
+            $chosen = Show-MhTuiList -Items $databases -Title 'Which database' -AllowFilter `
                           -Label { $_.Name } -Detail { if ($_.State -ne 'ONLINE') { $_.State } else { '' } } `
                           -Dim { $_.State -ne 'ONLINE' }
             if (-not $chosen) { $connection.Dispose(); $connection = $null; continue }
             $settings.Database = $chosen.Name
             $connection.Dispose()
-            $connectionString = New-SqlConnectionString -Settings $settings
-            $connection = Open-SqlConnection -Settings $settings -ConnectionString $connectionString
-            $info = Get-SqlServerInfo -Connection $connection
+            $connectionString = New-MhSqlConnectionString -Settings $settings
+            $connection = Open-MhSqlConnection -Settings $settings -ConnectionString $connectionString
+            $info = Get-MhSqlServerInfo -Connection $connection
         }
 
-        Clear-TuiScreen
-        Write-TuiTitle "Reading the tables in [$($settings.Database)]"
+        Clear-MhTuiScreen
+        Write-MhTuiTitle "Reading the tables in [$($settings.Database)]"
         $tables = @(Get-TuiTableList -Connection $connection -Info $info)
         $connection.Dispose()
         $connection = $null
 
         if (@($tables).Count -eq 0) {
-            Write-Tui ''
-            Write-Tui "  [$($settings.Database)] has no user tables to sample." Yellow
-            Write-TuiKeys 'any key to go back'
-            [void](Read-TuiKey)
+            Write-MhTui ''
+            Write-MhTui "  [$($settings.Database)] has no user tables to sample." Yellow
+            Write-MhTuiKeys 'any key to go back'
+            [void](Read-MhTuiKey)
             $settings.Database = ''
             continue
         }
 
-        $choice = Show-TuiCheckList -Items $tables -Title "Tables in [$($settings.Database)]" `
+        $choice = Show-MhTuiCheckList -Items $tables -Title "Tables in [$($settings.Database)]" `
                        -Label { "$($_.Schema).$($_.Table)" } -Detail { '{0:N0} rows' -f $_.Rows } `
                        -ItemNoun 'table' -Action 'exported'
         if (-not $choice) { $settings.Database = ''; continue }
 
         if (-not (Show-ExportScreen -Options $exportOptions -Choice $choice -DatabaseName $settings.Database)) { continue }
 
-        Clear-TuiScreen
-        Write-TuiTitle "Exporting [$($settings.Database)]"
-        Write-Tui ''
+        Clear-MhTuiScreen
+        Write-MhTuiTitle "Exporting [$($settings.Database)]"
+        Write-MhTui ''
         $engineArgs = @{
             ConnectionString = $connectionString
             Database         = $settings.Database
@@ -368,14 +361,14 @@ while ($true) {
             if ($result -and $result.Failed -gt 0) { $exitCode = 1 }
         }
         catch {
-            Write-Tui ''
-            Write-Tui "  The export stopped: $(($_.Exception.GetBaseException().Message -split "`r?`n")[0])" Red
+            Write-MhTui ''
+            Write-MhTui "  The export stopped: $(($_.Exception.GetBaseException().Message -split "`r?`n")[0])" Red
             $exitCode = 1
         }
 
-        Write-Tui ''
-        Write-TuiKeys 'any key for the connect screen, Esc to finish'
-        if ((Read-TuiKey).Name -eq 'Escape') { break }
+        Write-MhTui ''
+        Write-MhTuiKeys 'any key for the connect screen, Esc to finish'
+        if ((Read-MhTuiKey).Name -eq 'Escape') { break }
     }
     finally {
         if ($connection) { $connection.Dispose() }

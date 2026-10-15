@@ -1,44 +1,15 @@
 <#
-    Molehill.SqlConnect
+    The connect screen, the pickers and everything behind them.
 
-    The connect-to-SQL-Server screen, on its own, so that anything can use it.
-
-    Why a module rather than more copied code: the connect screen, the authentication matrix and
-    the connection string building were written for the sample export, and none of it is about
-    sampling. Get-SqlConnectionString.ps1 shows the screen and hands the string to the pipeline;
-    Start-DatabaseSampleTui.ps1 shows the same screen and then goes on to pick tables. Anything
-    else that needs a connection can do either.
-
-    Import it by path, because it lives beside the scripts rather than in a module folder:
-
-        Import-Module (Join-Path $PSScriptRoot 'Molehill.SqlConnect.psm1')
-
-    WHAT IS IN HERE
-      The screen          Show-SqlConnectDialog, Show-SqlConnectForm, Show-SqlConnectOptions
-      The settings        New-SqlConnectSettings, Test-SqlConnectSettings
-      The string          New-SqlConnectionString, Hide-SqlSecret
-      Authentication      Get-SqlAuthMethods, Get-SqlAuthMethod, Get-SqlAuthAvailability
-      The driver          Get-SqlClientNamespace, Select-SqlClientNamespace
-      Talking to SQL      Open-SqlConnection, Invoke-SqlQueryTable, Get-SqlServerInfo,
-                          Get-SqlDatabaseList, Get-SqlConnectExplanation
-      Console plumbing    Read-TuiKey, ConvertTo-TuiKeys, Set-TuiKeyScript, Write-Tui,
-                          Write-TuiTitle, Write-TuiKeys, Write-TuiField, Clear-TuiScreen,
-                          Get-TuiScreenWidth, Add-TuiChar, Remove-TuiChar
-      Its own tests       Test-SqlConnectModule
-
-    Everything drawn goes to the host with Write-Host, never to the output stream, so a script
-    built on this can put its result on the pipeline and nothing else.
-
-    Molehill Data Services.
+    This is the whole of what used to be Tools\Molehill.SqlConnect.psm1. It sits in Private
+    because the manifest decides what leaves the module; the functions named there with an Mh
+    prefix are exported from here unchanged.
 #>
-
-# No Set-StrictMode here on purpose: every function in this module was written and tested without
-# it, and turning it on now would change how they behave in paths the tests do not reach.
 
 #==============================================================================
 # The keyboard
 #
-# Every key a screen reads comes through Read-TuiKey, which either reads the console or takes the
+# Every key a screen reads comes through Read-MhTuiKey, which either reads the console or takes the
 # next key off a scripted list. That is what makes the screens testable at all: a console read
 # cannot be faked from outside, so the only way to walk them without a person sitting there is to
 # hand them keys.
@@ -52,14 +23,14 @@ $script:Scripted = $false
   While a script is loaded the screens also stop clearing the console, so the whole walk can be
   read afterwards, and a screen that runs out of keys leaves rather than hanging.
 #>
-function Set-TuiKeyScript {
+function Set-MhTuiKeyScript {
     [CmdletBinding()]
     param([AllowEmptyCollection()] [string[]] $Script)
 
     $script:KeyQueue.Clear()
     $script:Scripted = $false
     if (-not $Script -or @($Script).Count -eq 0) { return }
-    foreach ($key in (ConvertTo-TuiKeys $Script)) { $script:KeyQueue.Enqueue($key) }
+    foreach ($key in (ConvertTo-MhTuiKeys $Script)) { $script:KeyQueue.Enqueue($key) }
     $script:Scripted = $true
 }
 function New-TuiKey([string] $Name, [char] $Char = [char]0) {
@@ -72,7 +43,7 @@ function New-TuiKey([string] $Name, [char] $Char = [char]0) {
   a character at a time, which is what a person does; anything else one character long is that
   character.
 #>
-function ConvertTo-TuiKeys {
+function ConvertTo-MhTuiKeys {
     [CmdletBinding()]
     param([AllowEmptyCollection()] [string[]] $Script)
 
@@ -101,7 +72,7 @@ function ConvertTo-TuiKeys {
     }
     $keys.ToArray()
 }
-function Read-TuiKey {
+function Read-MhTuiKey {
     if ($script:KeyQueue.Count -gt 0) { return $script:KeyQueue.Dequeue() }
     if ($script:Scripted) { return New-TuiKey 'Escape' }   # the script ran out: leave rather than hang
     $pressed = [Console]::ReadKey($true)
@@ -128,24 +99,24 @@ function Get-TuiScreenWidth {
     if (-not $script:HasConsole) { return 100 }
     try { return [math]::Max(80, [math]::Min(120, [Console]::WindowWidth - 1)) } catch { return 100 }
 }
-function Clear-TuiScreen {
+function Clear-MhTuiScreen {
     if ($script:HasConsole -and -not $script:Scripted) { try { [Console]::Clear() } catch { } }
     else { Write-Host '' }
 }
-function Write-Tui([string] $Text = '', [ConsoleColor] $Colour = [ConsoleColor]::Gray) {
+function Write-MhTui([string] $Text = '', [ConsoleColor] $Colour = [ConsoleColor]::Gray) {
     Write-Host $Text -ForegroundColor $Colour
 }
-function Write-TuiTitle([string] $Text) {
+function Write-MhTuiTitle([string] $Text) {
     $width = Get-TuiScreenWidth
-    Write-Tui ('=' * $width) Cyan
-    Write-Tui ("  $Text") Cyan
-    Write-Tui ('=' * $width) Cyan
+    Write-MhTui ('=' * $width) Cyan
+    Write-MhTui ("  $Text") Cyan
+    Write-MhTui ('=' * $width) Cyan
 }
-function Write-TuiKeys([string] $Text) {
-    Write-Tui ('-' * (Get-TuiScreenWidth)) DarkGray
-    Write-Tui "  $Text" DarkGray
+function Write-MhTuiKeys([string] $Text) {
+    Write-MhTui ('-' * (Get-TuiScreenWidth)) DarkGray
+    Write-MhTui "  $Text" DarkGray
 }
-function Write-TuiField {
+function Write-MhTuiField {
     param(
         [Parameter(Mandatory)][string] $Label,
         [AllowEmptyString()][string] $Value,
@@ -159,19 +130,19 @@ function Write-TuiField {
     $colour = if (-not $Enabled) { [ConsoleColor]::DarkGray }
               elseif ($Focused) { [ConsoleColor]::White }
               else { [ConsoleColor]::Gray }
-    Write-Tui $line $colour
-    if ($Note) { Write-Tui ('   {0,-26}{1}' -f '', $Note) DarkGray }
+    Write-MhTui $line $colour
+    if ($Note) { Write-MhTui ('   {0,-26}{1}' -f '', $Note) DarkGray }
 }
 
 #==============================================================================
 # Editing a field
 #==============================================================================
-function Add-TuiChar {
+function Add-MhTuiChar {
     param([AllowEmptyString()] [string] $Value, [char] $Char)
     if ([int]$Char -lt 32 -or [int]$Char -eq 127) { return $Value }
     return $Value + $Char
 }
-function Remove-TuiChar {
+function Remove-MhTuiChar {
     param([AllowEmptyString()] [string] $Value)
     if (-not $Value) { return '' }
     return $Value.Substring(0, $Value.Length - 1)
@@ -222,7 +193,7 @@ function Select-TuiRows {
   except what is ticked - so ticking all of them is a way of asking for nothing, and the screen
   needs to say so before Enter rather than after.
 #>
-function Get-TuiSelectionSummary {
+function Get-MhTuiSelectionSummary {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [ValidateSet('All', 'Include', 'Exclude')] [string] $Mode,
@@ -277,7 +248,7 @@ function New-TuiRows {
   Returns the item the caller gave, not a copy of it, so the caller gets its own object back with
   whatever else was on it. Esc gives back nothing.
 #>
-function Show-TuiList {
+function Show-MhTuiList {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $Items,
@@ -297,16 +268,16 @@ function Show-TuiList {
         $visible = @(Select-TuiRows -Rows $rows -Filter $filter)
         if ($index -ge $visible.Count) { $index = [math]::Max(0, $visible.Count - 1) }
 
-        Clear-TuiScreen
-        Write-TuiTitle $Title
-        Write-Tui ''
+        Clear-MhTuiScreen
+        Write-MhTuiTitle $Title
+        Write-MhTui ''
         if ($filtering -or $filter) {
-            Write-Tui ("  Filter: '{0}'{1} - {2} of {3} shown" -f $filter,
+            Write-MhTui ("  Filter: '{0}'{1} - {2} of {3} shown" -f $filter,
                        $(if ($filtering) { ' (typing; Enter or Esc to stop)' } else { '' }),
                        $visible.Count, $rows.Count) $(if ($filtering) { [ConsoleColor]::Yellow } else { [ConsoleColor]::DarkGray })
-            Write-Tui ''
+            Write-MhTui ''
         }
-        if ($visible.Count -eq 0) { Write-Tui '    nothing matches that filter' DarkGray }
+        if ($visible.Count -eq 0) { Write-MhTui '    nothing matches that filter' DarkGray }
 
         $first = [math]::Max(0, [math]::Min($index - [int]($Window / 2), $visible.Count - $Window))
         if ($first -lt 0) { $first = 0 }
@@ -314,23 +285,23 @@ function Show-TuiList {
             $row = $visible[$i]
             $marker = if ($i -eq $index) { '>' } else { ' ' }
             $colour = if ($i -eq $index) { [ConsoleColor]::White } elseif ($row.Dim) { [ConsoleColor]::DarkGray } else { [ConsoleColor]::Gray }
-            Write-Tui ('  {0} {1,-50} {2}' -f $marker, $row.Text, $row.Detail) $colour
+            Write-MhTui ('  {0} {1,-50} {2}' -f $marker, $row.Text, $row.Detail) $colour
         }
-        Write-Tui ''
-        Write-Tui ("  {0} of {1}" -f $(if ($visible.Count) { $index + 1 } else { 0 }), $visible.Count) DarkGray
-        if ($filtering) { Write-TuiKeys 'type to narrow the list   Backspace   Enter or Esc to stop filtering' }
-        elseif ($AllowFilter) { Write-TuiKeys 'Up/Down   F7 filter   Enter choose   Esc back' }
-        else { Write-TuiKeys 'Up/Down   Enter choose   Esc back' }
+        Write-MhTui ''
+        Write-MhTui ("  {0} of {1}" -f $(if ($visible.Count) { $index + 1 } else { 0 }), $visible.Count) DarkGray
+        if ($filtering) { Write-MhTuiKeys 'type to narrow the list   Backspace   Enter or Esc to stop filtering' }
+        elseif ($AllowFilter) { Write-MhTuiKeys 'Up/Down   F7 filter   Enter choose   Esc back' }
+        else { Write-MhTuiKeys 'Up/Down   Enter choose   Esc back' }
 
-        $key = Read-TuiKey
+        $key = Read-MhTuiKey
         if ($filtering) {
             switch ($key.Name) {
                 'Enter'     { $filtering = $false }
                 'Escape'    { $filtering = $false; $filter = ''; $index = 0 }
-                'Backspace' { $filter = Remove-TuiChar $filter; $index = 0 }
+                'Backspace' { $filter = Remove-MhTuiChar $filter; $index = 0 }
                 'UpArrow'   { $index = [math]::Max(0, $index - 1) }
                 'DownArrow' { $index = [math]::Min([math]::Max(0, $visible.Count - 1), $index + 1) }
-                default     { if ($key.Char) { $filter = Add-TuiChar $filter $key.Char; $index = 0 } }
+                default     { if ($key.Char) { $filter = Add-MhTuiChar $filter $key.Char; $index = 0 } }
             }
             continue
         }
@@ -355,7 +326,7 @@ function Show-TuiList {
   Gives back the mode and the items ticked - the caller's own objects, and their labels - leaving
   it to the caller to turn that into whatever its tool takes. Esc gives back nothing.
 #>
-function Show-TuiCheckList {
+function Show-MhTuiCheckList {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $Items,
@@ -376,19 +347,19 @@ function Show-TuiCheckList {
         $visible = @(Select-TuiRows -Rows $rows -Filter $filter)
         if ($index -ge $visible.Count) { $index = [math]::Max(0, $visible.Count - 1) }
         $ticked = @($rows | Where-Object { $_.Ticked }).Count
-        $summary = Get-TuiSelectionSummary -Mode $mode -Total $rows.Count -Ticked $ticked -ItemNoun $ItemNoun -Action $Action
+        $summary = Get-MhTuiSelectionSummary -Mode $mode -Total $rows.Count -Ticked $ticked -ItemNoun $ItemNoun -Action $Action
 
-        Clear-TuiScreen
-        Write-TuiTitle $Title
-        Write-Tui ''
-        Write-Tui ('  Mode: ' + $summary.Text) $(if ($summary.Count -eq 0) { [ConsoleColor]::Red } else { [ConsoleColor]::Green })
+        Clear-MhTuiScreen
+        Write-MhTuiTitle $Title
+        Write-MhTui ''
+        Write-MhTui ('  Mode: ' + $summary.Text) $(if ($summary.Count -eq 0) { [ConsoleColor]::Red } else { [ConsoleColor]::Green })
         if ($filtering -or $filter) {
-            Write-Tui ("  Filter: '{0}'{1} - {2} of {3} shown" -f $filter,
+            Write-MhTui ("  Filter: '{0}'{1} - {2} of {3} shown" -f $filter,
                        $(if ($filtering) { ' (typing; Enter or Esc to stop)' } else { '' }),
                        $visible.Count, $rows.Count) $(if ($filtering) { [ConsoleColor]::Yellow } else { [ConsoleColor]::DarkGray })
         }
-        Write-Tui ''
-        if ($visible.Count -eq 0) { Write-Tui '    nothing matches that filter' DarkGray }
+        Write-MhTui ''
+        if ($visible.Count -eq 0) { Write-MhTui '    nothing matches that filter' DarkGray }
 
         $first = [math]::Max(0, [math]::Min($index - [int]($Window / 2), $visible.Count - $Window))
         if ($first -lt 0) { $first = 0 }
@@ -399,25 +370,25 @@ function Show-TuiCheckList {
             $colour = if ($i -eq $index) { [ConsoleColor]::White }
                       elseif ($row.Dim -or ($mode -eq 'Exclude' -and $row.Ticked)) { [ConsoleColor]::DarkGray }
                       else { [ConsoleColor]::Gray }
-            Write-Tui ('  {0} {1} {2,-50} {3,14}' -f $marker, $box, $row.Text, $row.Detail) $colour
+            Write-MhTui ('  {0} {1} {2,-50} {3,14}' -f $marker, $box, $row.Text, $row.Detail) $colour
         }
-        Write-Tui ''
-        Write-Tui ("  {0} of {1} listed" -f $(if ($visible.Count) { $index + 1 } else { 0 }), $visible.Count) DarkGray
-        if ($message) { Write-Tui "  $message" Yellow }
-        if ($filtering) { Write-TuiKeys 'type to narrow the list   Backspace   Enter or Esc to stop filtering' }
-        else { Write-TuiKeys "Up/Down   Space tick   F2 mode (All/Include/Exclude)   F3 all shown   F4 none   F6 invert shown   F7 filter   Enter continue   Esc back" }
+        Write-MhTui ''
+        Write-MhTui ("  {0} of {1} listed" -f $(if ($visible.Count) { $index + 1 } else { 0 }), $visible.Count) DarkGray
+        if ($message) { Write-MhTui "  $message" Yellow }
+        if ($filtering) { Write-MhTuiKeys 'type to narrow the list   Backspace   Enter or Esc to stop filtering' }
+        else { Write-MhTuiKeys "Up/Down   Space tick   F2 mode (All/Include/Exclude)   F3 all shown   F4 none   F6 invert shown   F7 filter   Enter continue   Esc back" }
 
-        $key = Read-TuiKey
+        $key = Read-MhTuiKey
         $message = ''
 
         if ($filtering) {
             switch ($key.Name) {
                 'Enter'     { $filtering = $false }
                 'Escape'    { $filtering = $false; $filter = ''; $index = 0 }
-                'Backspace' { $filter = Remove-TuiChar $filter; $index = 0 }
+                'Backspace' { $filter = Remove-MhTuiChar $filter; $index = 0 }
                 'UpArrow'   { $index = [math]::Max(0, $index - 1) }
                 'DownArrow' { $index = [math]::Min([math]::Max(0, $visible.Count - 1), $index + 1) }
-                default     { if ($key.Char) { $filter = Add-TuiChar $filter $key.Char; $index = 0 } }
+                default     { if ($key.Char) { $filter = Add-MhTuiChar $filter $key.Char; $index = 0 } }
             }
             continue
         }
@@ -488,7 +459,7 @@ function Show-TuiCheckList {
 #==============================================================================
 # Which driver, and what it can do
 #==============================================================================
-function Get-SqlClientNamespace {
+function Get-MhSqlClientNamespace {
     param([switch] $Microsoft)
 
     if (-not $Microsoft) { return 'System.Data.SqlClient' }
@@ -538,7 +509,7 @@ $script:AuthMethods = @(
   of which is which and hoping it stays true, each keyword is set on a throwaway builder and the
   ones that throw are marked unavailable.
 #>
-function Get-SqlAuthAvailability {
+function Get-MhSqlAuthAvailability {
     [CmdletBinding()]
     param([Parameter(Mandatory)] [string] $Namespace)
 
@@ -577,7 +548,7 @@ function Get-SqlAuthUnavailableReason {
   method and Encrypt = Strict; System.Data.SqlClient when it is not, because it needs nothing
   installed and is the only one that will talk to SQL Server 2000 or 2005.
 #>
-function Select-SqlClientNamespace {
+function Select-MhSqlClientNamespace {
     [CmdletBinding()]
     param([switch] $PreferSystemData, [switch] $RequireMicrosoftData, [switch] $Quiet)
 
@@ -587,7 +558,7 @@ function Select-SqlClientNamespace {
         (Get-Module -ListAvailable SqlServer -ErrorAction SilentlyContinue) -and -not $Quiet) {
         Write-Host '  Loading the SqlServer module for Microsoft.Data.SqlClient...' -ForegroundColor DarkGray
     }
-    $wanted = Get-SqlClientNamespace -Microsoft
+    $wanted = Get-MhSqlClientNamespace -Microsoft
     if ($wanted) { return $wanted }
 
     if (-not $Quiet) {
@@ -605,7 +576,7 @@ function Select-SqlClientNamespace {
 }
 
 # the methods, in the order and under the names SSMS uses
-function Get-SqlAuthMethods { , $script:AuthMethods }
+function Get-MhSqlAuthMethods { , $script:AuthMethods }
 
 #==============================================================================
 # The connection string
@@ -622,7 +593,7 @@ $script:EncryptChoices = @{
   Microsoft.Data.SqlClient, so its default has to come from the namespace rather than be a
   constant - which is also why changing driver on the screen resets it.
 #>
-function New-SqlConnectSettings {
+function New-MhSqlConnectSettings {
     [CmdletBinding()]
     param(
         [string] $Namespace = 'System.Data.SqlClient',
@@ -655,7 +626,7 @@ function New-SqlConnectSettings {
   The connection string for these settings, built by the driver's own builder so that what is
   shown is exactly what will be used - including the driver's own spelling of the keywords.
 #>
-function New-SqlConnectionString {
+function New-MhSqlConnectionString {
     [CmdletBinding()]
     param([Parameter(Mandatory)] $Settings)
 
@@ -684,12 +655,12 @@ function New-SqlConnectionString {
 
     $builder.ConnectionString
 }
-function Hide-SqlSecret {
+function Hide-MhSqlSecret {
     [CmdletBinding()]
     param([AllowEmptyString()] [string] $ConnectionString)
     [regex]::Replace($ConnectionString, '(?i)(password\s*=\s*)("(?:[^"]|"")*"|''(?:[^'']|'''')*''|[^;]*)', '$1********')
 }
-function Test-SqlConnectSettings {
+function Test-MhSqlConnectSettings {
     [CmdletBinding()]
     param([Parameter(Mandatory)] $Settings)
 
@@ -717,64 +688,64 @@ function Show-SqlConnectForm {
     $focus = 0
     $showSecret = $false
     $message = ''
-    $availability = Get-SqlAuthAvailability -Namespace $Settings.Namespace
+    $availability = Get-MhSqlAuthAvailability -Namespace $Settings.Namespace
 
     while ($true) {
         $method = Get-SqlAuthMethod $Settings.AuthId
-        Clear-TuiScreen
-        Write-TuiTitle 'Connect to Server'
-        Write-Tui ''
-        Write-Tui ('   {0,-26}{1}' -f 'Server type:', 'Database Engine') DarkGray
-        Write-TuiField -Label 'Server name' -Value $Settings.Server -Focused ($fields[$focus] -eq 'Server') `
+        Clear-MhTuiScreen
+        Write-MhTuiTitle 'Connect to Server'
+        Write-MhTui ''
+        Write-MhTui ('   {0,-26}{1}' -f 'Server type:', 'Database Engine') DarkGray
+        Write-MhTuiField -Label 'Server name' -Value $Settings.Server -Focused ($fields[$focus] -eq 'Server') `
                        -Note 'SQLPROD01, SQLPROD01\INST2, SQL01,14330, myserver.database.windows.net'
         $authNote = $method.Hint
         if (-not $availability[$method.Id]) { $authNote = 'NOT AVAILABLE: ' + (Get-SqlAuthUnavailableReason -Namespace $Settings.Namespace) }
-        Write-TuiField -Label 'Authentication' -Value ("$($method.Name)   (left/right to change)") `
+        Write-MhTuiField -Label 'Authentication' -Value ("$($method.Name)   (left/right to change)") `
                        -Focused ($fields[$focus] -eq 'Auth') -Note $authNote
 
         $userLabel = if ($method.Id -eq 'EntraServicePrincipal') { 'Application id' }
                      elseif ($method.Id -eq 'EntraManagedIdentity') { 'Client id (optional)' }
                      else { 'User name' }
         $userValue = if ($method.Id -eq 'Windows') { "$([Environment]::UserDomainName)\$([Environment]::UserName)" } else { $Settings.User }
-        Write-TuiField -Label $userLabel -Value $userValue -Focused ($fields[$focus] -eq 'User') `
+        Write-MhTuiField -Label $userLabel -Value $userValue -Focused ($fields[$focus] -eq 'User') `
                        -Enabled ($method.User -ne 'none')
 
         if ($method.Secret -eq 'token') {
             $shown = if ($showSecret) { $Settings.Token } else { '*' * [math]::Min(32, $Settings.Token.Length) }
-            Write-TuiField -Label 'Access token' -Value $shown -Focused ($fields[$focus] -eq 'Password') `
+            Write-MhTuiField -Label 'Access token' -Value $shown -Focused ($fields[$focus] -eq 'Password') `
                            -Note 'paste it; S shows it'
         }
         else {
             $secretLabel = if ($method.Id -eq 'EntraServicePrincipal') { 'Client secret' } else { 'Password' }
             $shown = if ($showSecret) { $Settings.Password } else { '*' * $Settings.Password.Length }
-            Write-TuiField -Label $secretLabel -Value $shown -Focused ($fields[$focus] -eq 'Password') `
+            Write-MhTuiField -Label $secretLabel -Value $shown -Focused ($fields[$focus] -eq 'Password') `
                            -Enabled ($method.Secret -eq 'password')
         }
-        Write-TuiField -Label 'Database' -Value $Settings.Database -Focused ($fields[$focus] -eq 'Database') `
+        Write-MhTuiField -Label 'Database' -Value $Settings.Database -Focused ($fields[$focus] -eq 'Database') `
                        -Note 'leave blank to pick from a list once connected'
 
-        Write-Tui ''
-        Write-Tui "   Driver:               $($Settings.Namespace)" DarkGray
-        Write-Tui ("   Encryption:           Encrypt = {0}, TrustServerCertificate = {1}{2}" -f
+        Write-MhTui ''
+        Write-MhTui "   Driver:               $($Settings.Namespace)" DarkGray
+        Write-MhTui ("   Encryption:           Encrypt = {0}, TrustServerCertificate = {1}{2}" -f
                    $Settings.Encrypt, $Settings.TrustCert,
                    $(if ($Settings.HostNameInCert) { ", HostNameInCertificate = $($Settings.HostNameInCert)" } else { '' })) DarkGray
 
-        Write-Tui ''
-        Write-Tui '  Connection string' Cyan
+        Write-MhTui ''
+        Write-MhTui '  Connection string' Cyan
         $connectionString = ''
         $buildError = ''
-        try { $connectionString = New-SqlConnectionString -Settings $Settings }
+        try { $connectionString = New-MhSqlConnectionString -Settings $Settings }
         catch { $buildError = $_.Exception.GetBaseException().Message }
-        if ($buildError) { Write-Tui "    cannot be built: $buildError" Red }
+        if ($buildError) { Write-MhTui "    cannot be built: $buildError" Red }
         else {
-            $display = if ($showSecret) { $connectionString } else { Hide-SqlSecret $connectionString }
-            foreach ($chunk in ($display -split '(?<=;)' | Where-Object { $_ })) { Write-Tui "    $chunk" Yellow }
+            $display = if ($showSecret) { $connectionString } else { Hide-MhSqlSecret $connectionString }
+            foreach ($chunk in ($display -split '(?<=;)' | Where-Object { $_ })) { Write-MhTui "    $chunk" Yellow }
         }
 
-        if ($message) { Write-Tui ''; Write-Tui "  $message" Yellow }
-        Write-TuiKeys 'Up/Down field   Left/Right change   type to edit   F2 options   F3 driver   F4 show secrets   F6 copy string   F5 connect   Esc quit'
+        if ($message) { Write-MhTui ''; Write-MhTui "  $message" Yellow }
+        Write-MhTuiKeys 'Up/Down field   Left/Right change   type to edit   F2 options   F3 driver   F4 show secrets   F6 copy string   F5 connect   Esc quit'
 
-        $key = Read-TuiKey
+        $key = Read-MhTuiKey
         $message = ''
         $handled = $true
         switch ($key.Name) {
@@ -786,14 +757,14 @@ function Show-SqlConnectForm {
             'F2'         { Show-SqlConnectOptions -Settings $Settings }
             'F3'         {
                 $wanted = if ($Settings.Namespace -eq 'System.Data.SqlClient') { 'Microsoft.Data.SqlClient' } else { 'System.Data.SqlClient' }
-                $got = Get-SqlClientNamespace -Microsoft:($wanted -eq 'Microsoft.Data.SqlClient')
+                $got = Get-MhSqlClientNamespace -Microsoft:($wanted -eq 'Microsoft.Data.SqlClient')
                 if (-not $got) {
                     $message = 'Microsoft.Data.SqlClient is not here. Run: Install-Module SqlServer -Scope CurrentUser (in this edition of PowerShell), then start this again.'
                 }
                 else {
                     $Settings.Namespace = $got
                     $Settings.Encrypt = $script:EncryptChoices[$got][0]
-                    $availability = Get-SqlAuthAvailability -Namespace $got
+                    $availability = Get-MhSqlAuthAvailability -Namespace $got
                 }
             }
             'F4'         { $showSecret = -not $showSecret }
@@ -803,10 +774,10 @@ function Show-SqlConnectForm {
             }
             'Backspace'  {
                 switch ($fields[$focus]) {
-                    'Server'   { $Settings.Server = Remove-TuiChar $Settings.Server }
-                    'User'     { $Settings.User = Remove-TuiChar $Settings.User }
-                    'Password' { if ($method.Secret -eq 'token') { $Settings.Token = Remove-TuiChar $Settings.Token } else { $Settings.Password = Remove-TuiChar $Settings.Password } }
-                    'Database' { $Settings.Database = Remove-TuiChar $Settings.Database }
+                    'Server'   { $Settings.Server = Remove-MhTuiChar $Settings.Server }
+                    'User'     { $Settings.User = Remove-MhTuiChar $Settings.User }
+                    'Password' { if ($method.Secret -eq 'token') { $Settings.Token = Remove-MhTuiChar $Settings.Token } else { $Settings.Password = Remove-MhTuiChar $Settings.Password } }
+                    'Database' { $Settings.Database = Remove-MhTuiChar $Settings.Database }
                 }
             }
             'LeftArrow'  {
@@ -830,7 +801,7 @@ function Show-SqlConnectForm {
                 $message = "$($method.Name) is not available on this driver. " + (Get-SqlAuthUnavailableReason -Namespace $Settings.Namespace)
                 continue
             }
-            $missing = Test-SqlConnectSettings -Settings $Settings
+            $missing = Test-MhSqlConnectSettings -Settings $Settings
             if ($missing.Count) { $message = 'Still needs: ' + ($missing -join ', '); continue }
             return $connectionString
         }
@@ -842,13 +813,13 @@ function Show-SqlConnectForm {
         $char = if ($key.Char) { [string]$key.Char } else { '' }
         if ($char) {
             switch ($fields[$focus]) {
-                'Server'   { $Settings.Server = Add-TuiChar $Settings.Server $key.Char }
-                'User'     { if ($method.User -ne 'none') { $Settings.User = Add-TuiChar $Settings.User $key.Char } }
+                'Server'   { $Settings.Server = Add-MhTuiChar $Settings.Server $key.Char }
+                'User'     { if ($method.User -ne 'none') { $Settings.User = Add-MhTuiChar $Settings.User $key.Char } }
                 'Password' {
-                    if ($method.Secret -eq 'token') { $Settings.Token = Add-TuiChar $Settings.Token $key.Char }
-                    elseif ($method.Secret -eq 'password') { $Settings.Password = Add-TuiChar $Settings.Password $key.Char }
+                    if ($method.Secret -eq 'token') { $Settings.Token = Add-MhTuiChar $Settings.Token $key.Char }
+                    elseif ($method.Secret -eq 'password') { $Settings.Password = Add-MhTuiChar $Settings.Password $key.Char }
                 }
-                'Database' { $Settings.Database = Add-TuiChar $Settings.Database $key.Char }
+                'Database' { $Settings.Database = Add-MhTuiChar $Settings.Database $key.Char }
                 'Auth'     {
                     # jump to the first method whose name starts with that letter, as a dropdown does
                     $match = @($script:AuthMethods | Where-Object { $_.Name.StartsWith($char, [StringComparison]::OrdinalIgnoreCase) })
@@ -865,25 +836,25 @@ function Show-SqlConnectOptions {
     $fields = @('Encrypt', 'TrustCert', 'HostNameInCert', 'TimeoutSeconds', 'ApplicationName', 'ReadOnlyIntent', 'MultiSubnet')
     $focus = 0
     while ($true) {
-        Clear-TuiScreen
-        Write-TuiTitle 'Connection Properties'
-        Write-Tui ''
+        Clear-MhTuiScreen
+        Write-MhTuiTitle 'Connection Properties'
+        Write-MhTui ''
         $choices = $script:EncryptChoices[$Settings.Namespace]
-        Write-TuiField -Label 'Encrypt' -Value ($Settings.Encrypt + '   (' + ($choices -join ' / ') + ')') -Focused ($fields[$focus] -eq 'Encrypt') `
+        Write-MhTuiField -Label 'Encrypt' -Value ($Settings.Encrypt + '   (' + ($choices -join ' / ') + ')') -Focused ($fields[$focus] -eq 'Encrypt') `
                        -Note $(if ($Settings.Namespace -eq 'Microsoft.Data.SqlClient') { 'Strict is TDS 8, for SQL Server 2022 and later' } else { 'the login packet is always encrypted whatever this says' })
-        Write-TuiField -Label 'Trust server certificate' -Value $Settings.TrustCert -Focused ($fields[$focus] -eq 'TrustCert') `
+        Write-MhTuiField -Label 'Trust server certificate' -Value $Settings.TrustCert -Focused ($fields[$focus] -eq 'TrustCert') `
                        -Note 'needed for a self-signed certificate, which is most on-premises instances'
-        Write-TuiField -Label 'Host name in certificate' -Value $Settings.HostNameInCert -Focused ($fields[$focus] -eq 'HostNameInCert') `
+        Write-MhTuiField -Label 'Host name in certificate' -Value $Settings.HostNameInCert -Focused ($fields[$focus] -eq 'HostNameInCert') `
                        -Enabled ($Settings.Namespace -eq 'Microsoft.Data.SqlClient') -Note 'when the name you connect by is not the name on the certificate'
-        Write-TuiField -Label 'Connect timeout (s)' -Value $Settings.TimeoutSeconds -Focused ($fields[$focus] -eq 'TimeoutSeconds')
-        Write-TuiField -Label 'Application name' -Value $Settings.ApplicationName -Focused ($fields[$focus] -eq 'ApplicationName') `
+        Write-MhTuiField -Label 'Connect timeout (s)' -Value $Settings.TimeoutSeconds -Focused ($fields[$focus] -eq 'TimeoutSeconds')
+        Write-MhTuiField -Label 'Application name' -Value $Settings.ApplicationName -Focused ($fields[$focus] -eq 'ApplicationName') `
                        -Note 'what the DBA sees in sys.dm_exec_sessions'
-        Write-TuiField -Label 'Read-only intent' -Value $Settings.ReadOnlyIntent -Focused ($fields[$focus] -eq 'ReadOnlyIntent') `
+        Write-MhTuiField -Label 'Read-only intent' -Value $Settings.ReadOnlyIntent -Focused ($fields[$focus] -eq 'ReadOnlyIntent') `
                        -Note 'routes to a readable secondary in an availability group'
-        Write-TuiField -Label 'Multi-subnet failover' -Value $Settings.MultiSubnet -Focused ($fields[$focus] -eq 'MultiSubnet')
-        Write-TuiKeys 'Up/Down field   Left/Right or Space change   type to edit text   F5 or Esc back'
+        Write-MhTuiField -Label 'Multi-subnet failover' -Value $Settings.MultiSubnet -Focused ($fields[$focus] -eq 'MultiSubnet')
+        Write-MhTuiKeys 'Up/Down field   Left/Right or Space change   type to edit text   F5 or Esc back'
 
-        $key = Read-TuiKey
+        $key = Read-MhTuiKey
         if ($key.Name -in 'Escape', 'Enter', 'F5') { return }
         $handled = $true
         switch ($key.Name) {
@@ -891,9 +862,9 @@ function Show-SqlConnectOptions {
             'DownArrow' { $focus = [math]::Min($fields.Count - 1, $focus + 1) }
             'Backspace' {
                 switch ($fields[$focus]) {
-                    'HostNameInCert'  { $Settings.HostNameInCert = Remove-TuiChar $Settings.HostNameInCert }
-                    'ApplicationName' { $Settings.ApplicationName = Remove-TuiChar $Settings.ApplicationName }
-                    'TimeoutSeconds'  { $Settings.TimeoutSeconds = [int]((Remove-TuiChar ([string]$Settings.TimeoutSeconds)) + '0') }
+                    'HostNameInCert'  { $Settings.HostNameInCert = Remove-MhTuiChar $Settings.HostNameInCert }
+                    'ApplicationName' { $Settings.ApplicationName = Remove-MhTuiChar $Settings.ApplicationName }
+                    'TimeoutSeconds'  { $Settings.TimeoutSeconds = [int]((Remove-MhTuiChar ([string]$Settings.TimeoutSeconds)) + '0') }
                 }
             }
             default     { $handled = $false }
@@ -918,8 +889,8 @@ function Show-SqlConnectOptions {
 
         if ($key.Char) {
             switch ($fields[$focus]) {
-                'HostNameInCert'  { if ($Settings.Namespace -eq 'Microsoft.Data.SqlClient') { $Settings.HostNameInCert = Add-TuiChar $Settings.HostNameInCert $key.Char } }
-                'ApplicationName' { $Settings.ApplicationName = Add-TuiChar $Settings.ApplicationName $key.Char }
+                'HostNameInCert'  { if ($Settings.Namespace -eq 'Microsoft.Data.SqlClient') { $Settings.HostNameInCert = Add-MhTuiChar $Settings.HostNameInCert $key.Char } }
+                'ApplicationName' { $Settings.ApplicationName = Add-MhTuiChar $Settings.ApplicationName $key.Char }
                 'TimeoutSeconds'  {
                     if ([char]::IsDigit($key.Char)) {
                         $text = ([string]$Settings.TimeoutSeconds) + $key.Char
@@ -934,7 +905,7 @@ function Show-SqlConnectOptions {
 #==============================================================================
 # Talking to the server
 #==============================================================================
-function Open-SqlConnection {
+function Open-MhSqlConnection {
     [CmdletBinding()]
     param([Parameter(Mandatory)] $Settings, [Parameter(Mandatory)] [string] $ConnectionString)
 
@@ -943,7 +914,7 @@ function Open-SqlConnection {
     $connection.Open()
     $connection
 }
-function Invoke-SqlQueryTable {
+function Invoke-MhSqlQuery {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [System.Data.Common.DbConnection] $Connection,
@@ -964,10 +935,10 @@ function Invoke-SqlQueryTable {
     }
     , $table
 }
-function Get-SqlServerInfo {
+function Get-MhSqlServerInfo {
     param([Parameter(Mandatory)] [System.Data.Common.DbConnection] $Connection)
 
-    $table = Invoke-SqlQueryTable -Connection $Connection -Query @'
+    $table = Invoke-MhSqlQuery -Connection $Connection -Query @'
 SELECT  EngineEdition   = CAST(SERVERPROPERTY('EngineEdition') AS int),
         ProductVersion  = CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(128)),
         Edition         = CAST(SERVERPROPERTY('Edition') AS nvarchar(128)),
@@ -988,7 +959,7 @@ SELECT  EngineEdition   = CAST(SERVERPROPERTY('EngineEdition') AS int),
         CurrentDatabase = [string]$row['CurrentDatabase']
     }
 }
-function Get-SqlDatabaseList {
+function Get-MhSqlDatabaseList {
     param([Parameter(Mandatory)] [System.Data.Common.DbConnection] $Connection, [Parameter(Mandatory)] $Info)
 
     if ($Info.EngineEdition -eq 5) {
@@ -1006,11 +977,11 @@ WHERE database_id = 1 OR database_id > 4
 ORDER BY name
 "@
     }
-    (Invoke-SqlQueryTable -Connection $Connection -Query $query).Rows | ForEach-Object {
+    (Invoke-MhSqlQuery -Connection $Connection -Query $query).Rows | ForEach-Object {
         [pscustomobject]@{ Name = [string]$_['Name']; State = [string]$_['State'] }
     }
 }
-function Get-SqlConnectExplanation {
+function Get-MhSqlConnectExplanation {
     [CmdletBinding()]
     param([Parameter(Mandatory)] [AllowEmptyString()] [string] $Message, [Parameter(Mandatory)] $Settings)
 
@@ -1054,7 +1025,7 @@ function Get-SqlConnectExplanation {
   -SkipTest returns the string as typed, without connecting, for when the string is the whole
   point and the server is somewhere else.
 #>
-function Show-SqlConnectDialog {
+function Show-MhSqlConnectDialog {
     [CmdletBinding()]
     param([Parameter(Mandatory)] $Settings, [switch] $SkipTest)
 
@@ -1073,16 +1044,16 @@ function Show-SqlConnectDialog {
 
         $connection = $null
         try {
-            Clear-TuiScreen
-            Write-TuiTitle 'Connecting'
-            Write-Tui ''
-            Write-Tui ("  {0} as {1}, via {2}" -f $Settings.Server, $method.Name, $Settings.Namespace)
-            $connection = Open-SqlConnection -Settings $Settings -ConnectionString $connectionString
-            $info = Get-SqlServerInfo -Connection $connection
-            Write-Tui ''
-            Write-Tui ("  Connected to {0}" -f $info.ServerName) Green
-            Write-Tui ("  {0} {1} ({2})" -f $info.Platform, $info.Version, $info.Edition)
-            Write-Tui ("  signed in as {0}, database [{1}]" -f $info.LoggedInAs, $info.CurrentDatabase)
+            Clear-MhTuiScreen
+            Write-MhTuiTitle 'Connecting'
+            Write-MhTui ''
+            Write-MhTui ("  {0} as {1}, via {2}" -f $Settings.Server, $method.Name, $Settings.Namespace)
+            $connection = Open-MhSqlConnection -Settings $Settings -ConnectionString $connectionString
+            $info = Get-MhSqlServerInfo -Connection $connection
+            Write-MhTui ''
+            Write-MhTui ("  Connected to {0}" -f $info.ServerName) Green
+            Write-MhTui ("  {0} {1} ({2})" -f $info.Platform, $info.Version, $info.Edition)
+            Write-MhTui ("  signed in as {0}, database [{1}]" -f $info.LoggedInAs, $info.CurrentDatabase)
             return [pscustomobject]@{
                 ConnectionString = $connectionString; Settings = $Settings
                 Namespace = $Settings.Namespace; AuthMethod = $method.Name
@@ -1091,13 +1062,13 @@ function Show-SqlConnectDialog {
         }
         catch {
             $message = $_.Exception.GetBaseException().Message
-            Write-Tui ''
-            Write-Tui ("  Could not connect: {0}" -f (($message -split "`r?`n")[0])) Red
-            $explain = Get-SqlConnectExplanation -Message $message -Settings $Settings
-            if ($explain) { Write-Tui "  $explain" Yellow }
-            Write-Tui ''
-            Write-TuiKeys 'any key to go back to the connect screen, Esc to give up'
-            if ((Read-TuiKey).Name -eq 'Escape') { return $null }
+            Write-MhTui ''
+            Write-MhTui ("  Could not connect: {0}" -f (($message -split "`r?`n")[0])) Red
+            $explain = Get-MhSqlConnectExplanation -Message $message -Settings $Settings
+            if ($explain) { Write-MhTui "  $explain" Yellow }
+            Write-MhTui ''
+            Write-MhTuiKeys 'any key to go back to the connect screen, Esc to give up'
+            if ((Read-MhTuiKey).Name -eq 'Escape') { return $null }
         }
         finally { if ($connection) { $connection.Dispose() } }
     }
@@ -1111,7 +1082,7 @@ function Show-SqlConnectDialog {
   secrets are masked, the keystroke handling, what the form insists on, and how a failure to
   connect is explained. Both scripts that use this module call it from their own -SelfTest.
 #>
-function Test-SqlConnectModule {
+function Test-ConnectLayer {
     [CmdletBinding()]
     param()
 
@@ -1128,58 +1099,58 @@ function Test-SqlConnectModule {
         $script:skipped++
     }
     function Settings([hashtable] $Change) {
-        $s = New-SqlConnectSettings
+        $s = New-MhSqlConnectSettings
         foreach ($key in $Change.Keys) { $s.$key = $Change[$key] }
         $s
     }
 
 
     Write-Host '  the keyboard' -ForegroundColor Gray
-    Check 'a named key' ((ConvertTo-TuiKeys @('Down'))[0].Name -eq 'DownArrow')
-    Check 'however it is spelled' ((ConvertTo-TuiKeys @('DOWN'))[0].Name -eq 'DownArrow')
-    Check 'enter' ((ConvertTo-TuiKeys @('Enter'))[0].Name -eq 'Enter')
-    Check 'escape' ((ConvertTo-TuiKeys @('Esc'))[0].Name -eq 'Escape')
+    Check 'a named key' ((ConvertTo-MhTuiKeys @('Down'))[0].Name -eq 'DownArrow')
+    Check 'however it is spelled' ((ConvertTo-MhTuiKeys @('DOWN'))[0].Name -eq 'DownArrow')
+    Check 'enter' ((ConvertTo-MhTuiKeys @('Enter'))[0].Name -eq 'Enter')
+    Check 'escape' ((ConvertTo-MhTuiKeys @('Esc'))[0].Name -eq 'Escape')
     Check 'space carries its character' (
-        ((ConvertTo-TuiKeys @('Space'))[0].Name -eq 'Spacebar') -and ((ConvertTo-TuiKeys @('Space'))[0].Char -eq ' '))
-    Check 'typed text becomes one key per character' ((ConvertTo-TuiKeys @('text:Sales')).Count -eq 5)
-    Check 'and keeps the characters' ((-join (ConvertTo-TuiKeys @('text:Sales')).Char) -eq 'Sales')
-    Check 'a single character is itself' ((ConvertTo-TuiKeys @('x'))[0].Char -eq 'x')
-    Check 'a list is taken in order' ((-join (ConvertTo-TuiKeys @('text:ab', 'Enter', 'c')).Name) -match 'CharacterCharacterEnterCharacter')
-    Check 'nothing is nothing' ((ConvertTo-TuiKeys @()).Count -eq 0)
+        ((ConvertTo-MhTuiKeys @('Space'))[0].Name -eq 'Spacebar') -and ((ConvertTo-MhTuiKeys @('Space'))[0].Char -eq ' '))
+    Check 'typed text becomes one key per character' ((ConvertTo-MhTuiKeys @('text:Sales')).Count -eq 5)
+    Check 'and keeps the characters' ((-join (ConvertTo-MhTuiKeys @('text:Sales')).Char) -eq 'Sales')
+    Check 'a single character is itself' ((ConvertTo-MhTuiKeys @('x'))[0].Char -eq 'x')
+    Check 'a list is taken in order' ((-join (ConvertTo-MhTuiKeys @('text:ab', 'Enter', 'c')).Name) -match 'CharacterCharacterEnterCharacter')
+    Check 'nothing is nothing' ((ConvertTo-MhTuiKeys @()).Count -eq 0)
     $threw = $false
-    try { [void](ConvertTo-TuiKeys @('Wingding')) } catch { $threw = $true }
+    try { [void](ConvertTo-MhTuiKeys @('Wingding')) } catch { $threw = $true }
     Check 'a key it does not know is refused, not guessed at' $threw
     Check 'the function keys the screens use' (
-        (-join (ConvertTo-TuiKeys @('F2', 'F3', 'F4', 'F5', 'F6', 'F7')).Name) -eq 'F2F3F4F5F6F7')
-    Check 'and a letter is still just a letter' ((ConvertTo-TuiKeys @('D'))[0].Name -eq 'Character')
+        (-join (ConvertTo-MhTuiKeys @('F2', 'F3', 'F4', 'F5', 'F6', 'F7')).Name) -eq 'F2F3F4F5F6F7')
+    Check 'and a letter is still just a letter' ((ConvertTo-MhTuiKeys @('D'))[0].Name -eq 'Character')
 
     Write-Host '  editing a field' -ForegroundColor Gray
-    Check 'a character is added' ((Add-TuiChar 'SQL' 'A') -eq 'SQLA')
-    Check 'a control character is not' ((Add-TuiChar 'SQL' ([char]9)) -eq 'SQL')
-    Check 'backspace removes one' ((Remove-TuiChar 'SQL') -eq 'SQ')
-    Check 'and stops at empty' ((Remove-TuiChar '') -eq '')
+    Check 'a character is added' ((Add-MhTuiChar 'SQL' 'A') -eq 'SQLA')
+    Check 'a control character is not' ((Add-MhTuiChar 'SQL' ([char]9)) -eq 'SQL')
+    Check 'backspace removes one' ((Remove-MhTuiChar 'SQL') -eq 'SQ')
+    Check 'and stops at empty' ((Remove-MhTuiChar '') -eq '')
 
     Write-Host '  the connection string it builds' -ForegroundColor Gray
-    $windows = New-SqlConnectionString -Settings (Settings @{ Server = 'SQL01'; Database = 'Sales'; AuthId = 'Windows' })
+    $windows = New-MhSqlConnectionString -Settings (Settings @{ Server = 'SQL01'; Database = 'Sales'; AuthId = 'Windows' })
     Check 'Windows authentication is integrated security' ($windows -match 'Integrated Security=True')
     Check 'with the server' ($windows -match 'Data Source=SQL01')
     Check 'and the database' ($windows -match 'Initial Catalog=Sales')
     Check 'and no user name' ($windows -notmatch 'User ID')
-    $sql = New-SqlConnectionString -Settings (Settings @{ Server = 'SQL01'; AuthId = 'Sql'; User = 'sa'; Password = 'p@ss;word' })
+    $sql = New-MhSqlConnectionString -Settings (Settings @{ Server = 'SQL01'; AuthId = 'Sql'; User = 'sa'; Password = 'p@ss;word' })
     Check 'a SQL login carries its user' ($sql -match 'User ID=sa')
     Check 'and its password, quoted because of the semicolon' ($sql -match 'Password="p@ss;word"')
     Check 'and is not integrated security' ($sql -notmatch 'Integrated Security=True')
-    $token = New-SqlConnectionString -Settings (Settings @{ Server = 'x.database.windows.net'; AuthId = 'Token' })
+    $token = New-MhSqlConnectionString -Settings (Settings @{ Server = 'x.database.windows.net'; AuthId = 'Token' })
     Check 'an access token puts nothing in the string' (($token -notmatch 'Authentication') -and ($token -notmatch 'User ID') -and ($token -notmatch 'Password'))
-    $named = New-SqlConnectionString -Settings (Settings @{ Server = 'SQL01'; ApplicationName = 'Molehill TUI'; TimeoutSeconds = 45 })
+    $named = New-MhSqlConnectionString -Settings (Settings @{ Server = 'SQL01'; ApplicationName = 'Molehill TUI'; TimeoutSeconds = 45 })
     Check 'the application name goes in' ($named -match 'Application Name="?Molehill TUI"?')
     Check 'and the timeout' ($named -match 'Connect Timeout=45')
-    $plain = New-SqlConnectionString -Settings (Settings @{ Server = 'SQL01'; Encrypt = 'No'; TrustCert = $false })
+    $plain = New-MhSqlConnectionString -Settings (Settings @{ Server = 'SQL01'; Encrypt = 'No'; TrustCert = $false })
     Check 'encryption can be turned off on this driver' ($plain -match 'Encrypt=False')
     Check 'and trust with it' ($plain -match 'TrustServerCertificate=False')
 
     Write-Host '  the Entra methods, where the driver has them' -ForegroundColor Gray
-    $available = Get-SqlAuthAvailability -Namespace 'System.Data.SqlClient'
+    $available = Get-MhSqlAuthAvailability -Namespace 'System.Data.SqlClient'
     Check 'every method gets an answer' ($available.Count -eq $script:AuthMethods.Count)
     Check 'Windows is always there' ($available['Windows'])
     Check 'so is SQL' ($available['Sql'])
@@ -1187,50 +1158,50 @@ function Test-SqlConnectModule {
     foreach ($id in 'EntraMfa', 'EntraPassword', 'EntraIntegrated') {
         $method = Get-SqlAuthMethod $id
         if ($available[$id]) {
-            $built = New-SqlConnectionString -Settings (Settings @{ Server = 'x.database.windows.net'; AuthId = $id; User = 'me@contoso.com'; Password = 'pw' })
+            $built = New-MhSqlConnectionString -Settings (Settings @{ Server = 'x.database.windows.net'; AuthId = $id; User = 'me@contoso.com'; Password = 'pw' })
             Check "$($method.Name) names its keyword" ($built -match [regex]::Escape($method.Keyword))
         }
         else { Skip "$($method.Name)" 'not on System.Data.SqlClient in this PowerShell' }
     }
-    $mdsNamespace = Get-SqlClientNamespace -Microsoft
+    $mdsNamespace = Get-MhSqlClientNamespace -Microsoft
     if ($mdsNamespace) {
-        $mdsAvailable = Get-SqlAuthAvailability -Namespace $mdsNamespace
+        $mdsAvailable = Get-MhSqlAuthAvailability -Namespace $mdsNamespace
         foreach ($id in 'EntraServicePrincipal', 'EntraManagedIdentity', 'EntraDeviceCode', 'EntraDefault') {
             $method = Get-SqlAuthMethod $id
             if (-not $mdsAvailable[$id]) { Skip "$($method.Name) on Microsoft.Data.SqlClient" 'this build does not have it'; continue }
-            $built = New-SqlConnectionString -Settings (Settings @{ Namespace = $mdsNamespace; Server = 'x.database.windows.net'; AuthId = $id; User = 'appid'; Password = 'secret'; Encrypt = 'Mandatory' })
+            $built = New-MhSqlConnectionString -Settings (Settings @{ Namespace = $mdsNamespace; Server = 'x.database.windows.net'; AuthId = $id; User = 'appid'; Password = 'secret'; Encrypt = 'Mandatory' })
             Check "$($method.Name) builds on Microsoft.Data.SqlClient" ($built -match 'Authentication=')
         }
-        $strict = New-SqlConnectionString -Settings (Settings @{ Namespace = $mdsNamespace; Server = 'SQL01'; Encrypt = 'Strict'; HostNameInCert = 'sql01.contoso.com' })
+        $strict = New-MhSqlConnectionString -Settings (Settings @{ Namespace = $mdsNamespace; Server = 'SQL01'; Encrypt = 'Strict'; HostNameInCert = 'sql01.contoso.com' })
         Check 'Encrypt = Strict is accepted there' ($strict -match 'Encrypt=Strict')
         Check 'and a host name in the certificate' ($strict -match 'Host Name In Certificate=sql01\.contoso\.com')
     }
     else { Skip 'Microsoft.Data.SqlClient' 'the SqlServer module is not available in this PowerShell' }
 
     Write-Host '  keeping the password off the screen' -ForegroundColor Gray
-    Check 'a password is masked' ((Hide-SqlSecret 'Data Source=x;Password=hunter2;Encrypt=True') -eq 'Data Source=x;Password=********;Encrypt=True')
-    Check 'a quoted one too' ((Hide-SqlSecret 'Password="p;w";Encrypt=True') -eq 'Password=********;Encrypt=True')
-    Check 'however it is spelled' ((Hide-SqlSecret 'password=abc') -eq 'password=********')
-    Check 'and nothing else is touched' ((Hide-SqlSecret 'Data Source=x;User ID=sa') -eq 'Data Source=x;User ID=sa')
+    Check 'a password is masked' ((Hide-MhSqlSecret 'Data Source=x;Password=hunter2;Encrypt=True') -eq 'Data Source=x;Password=********;Encrypt=True')
+    Check 'a quoted one too' ((Hide-MhSqlSecret 'Password="p;w";Encrypt=True') -eq 'Password=********;Encrypt=True')
+    Check 'however it is spelled' ((Hide-MhSqlSecret 'password=abc') -eq 'password=********')
+    Check 'and nothing else is touched' ((Hide-MhSqlSecret 'Data Source=x;User ID=sa') -eq 'Data Source=x;User ID=sa')
 
     Write-Host '  what it insists on before connecting' -ForegroundColor Gray
-    Check 'a server name' ((Test-SqlConnectSettings -Settings (Settings @{ })) -contains 'a server name')
-    Check 'a user for SQL authentication' ((Test-SqlConnectSettings -Settings (Settings @{ Server = 'x'; AuthId = 'Sql' })) -contains 'a user name')
-    Check 'and a password' ((Test-SqlConnectSettings -Settings (Settings @{ Server = 'x'; AuthId = 'Sql'; User = 'sa' })) -contains 'a password')
+    Check 'a server name' ((Test-MhSqlConnectSettings -Settings (Settings @{ })) -contains 'a server name')
+    Check 'a user for SQL authentication' ((Test-MhSqlConnectSettings -Settings (Settings @{ Server = 'x'; AuthId = 'Sql' })) -contains 'a user name')
+    Check 'and a password' ((Test-MhSqlConnectSettings -Settings (Settings @{ Server = 'x'; AuthId = 'Sql'; User = 'sa' })) -contains 'a password')
     Check 'the application id for a service principal' (
-        (Test-SqlConnectSettings -Settings (Settings @{ Server = 'x'; AuthId = 'EntraServicePrincipal' })) -contains 'the application id, in the user box')
-    Check 'a token when that is the method' ((Test-SqlConnectSettings -Settings (Settings @{ Server = 'x'; AuthId = 'Token' })) -contains 'an access token')
-    Check 'Windows authentication needs nothing else' ((Test-SqlConnectSettings -Settings (Settings @{ Server = 'x' })).Count -eq 0)
-    Check 'and Entra integrated needs nothing else' ((Test-SqlConnectSettings -Settings (Settings @{ Server = 'x'; AuthId = 'EntraIntegrated' })).Count -eq 0)
+        (Test-MhSqlConnectSettings -Settings (Settings @{ Server = 'x'; AuthId = 'EntraServicePrincipal' })) -contains 'the application id, in the user box')
+    Check 'a token when that is the method' ((Test-MhSqlConnectSettings -Settings (Settings @{ Server = 'x'; AuthId = 'Token' })) -contains 'an access token')
+    Check 'Windows authentication needs nothing else' ((Test-MhSqlConnectSettings -Settings (Settings @{ Server = 'x' })).Count -eq 0)
+    Check 'and Entra integrated needs nothing else' ((Test-MhSqlConnectSettings -Settings (Settings @{ Server = 'x'; AuthId = 'EntraIntegrated' })).Count -eq 0)
 
     Write-Host '  the three ways to pick things off a list' -ForegroundColor Gray
-    Check 'all means all' ((Get-TuiSelectionSummary -Mode All -Total 10 -Ticked 0).Count -eq 10)
-    Check 'and says so, in the caller words' ((Get-TuiSelectionSummary -Mode All -Total 10 -Ticked 3 -ItemNoun 'table' -Action 'exported').Text -match 'all 10 tables will be exported')
-    Check 'include takes what is ticked' ((Get-TuiSelectionSummary -Mode Include -Total 10 -Ticked 3).Count -eq 3)
-    Check 'exclude takes the rest' ((Get-TuiSelectionSummary -Mode Exclude -Total 10 -Ticked 3).Count -eq 7)
-    Check 'excluding everything leaves nothing' ((Get-TuiSelectionSummary -Mode Exclude -Total 10 -Ticked 10).Count -eq 0)
-    Check 'including nothing leaves nothing' ((Get-TuiSelectionSummary -Mode Include -Total 10 -Ticked 0).Count -eq 0)
-    Check 'one of a kind is not pluralised' ((Get-TuiSelectionSummary -Mode All -Total 1 -ItemNoun 'database').Text -match 'all 1 database will be')
+    Check 'all means all' ((Get-MhTuiSelectionSummary -Mode All -Total 10 -Ticked 0).Count -eq 10)
+    Check 'and says so, in the caller words' ((Get-MhTuiSelectionSummary -Mode All -Total 10 -Ticked 3 -ItemNoun 'table' -Action 'exported').Text -match 'all 10 tables will be exported')
+    Check 'include takes what is ticked' ((Get-MhTuiSelectionSummary -Mode Include -Total 10 -Ticked 3).Count -eq 3)
+    Check 'exclude takes the rest' ((Get-MhTuiSelectionSummary -Mode Exclude -Total 10 -Ticked 3).Count -eq 7)
+    Check 'excluding everything leaves nothing' ((Get-MhTuiSelectionSummary -Mode Exclude -Total 10 -Ticked 10).Count -eq 0)
+    Check 'including nothing leaves nothing' ((Get-MhTuiSelectionSummary -Mode Include -Total 10 -Ticked 0).Count -eq 0)
+    Check 'one of a kind is not pluralised' ((Get-MhTuiSelectionSummary -Mode All -Total 1 -ItemNoun 'database').Text -match 'all 1 database will be')
 
     $sample = @(
         [pscustomobject]@{ Schema = 'dbo'; Table = 'Orders'; Rows = 100 }
@@ -1255,32 +1226,17 @@ function Test-SqlConnectModule {
     Check 'and a list with no label block falls back to the object itself' ((@(New-TuiRows -Items @('SQL01')))[0].Text -eq 'SQL01')
 
     Write-Host '  explaining a failure to connect' -ForegroundColor Gray
-    $s = New-SqlConnectSettings
-    Check 'a refused login is not blamed on the network' ((Get-SqlConnectExplanation -Message "Login failed for user 'sa'." -Settings $s) -match 'refused')
+    $s = New-MhSqlConnectSettings
+    Check 'a refused login is not blamed on the network' ((Get-MhSqlConnectExplanation -Message "Login failed for user 'sa'." -Settings $s) -match 'refused')
     Check 'a handshake failure mentions the certificate switch' (
-        (Get-SqlConnectExplanation -Message 'A connection was successfully established ... pre-login handshake' -Settings (Settings @{ TrustCert = $false })) -match 'Trust server certificate')
-    Check 'and sends you to the TLS tool' ((Get-SqlConnectExplanation -Message 'pre-login handshake' -Settings $s) -match 'Test-SqlTlsHandshake')
-    Check 'a timeout blames the firewall, not the password' ((Get-SqlConnectExplanation -Message 'Connection Timeout Expired' -Settings $s) -match 'firewall')
-    Check 'a name that does not resolve is explained' ((Get-SqlConnectExplanation -Message 'The network path was not found.' -Settings $s) -match 'did not resolve')
-    Check 'and a named instance is pointed at SQL Browser' ((Get-SqlConnectExplanation -Message 'error: 26 - Error Locating Server/Instance Specified, server was not found' -Settings $s) -match 'SQL Browser')
-    Check 'an SSPI failure is not called a bad password' ((Get-SqlConnectExplanation -Message 'The target principal name is incorrect. Cannot generate SSPI context.' -Settings $s) -match 'Kerberos')
-    Check 'an unknown error explains nothing rather than guessing' ((Get-SqlConnectExplanation -Message 'Something odd' -Settings $s) -eq '')
+        (Get-MhSqlConnectExplanation -Message 'A connection was successfully established ... pre-login handshake' -Settings (Settings @{ TrustCert = $false })) -match 'Trust server certificate')
+    Check 'and sends you to the TLS tool' ((Get-MhSqlConnectExplanation -Message 'pre-login handshake' -Settings $s) -match 'Test-SqlTlsHandshake')
+    Check 'a timeout blames the firewall, not the password' ((Get-MhSqlConnectExplanation -Message 'Connection Timeout Expired' -Settings $s) -match 'firewall')
+    Check 'a name that does not resolve is explained' ((Get-MhSqlConnectExplanation -Message 'The network path was not found.' -Settings $s) -match 'did not resolve')
+    Check 'and a named instance is pointed at SQL Browser' ((Get-MhSqlConnectExplanation -Message 'error: 26 - Error Locating Server/Instance Specified, server was not found' -Settings $s) -match 'SQL Browser')
+    Check 'an SSPI failure is not called a bad password' ((Get-MhSqlConnectExplanation -Message 'The target principal name is incorrect. Cannot generate SSPI context.' -Settings $s) -match 'Kerberos')
+    Check 'an unknown error explains nothing rather than guessing' ((Get-MhSqlConnectExplanation -Message 'Something odd' -Settings $s) -eq '')
 
     Write-Host ''
     [pscustomobject]@{ Failed = $script:failed; Skipped = $script:skipped }
 }
-
-Export-ModuleMember -Function @(
-    'Show-SqlConnectDialog', 'Show-SqlConnectForm', 'Show-SqlConnectOptions',
-    'New-SqlConnectSettings', 'Test-SqlConnectSettings',
-    'New-SqlConnectionString', 'Hide-SqlSecret',
-    'Get-SqlAuthMethods', 'Get-SqlAuthMethod', 'Get-SqlAuthAvailability', 'Get-SqlAuthUnavailableReason',
-    'Get-SqlClientNamespace', 'Select-SqlClientNamespace',
-    'Open-SqlConnection', 'Invoke-SqlQueryTable', 'Get-SqlServerInfo', 'Get-SqlDatabaseList',
-    'Get-SqlConnectExplanation',
-    'Read-TuiKey', 'ConvertTo-TuiKeys', 'New-TuiKey', 'Set-TuiKeyScript',
-    'Show-TuiList', 'Show-TuiCheckList', 'Get-TuiSelectionSummary', 'Select-TuiRows', 'New-TuiRows',
-    'Write-Tui', 'Write-TuiTitle', 'Write-TuiKeys', 'Write-TuiField',
-    'Clear-TuiScreen', 'Get-TuiScreenWidth', 'Add-TuiChar', 'Remove-TuiChar',
-    'Test-SqlConnectModule'
-)
