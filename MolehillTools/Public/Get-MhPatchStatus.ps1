@@ -296,32 +296,62 @@ function ConvertFrom-PatchBigJson([string]$Text) {
     return ,$ser.DeserializeObject($Text)
 }
 
+<#
+  Pulls the build rows out of the rendered article: one section per product, five cells per row.
+
+  Separate from the downloading so that it can be checked against a sample of the page without a
+  network, which is the only part of this that is ours to get wrong.
+#>
+function Get-PatchSqlBuildsFromHtml([string] $Html) {
+    $culture = [Globalization.CultureInfo]::InvariantCulture
+    $rows = New-Object System.Collections.Generic.List[object]
+
+    # one section per product, from its heading to the next heading of any kind
+    $headings = [regex]::Matches($Html, '<h([23])[^>]*id="sql-server-(\d{4})(-r2)?"[^>]*>')
+    for ($h = 0; $h -lt $headings.Count; $h++) {
+        $year = [int]$headings[$h].Groups[2].Value
+        $isR2 = [bool]$headings[$h].Groups[3].Value
+        $product = if ($isR2 -or $year -lt 2012) { $null } else { "SQL Server $year" }
+        if (-not $product) { continue }
+
+        $from = $headings[$h].Index + $headings[$h].Length
+        $next = [regex]::Match($Html.Substring($from), '<h[23][^>]*>')
+        $section = if ($next.Success) { $Html.Substring($from, $next.Index) } else { $Html.Substring($from) }
+
+        foreach ($row in [regex]::Matches($section, '<tr>\s*<td.*?</tr>', 'Singleline')) {
+            $cells = @([regex]::Matches($row.Value, '<td[^>]*>(.*?)</td>', 'Singleline') | ForEach-Object {
+                ($_.Groups[1].Value -replace '<br\s*/?>', ' ' -replace '<[^>]+>', '' -replace '&amp;', '&' -replace '&nbsp;', ' ' -replace '\s+', ' ').Trim()
+            })
+            if ($cells.Count -lt 5 -or $cells[0] -notmatch '^\d+\.\d+\.\d+\.\d+$') { continue }
+
+            $v = $cells[0].Split('.')
+            $update = $cells[2] -replace '\[([^\]]*)\]\([^)]*\)', '$1'
+            $kb = if ($cells[3] -match 'KB\s*(\d+)') { $Matches[1] } elseif ($cells[3] -match '(\d{6,7})') { $Matches[1] } else { $null }
+            $date = $null; $parsed = [datetime]::MinValue
+            if ([datetime]::TryParseExact(($cells[4] -replace '\s+', ' '), [string[]]@('MMMM dd, yyyy', 'MMMM d, yyyy'), $culture, 'None', [ref]$parsed)) { $date = $parsed.ToString('yyyy-MM-dd') }
+            $cu = if ($update -match '\bCU\s*(\d+)') { [int]$Matches[1] } else { $null }
+            $rows.Add([pscustomobject]@{
+                Product = 'SQL Server'; ProductName = $product; Major = [int]$v[0]; Minor = [int]$v[1]; BuildNumber = [int]$v[2]; Revision = [int]$v[3]
+                ServicePack = $cells[1]; UpdateName = $update; CuNumber = $cu; KB = $kb; ReleaseDate = $date; Source = 'Microsoft SQL Server build list'
+            })
+        }
+    }
+    return $rows.ToArray()
+}
+
 function Get-PatchSqlServerBuilds {
     Write-Host 'Downloading SQL Server build list from Microsoft...'
-    $lines = (Get-PatchReferenceText 'https://raw.githubusercontent.com/MicrosoftDocs/SupportArticles-docs/main/support/sql/releases/download-and-install-latest-updates.md') -split "`r?`n"
-    $culture = [Globalization.CultureInfo]::InvariantCulture
-    $product = $null
+    <#
+      The markdown this used to read is gone: the article's source moved into a private authoring
+      repository, so raw.githubusercontent.com returns 404 for it. The rendered article is the only
+      public copy of the complete version list now, and its tables have the same five columns in
+      the same order - build, service pack, update, KB, release date - so only the reading of them
+      changed, not what is made of them.
+    #>
+    $html = Get-PatchReferenceText 'https://learn.microsoft.com/en-us/troubleshoot/sql/releases/download-and-install-latest-updates'
     $rows = New-Object System.Collections.Generic.List[object]
-    foreach ($line in $lines) {
-        if ($line -match '^###\s+SQL Server (\d{4})(\s+R2)?\s*$') {
-            $product = if ($Matches[2] -or [int]$Matches[1] -lt 2012) { $null } else { "SQL Server $($Matches[1])" }
-            continue
-        }
-        if ($line -match '^##\s') { $product = $null; continue }
-        if (-not $product -or $line -notmatch '^\|\s*(\d+)\.(\d+)\.(\d+)\.(\d+)\s*\|') { continue }
-        $cells = $line.Trim().Trim('|') -split '\|' | ForEach-Object { $_.Trim() }
-        if ($cells.Count -lt 5) { continue }
-        $v = $cells[0].Split('.')
-        $update = $cells[2] -replace '\[([^\]]*)\]\([^)]*\)', '$1'
-        $kb = if ($cells[3] -match 'KB\s*(\d+)') { $Matches[1] } elseif ($cells[3] -match '(\d{6,7})') { $Matches[1] } else { $null }
-        $date = $null; $parsed = [datetime]::MinValue
-        if ([datetime]::TryParseExact(($cells[4] -replace '\s+', ' '), [string[]]@('MMMM dd, yyyy', 'MMMM d, yyyy'), $culture, 'None', [ref]$parsed)) { $date = $parsed.ToString('yyyy-MM-dd') }
-        $cu = if ($update -match '\bCU\s*(\d+)') { [int]$Matches[1] } else { $null }
-        $rows.Add([pscustomobject]@{
-            Product = 'SQL Server'; ProductName = $product; Major = [int]$v[0]; Minor = [int]$v[1]; BuildNumber = [int]$v[2]; Revision = [int]$v[3]
-            ServicePack = $cells[1]; UpdateName = $update; CuNumber = $cu; KB = $kb; ReleaseDate = $date; Source = 'Microsoft SQL Server build list'
-        })
-    }
+    foreach ($row in (Get-PatchSqlBuildsFromHtml $html)) { $rows.Add($row) }
+
     if ($rows.Count -lt 100) { throw "Only $($rows.Count) SQL Server builds were read - the Microsoft article format may have changed." }
     Write-Host "  $($rows.Count) SQL Server builds"
     return $rows.ToArray()
@@ -628,4 +658,41 @@ Register-MhSelfTest -Name 'Get-MhPatchStatus' -Test {
         ($noUbr.Status -match 'update revision unavailable') -and ($noUbr.Action -eq 'no remote registry'))
     $nothing = Get-PatchWindowsStatus $null
     Test-MhCheck 'and nothing at all is admitted to' ($nothing.Action -match 'Could not read')
+
+    Test-MhSection 'reading the build table out of the article'
+
+    # the shape of the real page, cut down to what the parser cares about. The pre-2012 section is
+    # here because those versions are out of support and are meant to be left out.
+    $sample = @'
+<h2 id="sql-server-complete-version-list-tables">SQL Server complete version list tables</h2>
+<h3 id="sql-server-2022">SQL Server 2022</h3>
+<table><thead><tr><th>Build number or version</th><th>Service pack</th><th>Update</th><th>Knowledge Base number</th><th>Release date</th></tr></thead>
+<tbody>
+<tr> <td>16.0.4305.5</td> <td>None</td> <td><a href="/en-us/help/5126934">CU27 &amp; GDR</a></td> <td><a href="/en-us/help/5126934">KB5126934</a></td> <td>October 13, 2026</td> </tr>
+<tr> <td>16.0.4295.3</td> <td>None</td> <td><a href="/x">CU27</a></td> <td>KB5104824</td> <td>September 9, 2026</td> </tr>
+<tr> <td>not a build</td> <td>None</td> <td>Nothing</td> <td>None</td> <td>None</td> </tr>
+</tbody></table>
+<h3 id="sql-server-2008-r2">SQL Server 2008 R2</h3>
+<table><tbody>
+<tr> <td>10.50.6000.34</td> <td>SP3</td> <td>SP3</td> <td>KB2979597</td> <td>September 30, 2014</td> </tr>
+</tbody></table>
+<h3 id="sql-server-2005">SQL Server 2005</h3>
+<table><tbody>
+<tr> <td>9.0.5324</td> <td>SP4</td> <td>CU3</td> <td>KB2507769</td> <td>March 17, 2011</td> </tr>
+</tbody></table>
+'@
+
+    $parsed = @(Get-PatchSqlBuildsFromHtml $sample)
+    Test-MhCheck 'the rows of a supported version are read' ($parsed.Count -eq 2) ("$($parsed.Count) rows")
+    Test-MhCheck 'a version out of support is left out' (-not @($parsed | Where-Object { $_.ProductName -notlike '*2022' }).Count)
+    $newest = $parsed[0]
+    Test-MhCheck 'the build number is split into its four parts' ($newest.Major -eq 16 -and $newest.Minor -eq 0 -and $newest.BuildNumber -eq 4305 -and $newest.Revision -eq 5)
+    Test-MhCheck 'the update name comes through without its link' ($newest.UpdateName -eq 'CU27 & GDR') $newest.UpdateName
+    Test-MhCheck 'the CU number is taken from it' ($newest.CuNumber -eq 27) "$($newest.CuNumber)"
+    Test-MhCheck 'the KB number loses its KB and its link' ($newest.KB -eq '5126934') $newest.KB
+    Test-MhCheck 'the date is read the one way round, whatever this machine is set to' ($newest.ReleaseDate -eq '2026-10-13') $newest.ReleaseDate
+    Test-MhCheck 'and a row that is not a build is skipped rather than guessed at' (-not @($parsed | Where-Object { $_.UpdateName -eq 'Nothing' }).Count)
+    Test-MhCheck 'a KB with no prefix is still read' ($parsed[1].KB -eq '5104824') $parsed[1].KB
+    Test-MhCheck 'and nothing at all parses to nothing' (@(Get-PatchSqlBuildsFromHtml '').Count -eq 0)
+
 }
