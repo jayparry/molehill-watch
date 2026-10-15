@@ -83,6 +83,38 @@ Register-MhSelfTest -Name 'The module itself' -Test {
     }
     Test-MhCheck 'no module file calls exit' (-not $exits.Count) ($exits -join '; ')
 
+    Test-MhSection 'commands that are not there'
+
+    <#
+      Anything the module calls has to exist: one of its own functions, something PowerShell
+      provides, or a command from a module that is expected to be absent on a locked-down server.
+      That last group is listed by name rather than guessed at, because "it is probably external"
+      is exactly how a typo gets through.
+    #>
+    $expectedElsewhere = @(
+        # Az.Storage and Az.Accounts, which the restore tools install or ask for when they need them
+        'Connect-AzAccount', 'Get-AzAccessToken', 'Get-AzStorageBlob', 'Get-AzStorageBlobContent',
+        'New-AzStorageContext', 'Get-AzStorageContainer',
+        # the SqlServer module
+        'Invoke-Sqlcmd',
+        # Windows features a server may not have
+        'Get-TlsCipherSuite', 'New-SelfSignedCertificate', 'Get-WindowsFeature'
+    )
+
+    $unknown = @()
+    foreach ($file in $files) {
+        $ast = Get-MhFileAst $file.FullName
+        foreach ($call in $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+            $name = $call.GetCommandName()
+            # a call through a variable or an expression has no name to check
+            if (-not $name -or $name -notmatch '^[A-Za-z][\w]*-[\w]+$') { continue }
+            if ($expectedElsewhere -contains $name) { continue }
+            if (Get-Command $name -ErrorAction SilentlyContinue) { continue }
+            $unknown += "$($file.Name):$($call.Extent.StartLineNumber) $name"
+        }
+    }
+    Test-MhCheck 'every command the module calls exists' (-not $unknown.Count) (($unknown | Select-Object -Unique) -join '; ')
+
     Test-MhSection 'the manifest and the files agree'
 
     $manifest = Import-PowerShellDataFile -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'MolehillTools.psd1')

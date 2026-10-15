@@ -53,6 +53,17 @@ function Initialize-MhLog {
   @(), and ", $list" would hand them an array containing the list - which counts as one step
   whatever is in it. The checks below caught exactly that.
 #>
+# whether the run is at this level or louder, for a tool that wants to skip building something
+# expensive nobody is going to be shown
+function Test-MhLogAtLeast {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [ValidateSet('Quiet', 'Normal', 'Verbose', 'Debug')] [string] $Level)
+    $script:MhLogLevel -ge $script:MhLogRanks[$Level]
+}
+
+# whether a step is still open, for a catch block that has to close one before it reports
+function Test-MhStepOpen { [bool]$script:MhLogStep }
+
 function Get-MhLogStep { foreach ($step in $script:MhLogSteps) { $step } }
 
 # what to put in front of every step name from here on, for a run that loops over databases
@@ -566,10 +577,21 @@ Register-MhSelfTest -Name 'The shared diagnostics' -Test {
         Test-MhCheck 'and the prefix a looping run sets' ($steps[0].Step -eq 'Sales: restoring') $steps[0].Step
         Test-MhCheck 'how long each took is kept' ($null -ne $steps[0].Seconds)
 
+        Start-MhStep 'something'
+        Test-MhCheck 'a started step is open' (Test-MhStepOpen)
         Complete-MhStep 'OK'
-        Test-MhCheck 'finishing a step that never started records nothing' (@(Get-MhLogStep).Count -eq 2)
+        Test-MhCheck 'and a finished one is not' (-not (Test-MhStepOpen))
+        Complete-MhStep 'OK'
+        Test-MhCheck 'finishing a step that never started records nothing' (@(Get-MhLogStep).Count -eq 3)
 
         Initialize-MhLog
+        Initialize-MhLog -Level Normal
+        Test-MhCheck 'a Normal run is at Normal' (Test-MhLogAtLeast 'Normal')
+        Test-MhCheck 'and is not at Verbose' (-not (Test-MhLogAtLeast 'Verbose'))
+        Initialize-MhLog -Level Debug
+        Test-MhCheck 'Debug is above everything' ((Test-MhLogAtLeast 'Verbose') -and (Test-MhLogAtLeast 'Debug'))
+        Initialize-MhLog -Level Quiet
+        Test-MhCheck 'Quiet is below Normal' (-not (Test-MhLogAtLeast 'Normal'))
         Test-MhCheck 'starting a run clears the last one' (-not @(Get-MhLogStep).Count)
         Test-MhCheck 'and stops writing to the old file' (-not $script:MhLogFile)
     }

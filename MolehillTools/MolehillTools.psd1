@@ -39,6 +39,7 @@
         'Open-MhSqlConnection',
         'Read-MhTuiKey',
         'Remove-MhTuiChar',
+        'Restore-MhDatabaseCopy',
         'Select-MhSqlClientNamespace',
         'Set-MhTuiKeyScript',
         'Show-MhSqlConnectDialog',

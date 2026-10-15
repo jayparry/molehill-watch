@@ -249,7 +249,7 @@ DECLARE @sql nvarchar(max) = REPLACE(@Stmt, N'{DB}', QUOTENAME(@Db));
 EXEC sys.sp_executesql @sql;
 '@
     Write-MhDeep ('  statement: ' + ($Statement -replace '\{DB\}', ('[' + $DatabaseName + ']')))
-    [void](Invoke-Sql -Server $Server -Query $query -Parameters @{ '@Db' = $DatabaseName; '@Stmt' = $Statement })
+    [void](Invoke-MhSql -ConnectionString $ConnectionString -Query $query -Parameters @{ '@Db' = $DatabaseName; '@Stmt' = $Statement })
 }
 
 Register-MhSelfTest -Name 'The shared backup plumbing' -Test {
