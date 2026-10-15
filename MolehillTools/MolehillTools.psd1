@@ -15,6 +15,7 @@
         'Add-MhTuiChar',
         'Clear-MhTuiScreen',
         'ConvertTo-MhTuiKeys',
+        'Copy-MhSqlAccess',
         'Export-MhDatabaseSample',
         'Get-MhPatchStatus',
         'Get-MhSqlAuthAvailability',

@@ -473,6 +473,34 @@ function Write-MhConnectivityReport {
     }
 }
 
+<#
+  Asks before something there is no undo for.
+
+  A scheduled run has no console to ask at, so rather than failing with PowerShell's own
+  "NonInteractive mode" message it says what to pass instead.
+
+  -Cmdlet is the caller's own $PSCmdlet: the prompt has to come from the cmdlet the user actually
+  ran, and a function at module scope has no access to it. -Force and -DryRun are passed in for
+  the same reason, which in the scripts these came from were read straight out of the caller.
+#>
+function Confirm-MhAction {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $Message,
+        [string] $Caption = 'Are you sure?',
+        $Cmdlet,
+        [switch] $Force,
+        [switch] $DryRun
+    )
+
+    if ($Force -or $DryRun) { return $true }
+    try { return $Cmdlet.ShouldContinue($Message, $Caption) }
+    catch {
+        # the only way asking fails is having nobody to ask
+        throw 'this would change a database and there is no console to confirm at. Run it where it can ask, or pass -Force when you already know you mean it.'
+    }
+}
+
 Register-MhSelfTest -Name 'The shared diagnostics' -Test {
     # none of the three tools these came from checked any of this: the instance-name parsing and
     # the error explanations were the parts most worth checking and the parts nobody had
@@ -565,6 +593,15 @@ Register-MhSelfTest -Name 'The shared diagnostics' -Test {
     $shut = Test-MhTcpPort -Computer '127.0.0.1' -Port $port -TimeoutMs 3000
     Test-MhCheck 'and one nothing is listening on is not' (-not $shut.Ok)
     Test-MhCheck 'with the reason, not just a no' ([bool]$shut.Error) $shut.Error
+
+    Test-MhSection 'asking before something irreversible'
+
+    Test-MhCheck '-Force does not ask' (Confirm-MhAction -Message 'do it?' -Force)
+    Test-MhCheck 'a dry run does not ask either' (Confirm-MhAction -Message 'do it?' -DryRun)
+    $refused = ''
+    try { $null = Confirm-MhAction -Message 'do it?' }
+    catch { $refused = $_.Exception.Message }
+    Test-MhCheck 'with nobody to ask it says what to pass instead' ($refused -match '-Force') $refused
 
     Test-MhSection 'did the failure even reach the server'
 
