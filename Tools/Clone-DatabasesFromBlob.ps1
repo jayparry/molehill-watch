@@ -34,12 +34,23 @@
     The copies keep the names they have in the backup, and the newest backup in each database's
     folder is the one restored - the container is the whole story, there is no msdb to ask.
 
-    As each database lands, and before the next one is looked at, it is settled in this order:
-    the users it came with are dropped (except the built-in ones), the owner is set, the recovery
-    model is set, the users you asked for are added, it is encrypted if you asked for that, and
-    read-only is applied last. The order matters: a read-only database cannot have an encryption
-    key created, and a copy of production should not sit with production's users in it while the
-    rest of the list restores.
+    As each database lands, and before the next one is looked at, it is settled: the users it came
+    with are dropped (except the built-in ones), the owner is set, the recovery model is set, and
+    the users you asked for are added. A copy of production should not sit with production's users
+    in it while the rest of the list restores.
+
+    With -EnableTde, nothing is readable until it is encrypted:
+
+      * the restore statement itself ends with SET RESTRICTED_USER, in the same batch, so there is
+        no moment at which an unencrypted copy of production is online and open
+      * encryption is started and the next database is begun. The scan is a background job and
+        every database's can run at the same time; waiting for one before starting the next would
+        be the slowest possible order
+      * once every restore is done, this waits for all of the scans together, and lets people into
+        each database as its own scan finishes - MULTI_USER, then read-only if you asked for it
+      * a database whose scan has not finished when -TdeWaitMinutes runs out is left shut, and the
+        two statements to run when it does finish are printed. It is not opened up and quietly left
+        half encrypted.
 
     Exit code: 0 = every database done (or a clean -WhatIf), 1 = at least one failed, 2 = it could
     not start at all. For a SQL Agent job step, use CmdExec and let the exit code decide:
@@ -94,7 +105,8 @@
     permissions at all.
 
 .PARAMETER ReadOnly
-    Set each copy read-only once everything else is done.
+    Set each copy read-only once everything else is done - which, with -EnableTde, means after its
+    encryption has finished, because a read-only database cannot be changed any further.
 
 .PARAMETER KeepUsers
     Leave the users that came with the backup alone.
@@ -108,9 +120,10 @@
     The server certificate protecting the encryption key.
 
 .PARAMETER TdeWaitMinutes
-    How long to wait for each encryption scan. Default 60. A database still encrypting when that
-    runs out carries on in the background; -ReadOnly is skipped for it rather than applied to a
-    scan in progress.
+    How long to wait, at the end of the run, for every encryption scan to finish. Default 60. It is
+    one wait for all of them, not one each, because they run at the same time. A database still
+    encrypting when it runs out is left shut rather than opened up half encrypted, and what to run
+    when it does finish is printed.
 
 .PARAMETER TrustServerCertificate
     Skip certificate validation on the connection to SQL Server, which an instance with a
@@ -717,7 +730,11 @@ function New-RestoreCommand {
         [Parameter(Mandatory)] [string] $Database,
         [Parameter(Mandatory)] $BackupSet,          # Urls, Position, HasChecksums
         $MoveList,                                   # @{ LogicalName = TargetPath }
-        [switch] $Replace
+        [switch] $Replace,
+        # shuts the database to everyone but its owners in the same batch as the restore, so there
+        # is no moment at which a copy of production is online, unencrypted and open. A separate
+        # statement afterwards would leave exactly that moment, however short.
+        [switch] $RestrictAccess
     )
 
     $devices = (@($BackupSet.Urls) | ForEach-Object { "URL = N'" + (Esc-Str $_) + "'" }) -join ",`r`n     "
@@ -734,7 +751,11 @@ function New-RestoreCommand {
     if ($BackupSet.HasChecksums) { $with.Add('CHECKSUM') }
     $with.Add('STATS = 5')
 
-    "RESTORE DATABASE {0}`r`nFROM {1}`r`nWITH {2};" -f (Esc-Name $Database), $devices, ($with -join ",`r`n     ")
+    $statement = "RESTORE DATABASE {0}`r`nFROM {1}`r`nWITH {2};" -f (Esc-Name $Database), $devices, ($with -join ",`r`n     ")
+    if ($RestrictAccess) {
+        $statement += "`r`nALTER DATABASE {0} SET RESTRICTED_USER WITH ROLLBACK IMMEDIATE;" -f (Esc-Name $Database)
+    }
+    $statement
 }
 
 <#
@@ -1093,52 +1114,28 @@ SELECT  EngineEdition = CONVERT(int, SERVERPROPERTY('EngineEdition')),
 }
 
 <#
-  Where a database has got to with its encryption.
+  Starts the encryption and does not wait for it.
 
-  sys.dm_database_encryption_keys is server-scoped, so this is asked from master about the database
-  rather than from inside it. encryption_state is the answer: 1 unencrypted, 2 encrypting, 3
-  encrypted, 4 changing key, 5 decrypting - and no row at all means there is no encryption key yet.
-
-  It returns the table rather than the rows, and the caller takes .Rows from it. That is not
-  fussiness: this started life as a scriptblock in a variable, invoked with &, and the same
-  @((Invoke-Sql ...).Rows) expression that gives DataRows everywhere else gave back an Int32
-  through the scriptblock. Every poll then read the state as 0, and a database that had finished
-  encrypting in a tenth of a second looked like one stuck at 0% until the wait timed out.
+  Encrypting is a background scan: SET ENCRYPTION ON returns at once and the pages are encrypted
+  afterwards, at whatever rate the server can manage. Waiting for each database in turn would mean
+  the last one in the list starting its scan only once every earlier scan had finished, which is
+  the slowest possible order - they run perfectly well at the same time. So every database is
+  started, and the waiting happens once, at the end, for all of them.
 #>
-function Get-EncryptionState {
-    [CmdletBinding()]
-    param([Parameter(Mandatory)] [string] $Server, [Parameter(Mandatory)] [string] $DatabaseName)
-
-    $query = @'
-SELECT encryption_state, percent_complete, key_algorithm, key_length
-FROM sys.dm_database_encryption_keys WHERE database_id = DB_ID(@db)
-'@
-    Invoke-Sql -Server $Server -Parameters @{ '@db' = $DatabaseName } -Query $query
-}
-
-<#
-  Encrypts one database, and waits for it to actually be encrypted.
-
-  SET ENCRYPTION ON returns at once: the work happens in the background, page by page, so being
-  encrypted is a state to wait for rather than something the statement reports. Waiting is also
-  what makes -ReadOnly safe to apply afterwards - the scan wants the database writable, and a
-  read-only database cannot have an encryption key created in the first place.
-#>
-function Enable-DatabaseTde {
+function Start-DatabaseEncryption {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string] $Server, [Parameter(Mandatory)] [string] $DatabaseName,
-        [Parameter(Mandatory)] [string] $CertificateName, [ValidateRange(1, 1440)] [int] $WaitMinutes = 60
+        [Parameter(Mandatory)] [string] $CertificateName
     )
 
-    $rows = @((Get-EncryptionState -Server $Server -DatabaseName $DatabaseName).Rows)
-    if ($rows.Count -and [int]$rows[0]['encryption_state'] -eq 3) {
+    $already = @(Get-EncryptionProgress -Server $Server -DatabaseName $DatabaseName)
+    if ($already.Count -and $already[0].State -eq 3) {
         Write-Detail '  it is encrypted already'
-        return [pscustomobject]@{ Encrypted = $true; Already = $true; TimedOut = $false; Percent = 100; Seconds = 0
-                                  Algorithm = [string]$rows[0]['key_algorithm']; KeyLength = [int]$rows[0]['key_length'] }
+        return [pscustomobject]@{ Started = $false; Already = $true }
     }
 
-    if ($rows.Count -eq 0) {
+    if ($already.Count -eq 0) {
         Write-Detail ('  creating the database encryption key, protected by the certificate ' + $CertificateName)
         # this one has to run inside the database: there is no way to qualify it from master
         [void](Invoke-Sql -Server $Server -DatabaseName $DatabaseName -Query `
@@ -1147,42 +1144,237 @@ function Enable-DatabaseTde {
     else { Write-Detail '  the encryption key is already there, so only the encryption needs turning on' }
 
     Invoke-DbStatement -Server $Server -DatabaseName $DatabaseName -Statement 'ALTER DATABASE {DB} SET ENCRYPTION ON;'
+    [pscustomobject]@{ Started = $true; Already = $false }
+}
 
-    $timer = [System.Diagnostics.Stopwatch]::StartNew()
-    $deadline = (Get-Date).AddMinutes($WaitMinutes)
-    $said = [datetime]::MinValue
-    while ($true) {
-        $rows = @((Get-EncryptionState -Server $Server -DatabaseName $DatabaseName).Rows)
-        if ($rows.Count -eq 0) { throw 'the database encryption key disappeared while the database was being encrypted' }
-        $state = [int]$rows[0]['encryption_state']
-        $percent = [double]$rows[0]['percent_complete']
-        $common = @{ Algorithm = [string]$rows[0]['key_algorithm']; KeyLength = [int]$rows[0]['key_length']
-                     Seconds = [math]::Round($timer.Elapsed.TotalSeconds, 1); Already = $false }
+<#
+  Where each database has got to with its encryption: one query for all of them, because the
+  waiting below asks again every few seconds.
 
-        if ($state -eq 3) { return [pscustomobject]($common + @{ Encrypted = $true; TimedOut = $false; Percent = 100 }) }
-        if ($state -eq 5) { throw 'the database is being decrypted rather than encrypted; something else is working on it' }
-        if ((Get-Date) -ge $deadline) {
-            return [pscustomobject]($common + @{ Encrypted = $false; TimedOut = $true; Percent = $percent })
+  encryption_state is the answer: 1 unencrypted, 2 encrypting, 3 encrypted, 4 changing key, 5
+  decrypting - and no row at all means the database has no encryption key yet.
+
+  sys.dm_database_encryption_keys is server-scoped, so this is asked from master about the
+  databases rather than from inside each one. The rows are turned into plain objects here, where
+  the DataRow handling is in one place: when this was asked for through a scriptblock the same
+  expression came back as an Int32, every poll read the state as 0, and a database that had
+  finished encrypting in a tenth of a second looked like one stuck at 0% until the wait timed out.
+#>
+function Get-EncryptionProgress {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [string] $Server, [Parameter(Mandatory)] [string[]] $DatabaseName)
+
+    # a parameter per name rather than the names pasted into the statement: a database name is an
+    # identifier and may contain anything at all
+    $parameters = @{}
+    $placeholders = New-Object System.Collections.Generic.List[string]
+    for ($i = 0; $i -lt $DatabaseName.Count; $i++) {
+        $parameters["@d$i"] = $DatabaseName[$i]
+        $placeholders.Add("@d$i")
+    }
+
+    $query = @"
+SELECT  DatabaseName = DB_NAME(k.database_id), k.encryption_state, k.percent_complete,
+        k.key_algorithm, k.key_length
+FROM sys.dm_database_encryption_keys AS k
+WHERE DB_NAME(k.database_id) IN ($($placeholders -join ', '))
+"@
+    foreach ($row in (Invoke-Sql -Server $Server -Query $query -Parameters $parameters).Rows) {
+        [pscustomobject]@{
+            Name      = [string]$row['DatabaseName']
+            State     = [int]$row['encryption_state']
+            Percent   = [double]$row['percent_complete']
+            Algorithm = [string]$row['key_algorithm']
+            KeyLength = [int]$row['key_length']
         }
-        if (((Get-Date) - $said).TotalSeconds -ge 15) {
-            Write-Log ('  encrypting: {0}% after {1}s' -f [math]::Round($percent, 1), [math]::Round($timer.Elapsed.TotalSeconds))
-            $said = Get-Date
-        }
-        Start-Sleep -Milliseconds 1500
+    }
+}
+
+# what each state is called, so a log line says something rather than a number
+function Get-EncryptionStateName {
+    [CmdletBinding()]
+    param([int] $State)
+    switch ($State) {
+        1 { 'not encrypted' }
+        2 { 'encrypting' }
+        3 { 'encrypted' }
+        4 { 'changing its key' }
+        5 { 'being decrypted' }
+        default { "state $State" }
     }
 }
 
 <#
-  Everything that happens to a copy once it is restored, for one database.
+  One line saying where every database has got to, for the log while the scans run.
 
-  This runs as each database lands rather than once at the end of the run, so a copy of production
-  does not sit with the users it came with still in it, and unencrypted, while the rest of the list
-  downloads.
+  A name with no row at all has not started its scan yet, which is worth saying rather than
+  leaving out: "Stock no key yet" is a fact, a missing Stock is a mystery.
+#>
+function Format-EncryptionProgress {
+    [CmdletBinding()]
+    param([AllowEmptyCollection()] [object[]] $Progress, [AllowEmptyCollection()] [string[]] $Expected = @())
 
-  The order is deliberate: the users it came with go first, because that is what closes off access
-  and it takes a moment; encryption follows, because it takes as long as it takes; and read-only is
-  last, because a read-only database cannot be changed any further - including having an encryption
-  key created, which is why encryption cannot come after it.
+    $byName = @{}
+    foreach ($one in $Progress) { $byName[$one.Name] = $one }
+    $names = @($Expected)
+    if (-not $names.Count) { $names = @($Progress | ForEach-Object { $_.Name }) }
+
+    $parts = New-Object System.Collections.Generic.List[string]
+    foreach ($name in $names) {
+        $one = $byName[$name]
+        if (-not $one) { $parts.Add("$name no key yet"); continue }
+        if ($one.State -eq 2) { $parts.Add(('{0} {1}%' -f $name, [math]::Round($one.Percent, 1))); continue }
+        $parts.Add(('{0} {1}' -f $name, (Get-EncryptionStateName $one.State)))
+    }
+    $parts -join ', '
+}
+
+<#
+  Waits for every database that is encrypting, together, and says what happened to each.
+
+  The scans are what they are: a big database takes as long as it takes, and nothing here makes it
+  faster. What this does is stop the run finishing while a copy is still half encrypted, because
+  until it is encrypted nobody is allowed into it.
+
+  A scan that never moved at all is reported as that rather than as a timeout: "0%, and it never
+  moved" is a different morning from "68% and still going", and the first one means something else
+  is wrong - or that the database has no encryption key and never started.
+
+  Whether it moved is measured against the first reading rather than against a clock, which is the
+  honest comparison: a database with no row at all has not started, and one that is still at the
+  percentage it began at has not moved, however long or short the wait was.
+#>
+function Wait-DatabaseEncryption {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $Server, [Parameter(Mandatory)] [string[]] $DatabaseName,
+        [ValidateRange(1, 1440)] [int] $WaitMinutes = 60,
+        [ValidateRange(1, 60)] [int] $PollSeconds = 5
+    )
+
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    $deadline = (Get-Date).AddMinutes($WaitMinutes)
+    $startedAt = @{}
+    $said = [datetime]::MinValue
+    $progress = @()
+
+    while ($true) {
+        $progress = @(Get-EncryptionProgress -Server $Server -DatabaseName $DatabaseName)
+
+        # where each one was the first time it was looked at, to compare against at the end
+        foreach ($name in $DatabaseName) {
+            if ($startedAt.ContainsKey($name)) { continue }
+            $one = $null
+            foreach ($candidate in $progress) { if ($candidate.Name -eq $name) { $one = $candidate } }
+            $startedAt[$name] = $(if (-not $one) { -1 } elseif ($one.State -eq 3) { 100 } else { $one.Percent })
+        }
+
+        # written out rather than filtered with Where-Object: inside that filter $_ is the name
+        # being tested and also, confusingly, the row being compared, which is how this went wrong
+        # the first time. A database is still pending if it has no row, or its row is not state 3.
+        $pending = @()
+        foreach ($name in $DatabaseName) {
+            $one = $null
+            foreach ($candidate in $progress) { if ($candidate.Name -eq $name) { $one = $candidate } }
+            if (-not $one -or $one.State -ne 3) { $pending += $name }
+        }
+
+        if ($pending.Count -eq 0) { break }
+        if ((Get-Date) -ge $deadline) { break }
+
+        if (((Get-Date) - $said).TotalSeconds -ge 15) {
+            Write-Log ('  encrypting: {0} (after {1}s)' -f (Format-EncryptionProgress -Progress $progress -Expected $pending),
+                       [math]::Round($timer.Elapsed.TotalSeconds))
+            $said = Get-Date
+        }
+        Start-Sleep -Seconds $PollSeconds
+    }
+
+    foreach ($name in $DatabaseName) {
+        $one = $null
+        foreach ($candidate in $progress) { if ($candidate.Name -eq $name) { $one = $candidate } }
+        $encrypted = [bool]($one -and $one.State -eq 3)
+        $now = $(if (-not $one) { -1 } elseif ($encrypted) { 100 } else { $one.Percent })
+        [pscustomobject]@{
+            Name      = $name
+            Encrypted = $encrypted
+            State     = $(if ($one) { $one.State } else { 0 })
+            Percent   = $(if ($now -lt 0) { 0 } else { [math]::Round($now, 1) })
+            Algorithm = $(if ($one) { $one.Algorithm } else { '' })
+            KeyLength = $(if ($one) { $one.KeyLength } else { 0 })
+            Seconds   = [math]::Round($timer.Elapsed.TotalSeconds, 1)
+            # it never moved: either there is still no encryption key, or it is exactly where it
+            # was when the waiting started
+            Stalled   = [bool]((-not $encrypted) -and $now -le $startedAt[$name])
+        }
+    }
+}
+
+<#
+  Lets people in, now that there is nothing left to hide.
+
+  MULTI_USER first and read-only second: a read-only database cannot be changed any further, so the
+  order cannot be the other way round.
+#>
+function Open-RestoredDatabase {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $Server, [Parameter(Mandatory)] [string] $DatabaseName,
+        [switch] $ReadOnly
+    )
+
+    Invoke-DbStatement -Server $Server -DatabaseName $DatabaseName -Statement 'ALTER DATABASE {DB} SET MULTI_USER;'
+    Write-Log 'Open to everyone who has a user in it'
+
+    if (-not $ReadOnly) { return }
+
+    # AUTO_CLOSE undoes read-only: a database that closes and reopens comes back read-write, so the
+    # setting looks applied and then quietly is not
+    $autoClose = Get-Scalar -Server $Server -Parameters @{ '@db' = $DatabaseName } -Query `
+                 'SELECT is_auto_close_on FROM sys.databases WHERE name = @db'
+    if ($autoClose -and [bool]$autoClose) {
+        Invoke-DbStatement -Server $Server -DatabaseName $DatabaseName -Statement 'ALTER DATABASE {DB} SET AUTO_CLOSE OFF;'
+        Write-Log 'Turned AUTO_CLOSE off first: with it on, the database reverts to read-write the next time it is opened' -Level WARN
+    }
+
+    Invoke-DbStatement -Server $Server -DatabaseName $DatabaseName -Statement 'ALTER DATABASE {DB} SET READ_ONLY WITH ROLLBACK IMMEDIATE;'
+
+    # and prove it took, rather than reporting the statement that was sent
+    $nowReadOnly = Get-Scalar -Server $Server -Parameters @{ '@db' = $DatabaseName } -Query `
+                   'SELECT is_read_only FROM sys.databases WHERE name = @db'
+    if (-not ($nowReadOnly -and [bool]$nowReadOnly)) {
+        throw 'the database did not stay read-only. Something else is holding it read-write; check AUTO_CLOSE and whether anything is reopening it.'
+    }
+    Write-Log 'Set read-only'
+}
+
+# what it actually is now, asked of the server rather than assumed from what was sent
+function Write-DatabaseState {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [string] $Server, [Parameter(Mandatory)] [string] $DatabaseName, $Outcome)
+
+    # -DatabaseName matters: sys.database_principals is scoped to the connection's database, so
+    # without it this counts master's users instead of this one's
+    $final = (Invoke-Sql -Server $Server -DatabaseName $DatabaseName -Parameters @{ '@db' = $DatabaseName } -Query `
+              'SELECT recovery_model_desc, is_read_only, user_access_desc, Owner = SUSER_SNAME(owner_sid), Users = (SELECT COUNT(*) FROM sys.database_principals WHERE type IN (''S'',''U'',''G'') AND principal_id > 4), Encryption = ISNULL((SELECT TOP (1) k.encryption_state FROM sys.dm_database_encryption_keys k WHERE k.database_id = DB_ID(@db)), 0) FROM sys.databases WHERE name = @db').Rows[0]
+
+    Write-Log ('{0} is now: owner {1}, recovery {2}, {3}, {4}, {5}, {6} user(s) besides the built-in ones' -f
+               $DatabaseName, $final['Owner'], $final['recovery_model_desc'],
+               ([string]$final['user_access_desc']).ToLower().Replace('_', ' '),
+               $(if ([bool]$final['is_read_only']) { 'read-only' } else { 'read-write' }),
+               (Get-EncryptionStateName ([int]$final['Encryption'])), $final['Users'])
+    if ($Outcome) { $Outcome.Users = '{0} left' -f $final['Users'] }
+}
+
+<#
+  Everything that happens to a copy as it lands, for one database, except letting anyone into it.
+
+  This runs as each database is restored rather than once at the end, so a copy of production does
+  not sit with the users it came with still in it while the rest of the list restores.
+
+  What is not here: the encryption and the opening up. Encryption is started by the caller and
+  waited for once, at the end, for every database together - and until a database is encrypted it
+  stays shut, which is the whole point of restricting it in the restore itself.
 #>
 function Complete-RestoredDatabase {
     [CmdletBinding()]
@@ -1205,6 +1397,9 @@ function Complete-RestoredDatabase {
 
     if ($OwnerLogin -and $OwnerLogin.Login) {
         Start-Step ('Set the owner to {0}' -f $OwnerLogin.Login)
+        if ($OwnerLogin.Substituted) {
+            Write-Log ("There is no login called '{0}' here, so the owner is {1}, which is this instance's own system administrator account" -f $Owner, $OwnerLogin.Login) -Level WARN
+        }
         Invoke-DbStatement -Server $Server -DatabaseName $DatabaseName `
             -Statement ('ALTER AUTHORIZATION ON DATABASE::{DB} TO ' + (Esc-Name $OwnerLogin.Login) + ';')
         Complete-Step
@@ -1224,82 +1419,12 @@ function Complete-RestoredDatabase {
                        $(if ($roleless.Count) { ' - no role membership, so no permissions yet' } else { '' }))
         }
         foreach ($missing in $added.NoLogin) {
-            Write-Log ("There is no login called '{0}' on {1}, so no user was created for it. Create the login first, then run this again." -f $missing, $Server) -Level WARN
+            Write-Log ("There is no login called '{0}' here, so no user was created for it. Create the login first, then run this again." -f $missing) -Level WARN
         }
         foreach ($failure in $added.Failed) { Write-Log ('Could not add ' + $failure) -Level WARN }
         Complete-Step
     }
     elseif ($userGrants.Count) { Write-Detail '  no users asked for on this one' }
-
-    # before read-only, because a read-only database cannot have an encryption key created
-    $encrypted = $false
-    if ($EnableTde) {
-        Start-Step 'Encrypt it'
-        $tde = Enable-DatabaseTde -Server $Server -DatabaseName $DatabaseName `
-                                  -CertificateName $TdeCertificateName -WaitMinutes $TdeWaitMinutes
-        $encrypted = $tde.Encrypted
-        if ($tde.Already) { Write-Log 'Already encrypted; left as it is' }
-        elseif ($tde.Encrypted) {
-            Write-Log ('Encrypted with {0} ({1}-bit) in {2}s' -f $tde.Algorithm, $tde.KeyLength, $tde.Seconds)
-        }
-        else {
-            Write-Log ('Still encrypting after {0} minute(s): {1}% done. It carries on in the background; this is not a failure, but nothing that needs it finished is done to this database.' -f
-                       $TdeWaitMinutes, [math]::Round($tde.Percent, 1)) -Level WARN
-        }
-        $Outcome.Encryption = $(if ($tde.Encrypted) { '{0} {1}-bit' -f $tde.Algorithm, $tde.KeyLength } else { 'in progress' })
-        Complete-Step -Result $(if ($tde.Encrypted) { 'OK' } else { 'SKIPPED' })
-    }
-
-    # last, because a read-only database cannot be changed any further
-    if ($ReadOnly) {
-        if ($EnableTde -and -not $encrypted) {
-            Write-Log 'Not setting it read-only: the encryption has not finished, and the scan needs the database writable. Run this again once it has, or set it read-only by hand.' -Level WARN
-        }
-        else {
-            Start-Step 'Set it read-only'
-            # AUTO_CLOSE undoes this: a database that closes and reopens comes back
-            # read-write, so the setting looks applied and then quietly is not. Turning
-            # AUTO_CLOSE off is the only way to make read-only mean anything, and it is
-            # not something a restored copy on a server wants switched on in any case.
-            $autoClose = Get-Scalar -Server $Server -Parameters @{ '@db' = $DatabaseName } -Query `
-                         'SELECT is_auto_close_on FROM sys.databases WHERE name = @db'
-            if ($autoClose -and [bool]$autoClose) {
-                Invoke-DbStatement -Server $Server -DatabaseName $DatabaseName `
-                    -Statement 'ALTER DATABASE {DB} SET AUTO_CLOSE OFF;'
-                Write-Log 'Turned AUTO_CLOSE off first: with it on, the database reverts to read-write the next time it is opened' -Level WARN
-            }
-
-            Invoke-DbStatement -Server $Server -DatabaseName $DatabaseName `
-                -Statement 'ALTER DATABASE {DB} SET READ_ONLY WITH ROLLBACK IMMEDIATE;'
-
-            # and prove it took, rather than reporting the statement that was sent
-            $nowReadOnly = Get-Scalar -Server $Server -Parameters @{ '@db' = $DatabaseName } -Query `
-                           'SELECT is_read_only FROM sys.databases WHERE name = @db'
-            if (-not ($nowReadOnly -and [bool]$nowReadOnly)) {
-                throw 'the database did not stay read-only. Something else is holding it read-write; check AUTO_CLOSE and whether anything is reopening it.'
-            }
-            Write-Log 'Set read-only'
-            Complete-Step
-        }
-    }
-
-    # say what it actually is now, not what was asked for
-    # -DatabaseName matters: sys.database_principals is scoped to the connection's
-    # database, so without it this counted master's users instead of this one's
-    $final = (Invoke-Sql -Server $Server -DatabaseName $DatabaseName -Parameters @{ '@db' = $DatabaseName } -Query `
-              'SELECT recovery_model_desc, is_read_only, Owner = SUSER_SNAME(owner_sid), Users = (SELECT COUNT(*) FROM sys.database_principals WHERE type IN (''S'',''U'',''G'') AND principal_id > 4), Encryption = ISNULL((SELECT TOP (1) k.encryption_state FROM sys.dm_database_encryption_keys k WHERE k.database_id = DB_ID(@db)), 0) FROM sys.databases WHERE name = @db').Rows[0]
-    $encryptionState = switch ([int]$final['Encryption']) {
-        2 { 'encryption in progress' ; break }
-        3 { 'encrypted' ; break }
-        4 { 'changing its encryption key' ; break }
-        5 { 'being decrypted' ; break }
-        default { 'not encrypted' }
-    }
-    Write-Log ('{0} is now: owner {1}, recovery {2}, {3}, {4}, {5} user(s) besides the built-in ones' -f
-               $DatabaseName, $final['Owner'], $final['recovery_model_desc'],
-               $(if ([bool]$final['is_read_only']) { 'read-only' } else { 'read-write' }), $encryptionState, $final['Users'])
-    $Outcome.Users = '{0} left' -f $final['Users']
-    $Outcome.Result = 'DONE'
 }
 
 #==============================================================================
@@ -1373,6 +1498,26 @@ if ($SelfTest) {
     Check 'nothing is replaced unless asked' ($sql -notmatch 'REPLACE')
     $sql = New-RestoreCommand -Database 'Sales' -BackupSet $set -MoveList $move -Replace
     Check 'replacing an existing copy says so' ($sql -match 'REPLACE')
+    Check 'and nothing is shut unless asked' ($sql -notmatch 'RESTRICTED_USER')
+    $sql = New-RestoreCommand -Database 'Sales' -BackupSet $set -MoveList $move -RestrictAccess
+    Check 'shutting it happens in the same batch as the restore, not after it' ($sql -match "(?s)^RESTORE DATABASE .*ALTER DATABASE \[Sales\] SET RESTRICTED_USER WITH ROLLBACK IMMEDIATE;$") $sql
+
+    Write-Host '  where each database has got to' -ForegroundColor Gray
+    Check 'state 1 is not encrypted' ((Get-EncryptionStateName 1) -eq 'not encrypted')
+    Check 'state 2 is encrypting' ((Get-EncryptionStateName 2) -eq 'encrypting')
+    Check 'state 3 is encrypted' ((Get-EncryptionStateName 3) -eq 'encrypted')
+    Check 'state 5 is being decrypted, which is somebody else at work' ((Get-EncryptionStateName 5) -eq 'being decrypted')
+    Check 'a state nobody has seen is reported as itself' ((Get-EncryptionStateName 9) -eq 'state 9')
+
+    function Progress([string] $Name, [int] $State, [double] $Percent) {
+        [pscustomobject]@{ Name = $Name; State = $State; Percent = $Percent; Algorithm = 'AES_256'; KeyLength = 256 }
+    }
+    $line = Format-EncryptionProgress -Progress @((Progress 'Sales' 2 46.5), (Progress 'Stock' 3 100)) -Expected @('Sales', 'Stock')
+    Check 'one line says where each of them is' ($line -eq 'Sales 46.5%, Stock encrypted') $line
+    $line = Format-EncryptionProgress -Progress @((Progress 'Sales' 2 10)) -Expected @('Sales', 'Orders')
+    Check 'a database with no key yet is said to have none, not left out' ($line -eq 'Sales 10%, Orders no key yet') $line
+    $line = Format-EncryptionProgress -Progress @() -Expected @('Sales')
+    Check 'and nothing started yet reads as that' ($line -eq 'Sales no key yet') $line
     $striped = [pscustomobject]@{ Urls = @('https://a.blob.core.windows.net/c/one.bak', 'https://a.blob.core.windows.net/c/two.bak')
                                   Position = 1; HasChecksums = $false }
     $sql = New-RestoreCommand -Database 'Sales' -BackupSet $striped
@@ -1513,6 +1658,8 @@ if ($AddUser) {
 $runStart = Get-Date
 $setupDone = $false
 $results = New-Object System.Collections.Generic.List[object]
+# the databases whose encryption was started and has still to be waited for
+$encrypting = New-Object System.Collections.Generic.List[string]
 $script:ExitBad = $false
 
 try {
@@ -1728,15 +1875,22 @@ SELECT  ServerName   = CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')),
             Write-Detail ('  {0} file(s) to restore' -f $moveList.Count)
 
             $set = [pscustomobject]@{ Urls = $urls; Position = [int]$row['Position']; HasChecksums = $true }
-            $sql = New-RestoreCommand -Database $dbName -BackupSet $set -MoveList $moveList -Replace:$isThere
+            # restricted from the restore itself when it is going to be encrypted: nobody reads an
+            # unencrypted copy of production, not even for the few seconds it takes to start the scan
+            $sql = New-RestoreCommand -Database $dbName -BackupSet $set -MoveList $moveList `
+                       -Replace:$isThere -RestrictAccess:$EnableTde
 
             if ($dryRun) {
                 Write-Log 'WhatIf: this is the statement that would run'
                 foreach ($line in ($sql -split "`r?`n")) { Write-Log ('    ' + $line) }
-                Write-Log ('WhatIf: then its users would be cleared, the owner set to {0}, the recovery model set to {1}{2}{3}' -f
+                Write-Log ('WhatIf: then its users would be cleared, the owner set to {0} and the recovery model set to {1}{2}' -f
                            $Owner, $RecoveryModel,
-                           $(if ($EnableTde) { ', and it would be encrypted' } else { '' }),
-                           $(if ($ReadOnly) { ', and set read-only' } else { '' }))
+                           $(if ($EnableTde) {
+                                 ". It would be shut to everyone but its owners by the restore itself, encryption started, and the next database begun. Once every restore is done, this run would wait for all of them to finish encrypting - up to $TdeWaitMinutes minute(s) - and only then let people in" +
+                                 $(if ($ReadOnly) { ' and set it read-only' } else { '' })
+                             } else {
+                                 ', and it would be opened up' + $(if ($ReadOnly) { ' and set read-only' } else { '' })
+                             }))
                 $outcome.Result = 'DRY RUN'
                 Complete-Step -Result 'SKIPPED'
                 continue
@@ -1756,7 +1910,8 @@ SELECT  ServerName   = CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')),
                 }
                 throw ('the restore failed: ' + $r.Error)
             }
-            Write-Log ('Restored{0} in {1}s' -f $(if ($r.Megabytes) { " $($r.Megabytes) MB" } else { '' }), $r.Seconds)
+            Write-Log ('Restored{0} in {1}s{2}' -f $(if ($r.Megabytes) { " $($r.Megabytes) MB" } else { '' }), $r.Seconds,
+                       $(if ($EnableTde) { ', and shut to everyone but its owners until it is encrypted' } else { '' }))
             Complete-Step
             #endregion
 
@@ -1764,6 +1919,31 @@ SELECT  ServerName   = CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')),
             Complete-RestoredDatabase -Server $DestinationInstance -DatabaseName $dbName -Outcome $outcome `
                 -OwnerLogin (Resolve-OwnerLogin -Server $DestinationInstance -Wanted $Owner) `
                 -Grants @($userGrants | Where-Object { $_.Database -eq $dbName })
+
+            if ($EnableTde) {
+                # started, not waited for: the scan runs in the background and every database's can
+                # run at once, so they are all started here and all waited for at the end
+                Start-Step 'Start encrypting it'
+                $started = Start-DatabaseEncryption -Server $DestinationInstance -DatabaseName $dbName -CertificateName $TdeCertificateName
+                if ($started.Already) {
+                    Write-Log 'It was already encrypted, so there is nothing to wait for'
+                    $outcome.Result = 'RESTORED'
+                }
+                else {
+                    Write-Log 'Encrypting in the background; it stays shut until that has finished'
+                    $outcome.Result = 'ENCRYPTING'
+                }
+                $encrypting.Add($dbName)
+                Complete-Step
+            }
+            else {
+                # nothing to wait for, so it can be opened up now
+                Start-Step 'Open it up'
+                Open-RestoredDatabase -Server $DestinationInstance -DatabaseName $dbName -ReadOnly:$ReadOnly
+                Complete-Step
+                Write-DatabaseState -Server $DestinationInstance -DatabaseName $dbName -Outcome $outcome
+                $outcome.Result = 'DONE'
+            }
         }
         catch {
             # the whole message, not its first line: a SQL Server error puts the detail on the
@@ -1782,6 +1962,65 @@ SELECT  ServerName   = CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')),
             $script:StepPrefix = ''
         }
     }
+
+    #region Wait for the encryption, then let people in
+    <#
+      One wait for all of them, at the end.
+
+      Every scan has been running since its database landed, so by the time the last restore has
+      finished the first database is usually encrypted already and this returns at once. Nothing is
+      opened up before its scan has finished: a copy of production that is readable but not yet
+      encrypted is the thing this is here to prevent.
+    #>
+    if ($encrypting.Count) {
+        Write-Host ''
+        Start-Step ('Wait for {0} database(s) to finish encrypting' -f $encrypting.Count)
+        $waits = @(Wait-DatabaseEncryption -Server $DestinationInstance -DatabaseName $encrypting.ToArray() -WaitMinutes $TdeWaitMinutes)
+        Complete-Step -Result $(if (@($waits | Where-Object { -not $_.Encrypted }).Count) { 'FAILED' } else { 'OK' })
+
+        foreach ($wait in $waits) {
+            $outcome = @($results | Where-Object { $_.Database -eq $wait.Name })[0]
+            $script:StepPrefix = if ($encrypting.Count -gt 1) { $wait.Name } else { '' }
+
+            if ($wait.Encrypted) {
+                Write-Log ('{0}: encrypted with {1} ({2}-bit) after {3}s' -f $wait.Name, $wait.Algorithm, $wait.KeyLength, $wait.Seconds)
+                $outcome.Encryption = '{0} {1}-bit' -f $wait.Algorithm, $wait.KeyLength
+                try {
+                    Start-Step 'Open it up'
+                    Open-RestoredDatabase -Server $DestinationInstance -DatabaseName $wait.Name -ReadOnly:$ReadOnly
+                    Complete-Step
+                    Write-DatabaseState -Server $DestinationInstance -DatabaseName $wait.Name -Outcome $outcome
+                    $outcome.Result = 'DONE'
+                }
+                catch {
+                    $message = $_.Exception.GetBaseException().Message
+                    Complete-Step -Result 'FAILED'
+                    Write-Log ("[$($wait.Name)] " + $message) -Level ERROR
+                    $outcome.Result = 'FAILED'
+                    $outcome.Detail = ($message -split "`r?`n")[0]
+                }
+            }
+            else {
+                # left shut on purpose. The scan carries on by itself; when it reaches 100% the two
+                # statements below are all that is left to run, and they are printed so that nobody
+                # has to work them out at the time.
+                $outcome.Result = 'ENCRYPTING'
+                $outcome.Encryption = '{0}% after {1}s' -f $wait.Percent, $wait.Seconds
+                $outcome.Detail = 'still encrypting, so it has been left shut'
+                $why = if ($wait.Stalled) {
+                           'it has not moved for minutes, which is not how a scan behaves - look at what else is running on the instance'
+                       } else {
+                           'it is still going, which a big database does'
+                       }
+                Write-Log ("{0} is {1}% encrypted after {2}s and {3}. It is still RESTRICTED_USER, so nothing can read it unencrypted. When it finishes, this is all that is left:`r`n    ALTER DATABASE {4} SET MULTI_USER;{5}" -f
+                           $wait.Name, $wait.Percent, $wait.Seconds, $why, (Esc-Name $wait.Name),
+                           $(if ($ReadOnly) { "`r`n    ALTER DATABASE $(Esc-Name $wait.Name) SET READ_ONLY WITH ROLLBACK IMMEDIATE;" } else { '' })) -Level WARN
+                Write-Log ('Watch it with: SELECT encryption_state, percent_complete FROM sys.dm_database_encryption_keys WHERE database_id = DB_ID({0});' -f ("'" + (Esc-Str $wait.Name) + "'"))
+            }
+            $script:StepPrefix = ''
+        }
+    }
+    #endregion
 }
 catch {
     if ($script:CurrentStep) { Complete-Step -Result 'FAILED' }
@@ -1806,8 +2045,9 @@ finally {
     if ($script:Level -ge $script:LevelRank['Normal']) {
         foreach ($step in $script:Steps) { Write-Log ('  {0,-8} {1,8} s  {2}' -f $step.Result, $step.Seconds, $step.Step) }
     }
-    $failedCount = @($results | Where-Object { $_.Result -eq 'FAILED' }).Count
-    $doneCount = @($results | Where-Object { $_.Result -in 'DONE', 'DRY RUN' }).Count
+    # a database still encrypting is not done: it is shut, and something has to be run on it later
+    $failedCount = @($results | Where-Object { $_.Result -in 'FAILED', 'ENCRYPTING' }).Count
+    $doneCount = @($results | Where-Object { $_.Result -in 'DONE', 'RESTORED', 'DRY RUN' }).Count
     $overall = if (-not $setupDone) { 'FAILED BEFORE STARTING' }
                elseif ($failedCount -gt 0 -and $doneCount -gt 0) { "PARTLY DONE ($doneCount of $($results.Count))" }
                elseif ($failedCount -gt 0) { 'FAILED' }

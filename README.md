@@ -381,7 +381,21 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "D:\Scripts\Clone-Databa
     ...
   ```
 
-* **Then, per database**: the newest backup under `FULL/DAILY/<database>/` is found, its header is read before the existing copy is touched (right database, full backup, not a version this instance cannot restore), it is restored under the same name with its files moved to this instance's data and log paths, and then it is settled before the next one is even looked at - users dropped, owner set, recovery model set, the users you asked for added, encrypted, read-only last. The order is the same as the general tool's and for the same reasons: a copy of production should not sit with production's users in it, and a read-only database cannot have an encryption key created.
+* **Then, per database**: the newest backup under `FULL/DAILY/<database>/` is found, its header is read before the existing copy is touched (right database, full backup, not a version this instance cannot restore), it is restored under the same name with its files moved to this instance's data and log paths, and then it is settled before the next one is even looked at - users dropped, owner set, recovery model set, the users you asked for added. A copy of production should not sit with production's users in it while the rest of the list restores.
+
+* **With `-EnableTde`, nothing is readable until it is encrypted.** The restore statement itself ends with `SET RESTRICTED_USER`, in the same batch, so there is no moment at which an unencrypted copy of production is online and open. Encryption is then started and the next database is begun - the scan is a background job and they all run at once, so waiting for one before starting the next would be the slowest possible order. When every restore is done, the run waits for all of the scans together and lets people into each database as its own finishes: `MULTI_USER`, then read-only if you asked for it.
+
+  A database whose scan has not finished when `-TdeWaitMinutes` runs out is **left shut**, and the two statements to run when it does finish are printed:
+
+  ```
+  Sales is 68% encrypted after 3600s and it is still going, which a big database does. It is still
+  RESTRICTED_USER, so nothing can read it unencrypted. When it finishes, this is all that is left:
+      ALTER DATABASE [Sales] SET MULTI_USER;
+  ```
+
+  A scan that never moved at all is reported as that rather than as a timeout, because "0%, and it never moved" means something else is wrong - or that there is no encryption key - and that is a different morning from "68% and still going".
+
+  Proven against SQL Server 2025 rather than assumed: the scan does run to completion while the database is `RESTRICTED_USER`, an ordinary login is refused throughout and let in only after the run opens the database, and a wait that runs out leaves it shut. Twenty-two checks, keys and test database taken away afterwards.
 
 * **A striped backup is restored rather than refused.** One file of a set is not reported as striped by `RESTORE HEADERONLY`, it is refused - so on that refusal the script tries again with the blobs written beside it, and only gives up if the set is still incomplete.
 
