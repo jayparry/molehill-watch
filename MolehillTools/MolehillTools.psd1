@@ -46,6 +46,7 @@
         'Test-MhDatabaseStatus',
         'Test-MhSqlConnectionString',
         'Test-MhSqlConnectSettings',
+        'Test-MhSqlTlsHandshake',
         'Write-MhTui',
         'Write-MhTuiField',
         'Write-MhTuiKeys',
