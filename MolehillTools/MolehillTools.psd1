@@ -15,6 +15,7 @@
         'Add-MhTuiChar',
         'Clear-MhTuiScreen',
         'ConvertTo-MhTuiKeys',
+        'Get-MhPatchStatus',
         'Get-MhSqlAuthAvailability',
         'Get-MhSqlAuthMethods',
         'Get-MhSqlClientNamespace',
