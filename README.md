@@ -145,12 +145,22 @@ MolehillWatch\
 ├─ Docs\
 │  ├─ Admin-Guide.md                        your day-to-day runbook
 │  └─ Client-Onboarding-Guide.md            send to the client
-├─ MolehillTools\                           ← the module the tools are becoming
+├─ MolehillTools\                           ← every tool lives here now
 │  ├─ MolehillTools.psd1                    manifest: version and what it exports
 │  ├─ MolehillTools.psm1                    loader
-│  ├─ Private\SqlConnect.ps1                the connect screen, the pickers, the plumbing
-│  └─ Public\                               Get-MhSqlConnectionString, Invoke-MhSelfTest
-└─ Tools\
+│  ├─ Private\SelfTest.ps1                  the check harness the whole module shares
+│  ├─ Private\Sql.ps1                       connection strings, queries, escaping
+│  ├─ Private\SqlConnect.ps1                the connect screen, the pickers, the auth matrix
+│  ├─ Private\Diagnostics.ps1               logging, step timing, connectivity, error meanings
+│  ├─ Private\Backup.ps1                    timestamps, SAS tokens, RESTORE building, blobs
+│  ├─ Private\ModuleHygiene.ps1             checks about the module itself
+│  └─ Public\                               one file per tool: Copy-MhSqlAccess, Restore-MhDatabaseCopy,
+│                                           Restore-MhLatestAzureBackup, Get-MhPatchStatus,
+│                                           Get-MhSqlLicensingAudit, Test-MhDatabaseStatus,
+│                                           Test-MhSqlTlsHandshake, Export-MhDatabaseSample,
+│                                           Invoke-MhSqlConnectionTester, Test-MhSqlConnectionString,
+│                                           Get-MhSqlConnectionString, Invoke-MhSelfTest
+└─ Tools\                                   one file each, over the module: same names, same arguments
    ├─ Get-PatchStatus.ps1                   standalone patch check for any server (no install)
    ├─ Test-DatabaseStatus.ps1               "is everything back?" after a patch, reboot or restore
    ├─ Restore-DatabaseCopy.ps1              restores databases to another server, directly or via Azure Blob Storage
@@ -445,7 +455,7 @@ Invoke-Sqlcmd -ConnectionString (.\Get-SqlConnectionString.ps1) -Query 'SELECT @
 
 ### MolehillTools, the module underneath (`MolehillTools\`)
 
-The screens, the authentication matrix, the connection string building and the console plumbing live in a module now, because none of that is about sampling databases - and because the same helpers had been copied into tool after tool. `Invoke-Sql` existed in **seven** copies before this started, `New-ConnectionString` in six: when a bug was found in one, it had to be found again in the other six.
+The screens, the authentication matrix, the connection string building and the console plumbing live in a module now, because none of that is about sampling databases - and because the same helpers had been copied into tool after tool. `Invoke-Sql` existed in **six** copies before this started and `New-ConnectionString` in five: when a bug was found in one, it had to be found again in the rest.
 
 ```powershell
 Import-Module .\MolehillTools\MolehillTools.psd1
@@ -473,12 +483,28 @@ Functions are prefixed `Mh`, the way dbatools uses `Dba`, so nothing collides wi
 
   The ticks are held inside the picker rather than written onto your objects, so any list works without being shaped for it.
 * **Writing another screen in the same style**: `Read-MhTuiKey`, `ConvertTo-MhTuiKeys`, `Set-MhTuiKeyScript`, `Write-MhTui`, `Write-MhTuiTitle`, `Write-MhTuiKeys`, `Write-MhTuiField`, `Clear-MhTuiScreen`, `Add-MhTuiChar`, `Remove-MhTuiChar`.
-* **One command to check everything**: `Invoke-MhSelfTest` runs the module's own checks and every tool's `-SelfTest` - 406 of them at the time of writing - and reports a line per tool. `-Name '*Access*'` narrows it, `-Detailed` shows every check. A tool that will not even start is reported as that tool failing rather than taking the run down with it.
+* **The tools themselves**: `Copy-MhSqlAccess`, `Restore-MhDatabaseCopy`, `Restore-MhLatestAzureBackup`, `Get-MhPatchStatus`, `Get-MhSqlLicensingAudit`, `Test-MhDatabaseStatus`, `Test-MhSqlTlsHandshake`, `Export-MhDatabaseSample`, `Invoke-MhSqlConnectionTester`, `Test-MhSqlConnectionString`. Each returns an object - what it planned, what it did, what it could not do - so one can feed the next, and each writes its report to the host rather than onto the pipeline.
+* **The plumbing they share**, which used to be copied into each of them: `Initialize-MhLog`, `Write-MhLog`, `Start-MhStep`, `Complete-MhStep`, `Split-MhSqlInstanceName`, `Test-MhSqlConnectivity`, `Get-MhSqlErrorExplanation`, `Confirm-MhAction`, `ConvertTo-MhUtcTime`, `ConvertTo-MhPlainSas`, `New-MhRestoreCommand`, `Get-MhBlobToFile`, `Invoke-MhLongRunningSql`.
+* **One command to check everything**: `Invoke-MhSelfTest` runs every registered set and each tool file, and reports a line each - 631 checks in 15 sets at the time of writing, plus the 12 tool files that run and hand over. `-Name '*Access*'` narrows it, `-Detailed` shows every check. A tool that will not even start is reported as that tool failing rather than taking the run down with it.
 * Everything drawn goes to the host with `Write-Host`, never to the output stream, so a script built on it can put its own result on the pipeline cleanly.
 
-**The `Tools\*.ps1` scripts are staying.** Copying a single file to a locked-down server is how this estate works, so each one that has moved into the module is now a few lines that import it and call the function - `Get-SqlConnectionString.ps1` is 104 lines of help and three of code. Nothing you or a client currently runs has changed its name or its arguments.
+**The `Tools\*.ps1` scripts are staying.** Copying a single file to a locked-down server is how this estate works, so each one is now its help, its parameters, and a handful of lines that import the module and call the function. Nothing you or a client currently runs has changed its name, its arguments or its exit codes - every one of those was checked against a real run while it was moved.
 
-**Still to move**: the other eight tools, one at a time, each with its tests. Until then they keep their own copies of the plumbing and work exactly as they did.
+Each file hands its arguments on by asking the function what it takes, rather than by a list of names inside the file. A list is how a shim silently drops a parameter: you pass `-ComputerName`, the file accepts it, the function never sees it, and the run happens against the defaults without saying anything. That happened once for real, and twice more while this was being written, so there is no list left to drift - and the module checks that each file takes exactly what its function takes, with the same defaults.
+
+**What moving all ten actually did.** Of 162 functions across the old `Tools\*.ps1`, 32 were defined in more than one file - 61 duplicate copies in all. `Invoke-Sql` and `New-ConnectionString` had five each inside `Tools` (and `Invoke-Sql` a sixth in the Client installer, which is not part of this), the whole logging and connectivity layer three each, and the test helper eight. There are none left, and `Invoke-MhSelfTest` fails if a name is ever claimed by two files again.
+
+The line count went **up**, not down: 12,346 lines of `Tools` became 1,849 lines of `Tools` plus 11,281 of module. Two reasons, both deliberate. Each tool file keeps its own full help, because `Get-Help` on a file copied to a server is the only documentation that reaches it. And the move added about 250 checks that did not exist before - the shared plumbing had none at all, and the parts most worth checking were the parts nobody had: how an instance name is pulled apart, what each SQL Server error number means, and how a timestamp is read on a machine set to another region.
+
+**What the checks found while this was happening**, none of which any of the ten tools had been failing visibly:
+
+* three tools still called `exit` inside what is now a module function, where it ends the session rather than the tool - one of them in the middle of writing an HTML report
+* two tools shared `$script:AuthMethods`, so the connection tester's nine authentication methods replaced the connect screen's ten
+* two tools shared a blob list the same way
+* one function called a command that no longer existed, on a path only a real restore reaches
+* `@($list)` on a generic list throws in PowerShell 7, which turned two successful runs into errors after the work was already done
+
+Each of those is now a check that runs every time, and each check was proved by breaking the thing it watches on purpose and watching it fail.
 
 ## Connection string tester (`Tools\Test-SqlConnectionString.ps1`)
 

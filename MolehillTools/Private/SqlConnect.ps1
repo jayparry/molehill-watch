@@ -576,7 +576,13 @@ function Select-MhSqlClientNamespace {
 }
 
 # the methods, in the order and under the names SSMS uses
-function Get-MhSqlAuthMethods { , $script:AuthMethods }
+<#
+  Every authentication method the screen offers, one at a time.
+
+  Not ", $list": that hands back an array holding the list, so a caller's @(...) counts one method
+  however many there are. Callers wrap; this emits.
+#>
+function Get-MhSqlAuthMethods { foreach ($method in $script:AuthMethods) { $method } }
 
 #==============================================================================
 # The connection string
@@ -1229,5 +1235,12 @@ Register-MhSelfTest -Name 'The connect screen and the pickers' -Test {
     Test-MhCheck 'and a named instance is pointed at SQL Browser' ((Get-MhSqlConnectExplanation -Message 'error: 26 - Error Locating Server/Instance Specified, server was not found' -Settings $s) -match 'SQL Browser')
     Test-MhCheck 'an SSPI failure is not called a bad password' ((Get-MhSqlConnectExplanation -Message 'The target principal name is incorrect. Cannot generate SSPI context.' -Settings $s) -match 'Kerberos')
     Test-MhCheck 'an unknown error explains nothing rather than guessing' ((Get-MhSqlConnectExplanation -Message 'Something odd' -Settings $s) -eq '')
+
+    Test-MhSection 'what the module hands back'
+    # a list wrapped in a comma counts as one item however many are in it, which is a trap
+    # this module has fallen into twice
+    $methods = @(Get-MhSqlAuthMethods)
+    Test-MhCheck 'every authentication method comes back, not one array holding them' ($methods.Count -gt 5) ("$($methods.Count) methods")
+    Test-MhCheck 'and each of them is a method rather than a list' ($null -ne $methods[0].Id -and $null -ne $methods[0].Name)
 
 }

@@ -33,6 +33,10 @@
 .PARAMETER Detailed
     Show every check from every tool, not just the failures.
 
+.NOTES
+    Result is PASS for a set of checks that passed, FAIL for one that did not, and SHIM for a
+    tool file that ran and handed over to the module's checks - counted once, under the module.
+
 .OUTPUTS
     One object per thing tested, with Name, Passed, Failed, Skipped, ExitCode and Result.
 
@@ -44,7 +48,7 @@
 
 .EXAMPLE
     # for a build step: nothing failed if this is zero
-    @(Invoke-MhSelfTest | Where-Object { $_.Result -ne 'PASS' }).Count
+    @(Invoke-MhSelfTest | Where-Object { $_.Result -eq 'FAIL' }).Count
 #>
 function Invoke-MhSelfTest {
     [CmdletBinding()]
@@ -140,19 +144,26 @@ function Invoke-MhSelfTest {
                     foreach ($line in ($lines | Select-Object -Last 6)) { Write-Host "    $line" -ForegroundColor DarkYellow }
                 }
 
+                # SHIM, not PASS: it ran and handed over to the module's checks, which were
+                # counted once already. A row reading "0 passed, PASS" says the opposite.
+                $delegated = $ok -and $passed -eq 0 -and $failedLines.Count -eq 0
                 $results.Add([pscustomobject]@{
                     Name = $script.Name; Passed = $passed; Failed = $failedLines.Count
                     Skipped = $skipped; ExitCode = $exitCode
-                    Result = $(if ($ok) { 'PASS' } else { 'FAIL' })
+                    Result = $(if (-not $ok) { 'FAIL' } elseif ($delegated) { 'SHIM' } else { 'PASS' })
                 })
             }
         }
     }
 
-    $bad = @($results | Where-Object { $_.Result -ne 'PASS' })
+    $bad = @($results | Where-Object { $_.Result -eq 'FAIL' })
+    $shims = @($results | Where-Object { $_.Result -eq 'SHIM' })
+    $sets = @($results | Where-Object { $_.Result -eq 'PASS' })
     Write-Host ''
     if ($bad.Count -eq 0) {
-        Write-Host ("All {0} checked, all passed." -f $results.Count) -ForegroundColor Green
+        $summary = 'All {0} checks in {1} set(s) passed' -f ($sets | Measure-Object Passed -Sum).Sum, $sets.Count
+        if ($shims.Count) { $summary += ', and {0} shim(s) ran and handed over' -f $shims.Count }
+        Write-Host ($summary + '.') -ForegroundColor Green
     }
     else {
         Write-Host ("{0} of {1} failed: {2}" -f $bad.Count, $results.Count, (($bad | ForEach-Object Name) -join ', ')) -ForegroundColor Red
