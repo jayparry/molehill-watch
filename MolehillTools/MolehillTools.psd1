@@ -20,6 +20,7 @@
         'Get-MhSqlClientNamespace',
         'Get-MhSqlConnectExplanation',
         'Get-MhSqlConnectionString',
+        'Get-MhSqlLicensingAudit',
         'Get-MhSqlDatabaseList',
         'Get-MhSqlServerInfo',
         'Get-MhTuiSelectionSummary',

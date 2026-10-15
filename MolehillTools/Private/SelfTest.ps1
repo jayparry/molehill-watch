@@ -64,7 +64,9 @@ function Invoke-MhRegisteredTest {
     $script:CheckSkipped = 0
     $script:CheckPassed = 0
     $broke = ''
-    try { & $Registered.Test }
+    # $null = so that anything a check happens to leave on the pipeline does not come back as
+    # part of this function's result: the checks report through Test-MhCheck, not by returning
+    try { $null = & $Registered.Test }
     catch { $broke = ($_.Exception.GetBaseException().Message -split "`r?`n")[0] }
 
     if ($broke) { Write-Host "      the checks themselves fell over: $broke" -ForegroundColor Red }
