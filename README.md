@@ -399,6 +399,15 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "D:\Scripts\Clone-Databa
 
   Proven against SQL Server 2025 rather than assumed: the scan does run to completion while the database is `RESTRICTED_USER`, an ordinary login is refused throughout and let in only after the run opens the database, and a wait that runs out leaves it shut. Twenty-two checks, keys and test database taken away afterwards.
 
+  **It also reports what the scan asked of the disk**, because "it took three hours" cannot tell you whether to buy IOPS or megabytes a second and this can:
+
+  ```
+  MPS3: encrypted with AES_256 (256-bit) after 2h 58m 11s
+    the scan moved 614 GB of disk I/O at 57 MB/s and 2,980 IOPS, 19 KB and 0.8 ms per operation
+  ```
+
+  The encryption scan reads every page and writes it back, so a 300 GB database moves about 600 GB past the disk whatever else is true. Reading that line against what the storage is provisioned for is the whole point: 57 MB/s against a 125 MB/s disk is not a throughput problem, and 2,980 IOPS against a 3,000 IOPS limit is where the three hours actually went. `sys.dm_io_virtual_file_stats` is read before and after and subtracted, each database's counters taken the moment *it* finishes rather than at the end of the wait, so one that encrypted in ten minutes is not rated over the three hours the one beside it took. The database is shut to everyone while it encrypts, so nothing else is touching those files and the numbers belong to the scan alone. If the counters cannot be read the run carries on and simply says no rate.
+
 * **It says what it is doing while it does it.** The restore is the long part, so it is announced before it starts rather than after it finishes - otherwise the last line on screen is the database going offline, which then looks like the thing taking twenty minutes. SQL Server's own progress comes back as ordinary log lines, one every 5%, with how long it has taken and roughly how long is left:
 
   ```

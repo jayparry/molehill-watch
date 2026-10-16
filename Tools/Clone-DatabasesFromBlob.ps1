@@ -1314,6 +1314,73 @@ WHERE DB_NAME(k.database_id) IN ($($placeholders -join ', '))
     }
 }
 
+<#
+  What the files of these databases have done since the server last started: reads, writes, bytes,
+  and the time spent waiting on them.
+
+  Read before and after the encryption scan and subtracted, this says what the scan actually asked
+  of the disk, which is the only way to tell a scan the storage is holding back from one that is
+  simply not asking for much. Three hours on its own cannot tell you whether to raise IOPS or MB/s.
+
+  The measurement is clean because of how the rest of this works: the database is shut to everyone
+  while it encrypts, so nothing else is touching those files and the counters belong to the scan.
+#>
+function Get-DatabaseIoStat {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [string] $Server, [Parameter(Mandatory)] [string[]] $DatabaseName)
+
+    $parameters = @{}
+    $placeholders = New-Object System.Collections.Generic.List[string]
+    for ($i = 0; $i -lt $DatabaseName.Count; $i++) {
+        $parameters["@d$i"] = $DatabaseName[$i]
+        $placeholders.Add("@d$i")
+    }
+
+    $query = @"
+SELECT  DatabaseName = DB_NAME(f.database_id),
+        Reads = SUM(CONVERT(bigint, f.num_of_reads)), Writes = SUM(CONVERT(bigint, f.num_of_writes)),
+        BytesRead = SUM(CONVERT(bigint, f.num_of_bytes_read)),
+        BytesWritten = SUM(CONVERT(bigint, f.num_of_bytes_written)),
+        StallMs = SUM(CONVERT(bigint, f.io_stall))
+FROM sys.dm_io_virtual_file_stats(NULL, NULL) AS f
+WHERE DB_NAME(f.database_id) IN ($($placeholders -join ', '))
+GROUP BY f.database_id
+"@
+    $stats = @{}
+    foreach ($row in (Invoke-Sql -Server $Server -Query $query -Parameters $parameters).Rows) {
+        $stats[[string]$row['DatabaseName']] = [pscustomobject]@{
+            Reads        = [double]$row['Reads']
+            Writes       = [double]$row['Writes']
+            BytesRead    = [double]$row['BytesRead']
+            BytesWritten = [double]$row['BytesWritten']
+            StallMs      = [double]$row['StallMs']
+        }
+    }
+    $stats
+}
+
+<#
+  That difference, said in the units a disk is bought in.
+
+  Kept pure and apart from the querying so the arithmetic can be checked, and formatted through the
+  invariant culture like everything else here: this is the line someone takes to whoever owns the
+  storage, and a server set to a German locale should not change the numbers on it.
+
+  All four numbers earn their place. MB/s against IOPS says which of the two limits is the one being
+  hit; the average operation size says why; and the wait per operation says whether the disk is
+  being slow about it or is simply not being asked for more.
+#>
+function Format-IoRate {
+    [CmdletBinding()]
+    param([double] $Bytes, [double] $Operations, [double] $Seconds, [double] $StallMs = 0)
+
+    if ($Seconds -le 0 -or $Operations -le 0 -or $Bytes -le 0) { return '' }
+    $invariant = [System.Globalization.CultureInfo]::InvariantCulture
+    [string]::Format($invariant, '{0} of disk I/O at {1:n0} MB/s and {2:n0} IOPS, {3:n0} KB and {4:n1} ms per operation',
+                     (Format-Size $Bytes), (($Bytes / 1MB) / $Seconds), ($Operations / $Seconds),
+                     (($Bytes / $Operations) / 1KB), ($StallMs / $Operations))
+}
+
 # how big each database is, asked once at the start of a wait: the files do not change size while
 # the pages inside them are being encrypted
 function Get-DatabaseSizeMb {
@@ -1431,6 +1498,14 @@ function Wait-DatabaseEncryption {
     $saidAt = -1          # the lowest percentage reported last time anything was said
     $progress = @()
 
+    # what the files had already done before any of this, to subtract from afterwards. Wrapped
+    # because a run that cannot read the counters should still restore the databases
+    $ioBefore = @{}
+    $ioAfter = @{}
+    $endedAt = @{}
+    try { $ioBefore = Get-DatabaseIoStat -Server $Server -DatabaseName $DatabaseName }
+    catch { Write-Deep ('  the file I/O counters could not be read, so there will be no rate: ' + $_.Exception.Message) }
+
     $sizes = Get-DatabaseSizeMb -Server $Server -DatabaseName $DatabaseName
     $smallestGb = 0
     foreach ($name in $DatabaseName) {
@@ -1461,6 +1536,15 @@ function Wait-DatabaseEncryption {
             $one = $null
             foreach ($candidate in $progress) { if ($candidate.Name -eq $name) { $one = $candidate } }
             if (-not $one -or $one.State -ne 3) { $pending += $name }
+        }
+
+        # each one's counters are read the moment it finishes rather than at the end of the wait:
+        # a database that encrypted in ten minutes must not be rated over three hours of waiting
+        # for the one beside it
+        foreach ($name in $DatabaseName) {
+            if ($ioAfter.ContainsKey($name) -or ($pending -contains $name)) { continue }
+            $endedAt[$name] = $timer.Elapsed.TotalSeconds
+            try { $ioAfter[$name] = (Get-DatabaseIoStat -Server $Server -DatabaseName @($name))[$name] } catch { }
         }
 
         if ($pending.Count -eq 0) { break }
@@ -1496,11 +1580,28 @@ function Wait-DatabaseEncryption {
         Start-Sleep -Seconds $PollSeconds
     }
 
+    # anything still going is measured over the whole wait, which is all of its scan so far
+    foreach ($name in $DatabaseName) {
+        if ($ioAfter.ContainsKey($name)) { continue }
+        $endedAt[$name] = $timer.Elapsed.TotalSeconds
+        try { $ioAfter[$name] = (Get-DatabaseIoStat -Server $Server -DatabaseName @($name))[$name] } catch { }
+    }
+
     foreach ($name in $DatabaseName) {
         $one = $null
         foreach ($candidate in $progress) { if ($candidate.Name -eq $name) { $one = $candidate } }
         $encrypted = [bool]($one -and $one.State -eq 3)
         $now = $(if (-not $one) { -1 } elseif ($encrypted) { 100 } else { $one.Percent })
+
+        $io = ''
+        if ($ioBefore.ContainsKey($name) -and $ioAfter.ContainsKey($name) -and $ioBefore[$name] -and $ioAfter[$name]) {
+            $from = $ioBefore[$name]
+            $to = $ioAfter[$name]
+            $io = Format-IoRate -Bytes (($to.BytesRead - $from.BytesRead) + ($to.BytesWritten - $from.BytesWritten)) `
+                                -Operations (($to.Reads - $from.Reads) + ($to.Writes - $from.Writes)) `
+                                -Seconds $endedAt[$name] -StallMs ($to.StallMs - $from.StallMs)
+        }
+
         [pscustomobject]@{
             Name      = $name
             Encrypted = $encrypted
@@ -1509,6 +1610,7 @@ function Wait-DatabaseEncryption {
             Algorithm = $(if ($one) { $one.Algorithm } else { '' })
             KeyLength = $(if ($one) { $one.KeyLength } else { 0 })
             Seconds   = [math]::Round($timer.Elapsed.TotalSeconds, 1)
+            Io        = $io
             # it never moved: either there is still no encryption key, or it is exactly where it
             # was when the waiting started
             Stalled   = [bool]((-not $encrypted) -and $now -le $startedAt[$name])
@@ -1931,6 +2033,35 @@ if ($SelfTest) {
     Check 'eight hours of 8 TB is tens of lines, not hundreds' ($eightTb -le 60) "$eightTb lines"
     $tenGb = [math]::Floor(60 / (Get-ProgressInterval -SmallestGb 10))
     Check 'and a minute of 10 GB still says something' ($tenGb -ge 4) "$tenGb lines"
+
+    Write-Host '  what the scan asked of the disk' -ForegroundColor Gray
+    # the arithmetic, on numbers chosen so the answers are round ones
+    $rate = Format-IoRate -Bytes (2 * 1GB) -Operations 2048 -Seconds 2 -StallMs 4096
+    Check 'megabytes a second' ($rate -match '1,024 MB/s') $rate
+    Check 'operations a second' ($rate -match '1,024 IOPS') $rate
+    Check 'how big each one was' ($rate -match '1,024 KB') $rate
+    Check 'and how long each one waited' ($rate -match '2\.0 ms') $rate
+
+    # the shape of the thing this was added for: a 300 GB database reads and writes every page, so
+    # about 600 GB of traffic, and three hours of that is a disk sitting on a 3,000 IOPS limit
+    # rather than anywhere near a 125 MB/s one
+    $real = Format-IoRate -Bytes (600 * 1GB) -Operations (3000 * 10800) -Seconds 10800 -StallMs 0
+    Check 'a three-hour scan of a 300 GB copy reads as 57 MB/s' ($real -match '57 MB/s') $real
+    Check 'at 3,000 IOPS, which is the limit it is actually hitting' ($real -match '3,000 IOPS') $real
+    Check 'in operations of about 19 KB' ($real -match '19 KB') $real
+
+    Check 'nothing measured says nothing at all' ((Format-IoRate -Bytes 0 -Operations 0 -Seconds 0) -eq '')
+    Check 'and neither does a wait with no time in it' ((Format-IoRate -Bytes 1GB -Operations 100 -Seconds 0) -eq '')
+
+    $was = [System.Threading.Thread]::CurrentThread.CurrentCulture
+    try {
+        foreach ($culture in 'en-GB', 'en-US', 'de-DE') {
+            [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::GetCultureInfo($culture)
+            $under = Format-IoRate -Bytes (2 * 1GB) -Operations 2048 -Seconds 2 -StallMs 4096
+            Check "the same numbers under $culture" ($under -eq $rate) $under
+        }
+    }
+    finally { [System.Threading.Thread]::CurrentThread.CurrentCulture = $was }
 
     Write-Host '  how long things took, said in a way a person reads' -ForegroundColor Gray
     Check 'seconds' ((Format-Duration 48) -eq '48s') (Format-Duration 48)
@@ -2389,7 +2520,8 @@ SELECT  ServerName   = CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')),
             $script:StepPrefix = if ($encrypting.Count -gt 1) { $wait.Name } else { '' }
 
             if ($wait.Encrypted) {
-                Write-Log ('{0}: encrypted with {1} ({2}-bit) after {3}s' -f $wait.Name, $wait.Algorithm, $wait.KeyLength, $wait.Seconds)
+                Write-Log ('{0}: encrypted with {1} ({2}-bit) after {3}' -f $wait.Name, $wait.Algorithm, $wait.KeyLength, (Format-Duration $wait.Seconds))
+                if ($wait.Io) { Write-Log ('  the scan moved ' + $wait.Io) }
                 $outcome.Encryption = '{0} {1}-bit' -f $wait.Algorithm, $wait.KeyLength
                 try {
                     Start-Step 'Open it up'
@@ -2421,7 +2553,8 @@ SELECT  ServerName   = CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')),
                 Write-Log ("{0} is {1}% encrypted after {2}s and {3}. It is still RESTRICTED_USER, so nothing can read it unencrypted. When it finishes, this is all that is left:`r`n    ALTER DATABASE {4} SET MULTI_USER;{5}" -f
                            $wait.Name, $wait.Percent, $wait.Seconds, $why, (Esc-Name $wait.Name),
                            $(if ($ReadOnly) { "`r`n    ALTER DATABASE $(Esc-Name $wait.Name) SET READ_ONLY WITH ROLLBACK IMMEDIATE;" } else { '' })) -Level WARN
-                Write-Log ('Watch it with: SELECT encryption_state, percent_complete FROM sys.dm_database_encryption_keys WHERE database_id = DB_ID({0});' -f ("'" + (Esc-Str $wait.Name) + "'"))
+                if ($wait.Io) { Write-Log ('  so far the scan has moved ' + $wait.Io) }
+            Write-Log ('Watch it with: SELECT encryption_state, percent_complete FROM sys.dm_database_encryption_keys WHERE database_id = DB_ID({0});' -f ("'" + (Esc-Str $wait.Name) + "'"))
             }
             $script:StepPrefix = ''
         }
