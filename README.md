@@ -410,6 +410,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "D:\Scripts\Clone-Databa
 
   Those are log lines rather than something overwriting itself on one line, because SQL Agent keeps the output and a line per five percent with the time on it is how you tell a restore that is slow from a restore that has stopped.
 
+* **`-CompatibilityLevel` sets the level each copy ends up at**, within what the instance can do: a number, or `Latest` for the highest it supports. A restored database otherwise keeps whatever level the restore gave it, which for an old one is the oldest level the engine still allows. Asking for more than the instance can do is refused before anything is restored, with the number it would take; asking for something it considers too old is left to SQL Server, whose own refusal lists every level it will accept.
+
 * **A striped backup is restored rather than refused.** One file of a set is not reported as striped by `RESTORE HEADERONLY`, it is refused - so on that refusal the script tries again with the blobs written beside it, and only gives up if the set is still incomplete.
 
 * **No prompts anywhere.** A mandatory parameter would prompt, and a prompt in a job step is a hang rather than a failure, so the arguments are checked and refused with a message instead. `-WhatIf` prints the exact `RESTORE` statement and what would be done to each copy afterwards, and changes nothing.

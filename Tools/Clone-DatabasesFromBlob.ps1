@@ -95,6 +95,11 @@
     SIMPLE, FULL or BULK_LOGGED. Default SIMPLE, because a copy nobody backs up has no use for a
     log that keeps growing.
 
+.PARAMETER CompatibilityLevel
+    The compatibility level to set each copy to once it is restored: a number - 100, 110, 120 and
+    so on - or Latest for the highest this instance supports. Left out, the level is whatever the
+    restore produced, which for an old database is the lowest level the instance still supports.
+
 .PARAMETER AddUser
     Users to create afterwards, for logins that already exist. A plain name goes into every
     database; 'Sales:BiTeam:db_datareader' names one database, one user and its roles; a hashtable
@@ -188,6 +193,7 @@ param(
     # what to do with each copy afterwards
     [string] $Owner = 'sa',
     [ValidateSet('SIMPLE', 'FULL', 'BULK_LOGGED')] [string] $RecoveryModel = 'SIMPLE',
+    [ValidatePattern('^(?i)(latest|\d{3})$')] [string] $CompatibilityLevel,
     [object[]] $AddUser,
     [string[]] $AddUserRole,
     [switch] $ReadOnly,
@@ -1360,6 +1366,7 @@ function Get-EncryptionStateName {
     [CmdletBinding()]
     param([int] $State)
     switch ($State) {
+        0 { 'not encrypted' }        # no encryption key at all, which reads the same in a sentence
         1 { 'not encrypted' }
         2 { 'encrypting' }
         3 { 'encrypted' }
@@ -1555,14 +1562,43 @@ function Write-DatabaseState {
     # -DatabaseName matters: sys.database_principals is scoped to the connection's database, so
     # without it this counts master's users instead of this one's
     $final = (Invoke-Sql -Server $Server -DatabaseName $DatabaseName -Parameters @{ '@db' = $DatabaseName } -Query `
-              'SELECT recovery_model_desc, is_read_only, user_access_desc, Owner = SUSER_SNAME(owner_sid), Users = (SELECT COUNT(*) FROM sys.database_principals WHERE type IN (''S'',''U'',''G'') AND principal_id > 4), Encryption = ISNULL((SELECT TOP (1) k.encryption_state FROM sys.dm_database_encryption_keys k WHERE k.database_id = DB_ID(@db)), 0) FROM sys.databases WHERE name = @db').Rows[0]
+              'SELECT recovery_model_desc, is_read_only, user_access_desc, compatibility_level, Owner = SUSER_SNAME(owner_sid), Users = (SELECT COUNT(*) FROM sys.database_principals WHERE type IN (''S'',''U'',''G'') AND principal_id > 4), Encryption = ISNULL((SELECT TOP (1) k.encryption_state FROM sys.dm_database_encryption_keys k WHERE k.database_id = DB_ID(@db)), 0) FROM sys.databases WHERE name = @db').Rows[0]
 
-    Write-Log ('{0} is now: owner {1}, recovery {2}, {3}, {4}, {5}, {6} user(s) besides the built-in ones' -f
-               $DatabaseName, $final['Owner'], $final['recovery_model_desc'],
+    Write-Log ('{0} is now: owner {1}, recovery {2}, compatibility {3}, {4}, {5}, {6}, {7} user(s) besides the built-in ones' -f
+               $DatabaseName, $final['Owner'], $final['recovery_model_desc'], $final['compatibility_level'],
                ([string]$final['user_access_desc']).ToLower().Replace('_', ' '),
                $(if ([bool]$final['is_read_only']) { 'read-only' } else { 'read-write' }),
                (Get-EncryptionStateName ([int]$final['Encryption'])), $final['Users'])
     if ($Outcome) { $Outcome.Users = '{0} left' -f $final['Users'] }
+}
+
+<#
+  Works out which compatibility level was actually asked for.
+
+  "Latest" is the highest this instance can do, which is its major version with a nought on the
+  end: SQL Server 2022 is 160, 2025 is 170. Asking for more than that is refused here rather than
+  by SQL Server, because the number in the error is more use before the restore than after it.
+
+  A level this instance considers too old is left to SQL Server: its own refusal lists every value
+  it will take, which is better than a list kept in here and allowed to go stale.
+#>
+function Resolve-CompatibilityLevel {
+    [CmdletBinding()]
+    param([AllowEmptyString()] [string] $Wanted, [Parameter(Mandatory)] [int] $ServerMajor)
+
+    if (-not $Wanted) { return 0 }
+    $highest = $ServerMajor * 10
+
+    if ($Wanted -match '^(?i)latest$') { return $highest }
+    $level = 0
+    if (-not [int]::TryParse($Wanted, [ref]$level)) {
+        throw ("-CompatibilityLevel has to be a number like 110, or Latest. '{0}' is neither." -f $Wanted)
+    }
+    if ($level -gt $highest) {
+        throw ('-CompatibilityLevel {0} is higher than this instance can do: it is SQL Server major version {1}, so the highest is {2}.' -f
+               $level, $ServerMajor, $highest)
+    }
+    $level
 }
 
 <#
@@ -1608,6 +1644,23 @@ function Complete-RestoredDatabase {
     Invoke-DbStatement -Server $Server -DatabaseName $DatabaseName `
         -Statement ("ALTER DATABASE {DB} SET RECOVERY $RecoveryModel;")
     Complete-Step
+
+    if ($script:WantedCompatibility -gt 0) {
+        $was = Get-Scalar -Server $Server -Parameters @{ '@db' = $DatabaseName } -Query `
+               'SELECT compatibility_level FROM sys.databases WHERE name = @db'
+        if ([int]$was -eq $script:WantedCompatibility) {
+            Write-Detail ('  already at compatibility level {0}' -f $was)
+        }
+        else {
+            Start-Step ('Set the compatibility level to {0}' -f $script:WantedCompatibility)
+            Invoke-DbStatement -Server $Server -DatabaseName $DatabaseName `
+                -Statement ('ALTER DATABASE {{DB}} SET COMPATIBILITY_LEVEL = {0};' -f $script:WantedCompatibility)
+            $now = Get-Scalar -Server $Server -Parameters @{ '@db' = $DatabaseName } -Query `
+                   'SELECT compatibility_level FROM sys.databases WHERE name = @db'
+            Write-Log ('Compatibility level {0} -> {1}' -f $was, $now)
+            Complete-Step
+        }
+    }
 
     if ($Grants.Count) {
         Start-Step 'Add the users asked for'
@@ -1756,6 +1809,7 @@ if ($SelfTest) {
     Check 'shutting it happens in the same batch as the restore, not after it' ($sql -match "(?s)^RESTORE DATABASE .*ALTER DATABASE \[Sales\] SET RESTRICTED_USER WITH ROLLBACK IMMEDIATE;$") $sql
 
     Write-Host '  where each database has got to' -ForegroundColor Gray
+    Check 'no key at all reads as not encrypted' ((Get-EncryptionStateName 0) -eq 'not encrypted')
     Check 'state 1 is not encrypted' ((Get-EncryptionStateName 1) -eq 'not encrypted')
     Check 'state 2 is encrypting' ((Get-EncryptionStateName 2) -eq 'encrypting')
     Check 'state 3 is encrypted' ((Get-EncryptionStateName 3) -eq 'encrypted')
@@ -1849,6 +1903,21 @@ if ($SelfTest) {
     Check 'a Windows user goes' (-not (Test-SystemPrincipal -PrincipalId 6 -Name 'CONTOSO\jo' -Type 'U'))
     Check 'a Windows group goes' (-not (Test-SystemPrincipal -PrincipalId 7 -Name 'CONTOSO\Reporting' -Type 'G'))
     Check 'an Entra user goes' (-not (Test-SystemPrincipal -PrincipalId 8 -Name 'jo@contoso.com' -Type 'E'))
+
+    Write-Host '  the compatibility level asked for' -ForegroundColor Gray
+    Check 'a number is taken as it is' ((Resolve-CompatibilityLevel -Wanted '140' -ServerMajor 17) -eq 140)
+    Check 'Latest on 2025 is 170' ((Resolve-CompatibilityLevel -Wanted 'Latest' -ServerMajor 17) -eq 170)
+    Check 'Latest on 2022 is 160' ((Resolve-CompatibilityLevel -Wanted 'latest' -ServerMajor 16) -eq 160)
+    Check 'the highest this instance can do is allowed' ((Resolve-CompatibilityLevel -Wanted '170' -ServerMajor 17) -eq 170)
+    Check 'not asking is not asking' ((Resolve-CompatibilityLevel -Wanted '' -ServerMajor 17) -eq 0)
+    $threw = ''
+    try { $null = Resolve-CompatibilityLevel -Wanted '170' -ServerMajor 16 } catch { $threw = $_.Exception.Message }
+    Check 'more than the instance can do is refused before anything is restored' ($threw -match 'the highest is 160') $threw
+    $threw = ''
+    try { $null = Resolve-CompatibilityLevel -Wanted 'tuesday' -ServerMajor 17 } catch { $threw = $_.Exception.Message }
+    Check 'and so is something that is not a level at all' ($threw -match 'has to be a number like 110, or Latest') $threw
+    # an old level is SQL Server's business: its own refusal lists what it will take
+    Check 'an old level is passed through for the server to judge' ((Resolve-CompatibilityLevel -Wanted '100' -ServerMajor 17) -eq 100)
 
     Write-Host '  how often to mention a scan that is still running' -ForegroundColor Gray
     Check 'a 10 GB copy is worth a line every 15 seconds' ((Get-ProgressInterval -SmallestGb 10) -eq 15) "$(Get-ProgressInterval -SmallestGb 10)s"
@@ -1991,6 +2060,13 @@ SELECT  ServerName   = CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')),
     if ([int]$dstInfo['Major'] -lt 16) {
         throw ('restoring straight from a container with a managed identity needs SQL Server 2022 or later, and {0} is major version {1}. On an older instance the credential has to hold a shared access signature instead.' -f
                $DestinationInstance, $dstInfo['Major'])
+    }
+
+    # worked out once, now that the instance has said what version it is, and before anything is
+    # restored: a number that is out of range should not be found out one database at a time
+    $script:WantedCompatibility = Resolve-CompatibilityLevel -Wanted $CompatibilityLevel -ServerMajor ([int]$dstInfo['Major'])
+    if ($script:WantedCompatibility -gt 0) {
+        Write-Log ('Each copy will be set to compatibility level {0}' -f $script:WantedCompatibility)
     }
 
     $defaultData = if ($DataPath) { $DataPath } else { [string]$dstInfo['DefaultData'] }
@@ -2195,8 +2271,9 @@ SELECT  ServerName   = CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')),
             if ($dryRun) {
                 Write-Log 'WhatIf: this is the statement that would run'
                 foreach ($line in ($sql -split "`r?`n")) { Write-Log ('    ' + $line) }
-                Write-Log ('WhatIf: then its users would be cleared, the owner set to {0} and the recovery model set to {1}{2}' -f
+                Write-Log ('WhatIf: then its users would be cleared, the owner set to {0}, the recovery model set to {1}{2}{3}' -f
                            $Owner, $RecoveryModel,
+                           $(if ($script:WantedCompatibility -gt 0) { ' and the compatibility level to ' + $script:WantedCompatibility } else { '' }),
                            $(if ($EnableTde) {
                                  ". It would be shut to everyone but its owners by the restore itself, encryption started, and the next database begun. Once every restore is done, this run would wait for all of them to finish encrypting - up to $TdeWaitMinutes minute(s) - and only then let people in" +
                                  $(if ($ReadOnly) { ' and set it read-only' } else { '' })
