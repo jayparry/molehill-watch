@@ -1308,6 +1308,53 @@ WHERE DB_NAME(k.database_id) IN ($($placeholders -join ', '))
     }
 }
 
+# how big each database is, asked once at the start of a wait: the files do not change size while
+# the pages inside them are being encrypted
+function Get-DatabaseSizeMb {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [string] $Server, [Parameter(Mandatory)] [string[]] $DatabaseName)
+
+    $parameters = @{}
+    $placeholders = New-Object System.Collections.Generic.List[string]
+    for ($i = 0; $i -lt $DatabaseName.Count; $i++) {
+        $parameters["@d$i"] = $DatabaseName[$i]
+        $placeholders.Add("@d$i")
+    }
+
+    $sizes = @{}
+    $query = @"
+SELECT DatabaseName = DB_NAME(database_id), Mb = CONVERT(bigint, SUM(CONVERT(bigint, size)) * 8 / 1024)
+FROM sys.master_files
+WHERE DB_NAME(database_id) IN ($($placeholders -join ', '))
+GROUP BY database_id
+"@
+    foreach ($row in (Invoke-Sql -Server $Server -Query $query -Parameters $parameters).Rows) {
+        $sizes[[string]$row['DatabaseName']] = [double]$row['Mb']
+    }
+    $sizes
+}
+
+<#
+  How often to say anything while the scans run.
+
+  Often enough to show it is alive, rarely enough that a job log is still readable afterwards. A
+  10 GB database encrypts in about a minute and deserves a line every fifteen seconds; an 8 TB one
+  takes hours, and a line every fifteen seconds is four hundred lines an hour of nothing happening.
+
+  It is based on the smallest database still encrypting because that is the one moving fastest -
+  the one whose percentage is actually going to change between one line and the next. As each
+  database finishes, the one left sets the pace again.
+#>
+function Get-ProgressInterval {
+    [CmdletBinding()]
+    param([double] $SmallestGb)
+
+    if ($SmallestGb -le 0) { return 15 }
+    # fifteen seconds to start with, and a minute more for every 100 GB, up to ten minutes
+    $seconds = 15 + (60 * [math]::Floor($SmallestGb / 100))
+    [int][math]::Min($seconds, 600)
+}
+
 # what each state is called, so a log line says something rather than a number
 function Get-EncryptionStateName {
     [CmdletBinding()]
@@ -1374,7 +1421,19 @@ function Wait-DatabaseEncryption {
     $deadline = (Get-Date).AddMinutes($WaitMinutes)
     $startedAt = @{}
     $said = [datetime]::MinValue
+    $saidAt = -1          # the lowest percentage reported last time anything was said
     $progress = @()
+
+    $sizes = Get-DatabaseSizeMb -Server $Server -DatabaseName $DatabaseName
+    $smallestGb = 0
+    foreach ($name in $DatabaseName) {
+        $gb = [double]$sizes[$name] / 1024
+        if ($gb -gt 0 -and ($smallestGb -eq 0 -or $gb -lt $smallestGb)) { $smallestGb = $gb }
+    }
+    $interval = Get-ProgressInterval -SmallestGb $smallestGb
+    Write-Log ('Waiting for {0} to finish encrypting. Progress every {1}, or sooner if it moves 5%.' -f
+               $(if ($DatabaseName.Count -eq 1) { $DatabaseName[0] } else { "$($DatabaseName.Count) databases" }),
+               (Format-Duration $interval))
 
     while ($true) {
         $progress = @(Get-EncryptionProgress -Server $Server -DatabaseName $DatabaseName)
@@ -1400,10 +1459,32 @@ function Wait-DatabaseEncryption {
         if ($pending.Count -eq 0) { break }
         if ((Get-Date) -ge $deadline) { break }
 
-        if (((Get-Date) - $said).TotalSeconds -ge 15) {
-            Write-Log ('  encrypting: {0} (after {1}s)' -f (Format-EncryptionProgress -Progress $progress -Expected $pending),
-                       [math]::Round($timer.Elapsed.TotalSeconds))
+        # the pace is set by the smallest database still going, so it is worked out again as each
+        # one finishes: eight hours of 8 TB should not be reported at the rate a 10 GB copy wants
+        $smallestGb = 0
+        foreach ($name in $pending) {
+            $gb = [double]$sizes[$name] / 1024
+            if ($gb -gt 0 -and ($smallestGb -eq 0 -or $gb -lt $smallestGb)) { $smallestGb = $gb }
+        }
+        $interval = Get-ProgressInterval -SmallestGb $smallestGb
+
+        # whichever comes first: the laggard has moved five points, or the log has been quiet for
+        # as long as a database that size deserves
+        $lowest = 100
+        foreach ($name in $pending) {
+            $one = $null
+            foreach ($candidate in $progress) { if ($candidate.Name -eq $name) { $one = $candidate } }
+            $at = $(if ($one) { $one.Percent } else { 0 })
+            if ($at -lt $lowest) { $lowest = $at }
+        }
+        $moved = ($lowest - $saidAt) -ge 5
+        $quiet = ((Get-Date) - $said).TotalSeconds -ge $interval
+
+        if ($moved -or $quiet) {
+            Write-Log ('  encrypting: {0} (after {1})' -f (Format-EncryptionProgress -Progress $progress -Expected $pending),
+                       (Format-Duration $timer.Elapsed.TotalSeconds))
             $said = Get-Date
+            $saidAt = $lowest
         }
         Start-Sleep -Seconds $PollSeconds
     }
@@ -1768,6 +1849,19 @@ if ($SelfTest) {
     Check 'a Windows user goes' (-not (Test-SystemPrincipal -PrincipalId 6 -Name 'CONTOSO\jo' -Type 'U'))
     Check 'a Windows group goes' (-not (Test-SystemPrincipal -PrincipalId 7 -Name 'CONTOSO\Reporting' -Type 'G'))
     Check 'an Entra user goes' (-not (Test-SystemPrincipal -PrincipalId 8 -Name 'jo@contoso.com' -Type 'E'))
+
+    Write-Host '  how often to mention a scan that is still running' -ForegroundColor Gray
+    Check 'a 10 GB copy is worth a line every 15 seconds' ((Get-ProgressInterval -SmallestGb 10) -eq 15) "$(Get-ProgressInterval -SmallestGb 10)s"
+    Check 'and so is anything under 100 GB' ((Get-ProgressInterval -SmallestGb 99) -eq 15) "$(Get-ProgressInterval -SmallestGb 99)s"
+    Check '300 GB gets a line every few minutes instead' ((Get-ProgressInterval -SmallestGb 300) -eq 195) "$(Get-ProgressInterval -SmallestGb 300)s"
+    Check 'a terabyte, less often again' ((Get-ProgressInterval -SmallestGb 1024) -eq 615 -or (Get-ProgressInterval -SmallestGb 1024) -eq 600) "$(Get-ProgressInterval -SmallestGb 1024)s"
+    Check '8 TB is capped rather than reported once an hour' ((Get-ProgressInterval -SmallestGb 8192) -eq 600) "$(Get-ProgressInterval -SmallestGb 8192)s"
+    Check 'and a size nobody could work out falls back to 15 seconds' ((Get-ProgressInterval -SmallestGb 0) -eq 15)
+    # the point of it: a scan that takes hours must not fill the log with hundreds of lines
+    $eightTb = [math]::Floor((8 * 3600) / (Get-ProgressInterval -SmallestGb 8192))
+    Check 'eight hours of 8 TB is tens of lines, not hundreds' ($eightTb -le 60) "$eightTb lines"
+    $tenGb = [math]::Floor(60 / (Get-ProgressInterval -SmallestGb 10))
+    Check 'and a minute of 10 GB still says something' ($tenGb -ge 4) "$tenGb lines"
 
     Write-Host '  how long things took, said in a way a person reads' -ForegroundColor Gray
     Check 'seconds' ((Format-Duration 48) -eq '48s') (Format-Duration 48)

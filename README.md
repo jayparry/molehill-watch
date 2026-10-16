@@ -395,6 +395,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "D:\Scripts\Clone-Databa
 
   A scan that never moved at all is reported as that rather than as a timeout, because "0%, and it never moved" means something else is wrong - or that there is no encryption key - and that is a different morning from "68% and still going".
 
+  **How often it says anything is worked out from the size of the smallest database still encrypting**, since that is the one whose percentage is actually going to change between one line and the next. Under 100 GB gets a line every 15 seconds; every further 100 GB adds a minute, up to a ceiling of ten minutes. A line also appears whenever the least-advanced database moves 5%, whichever comes first - so a 10 GB copy still reports its way through in about twenty lines, and eight hours of an 8 TB scan is tens of lines rather than the two thousand that a fixed fifteen seconds would have written into the job history. As each database finishes, the one left sets the pace again.
+
   Proven against SQL Server 2025 rather than assumed: the scan does run to completion while the database is `RESTRICTED_USER`, an ordinary login is refused throughout and let in only after the run opens the database, and a wait that runs out leaves it shut. Twenty-two checks, keys and test database taken away afterwards.
 
 * **It says what it is doing while it does it.** The restore is the long part, so it is announced before it starts rather than after it finishes - otherwise the last line on screen is the database going offline, which then looks like the thing taking twenty minutes. SQL Server's own progress comes back as ordinary log lines, one every 5%, with how long it has taken and roughly how long is left:
