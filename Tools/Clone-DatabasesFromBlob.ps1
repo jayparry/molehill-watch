@@ -267,10 +267,11 @@ function Complete-Step {
 }
 
 function Format-Size([double] $Bytes) {
-    if ($Bytes -ge 1TB) { return ('{0:n1} TB' -f ($Bytes / 1TB)) }
-    if ($Bytes -ge 1GB) { return ('{0:n1} GB' -f ($Bytes / 1GB)) }
-    if ($Bytes -ge 1MB) { return ('{0:n0} MB' -f ($Bytes / 1MB)) }
-    '{0:n0} KB' -f ($Bytes / 1KB)
+    $invariant = [System.Globalization.CultureInfo]::InvariantCulture
+    if ($Bytes -ge 1TB) { return ([string]::Format($invariant, '{0:n1} TB', $Bytes / 1TB)) }
+    if ($Bytes -ge 1GB) { return ([string]::Format($invariant, '{0:n1} GB', $Bytes / 1GB)) }
+    if ($Bytes -ge 1MB) { return ([string]::Format($invariant, '{0:n0} MB', $Bytes / 1MB)) }
+    [string]::Format($invariant, '{0:n0} KB', $Bytes / 1KB)
 }
 
 #==============================================================================
@@ -416,6 +417,9 @@ function ConvertTo-UtcTime {
     param([Parameter(Mandatory)] [AllowNull()] $Value)
 
     if ($null -eq $Value) { throw 'no timestamp to convert' }
+    if ($Value -isnot [string] -and $Value -is [System.Collections.IEnumerable]) {
+        throw ('expected one timestamp and was given {0} of them at once. That is a fault in whatever called this, not a date that cannot be read.' -f @($Value).Count)
+    }
     if ($Value -is [System.DateTimeOffset]) { return $Value.ToUniversalTime() }
     if ($Value -is [datetime]) {
         $when = [datetime]$Value
@@ -542,7 +546,47 @@ function Invoke-BlobRest {
 }
 
 <#
-  Every blob under a prefix, following the continuation marker.
+  Turns one page of the Blob REST API's answer into blobs and the marker for the next page.
+
+  Separate from the request so that it can be checked against a real page of XML without a storage
+  account - the parsing and the choosing that follows it are the parts that can be got wrong, and
+  they were: see the note on Get-ContainerBlob below.
+#>
+function ConvertFrom-BlobListXml {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [string] $Xml)
+
+    $document = [xml]$Xml
+    $blobs = New-Object System.Collections.Generic.List[object]
+    foreach ($blob in $document.EnumerationResults.Blobs.Blob) {
+        $blobs.Add([pscustomobject]@{
+            Name = [string]$blob.Name
+            # a DateTimeOffset, parsed from RFC 1123 with the invariant culture, and never touched
+            # as a string again: the machine's own date settings never get a say
+            LastModified = [System.DateTimeOffset]::Parse([string]$blob.Properties.'Last-Modified',
+                               [System.Globalization.CultureInfo]::InvariantCulture)
+            Length = [long]$blob.Properties.'Content-Length'
+        })
+    }
+
+    # an empty <NextMarker /> comes through the XML adapter as an element rather than as a string,
+    # and anything but a real marker has to read as "no more pages" or the loop below never ends
+    $marker = ''
+    $next = $document.EnumerationResults.NextMarker
+    if ($next -is [string]) { $marker = $next }
+    elseif ($next -and $next.InnerText) { $marker = [string]$next.InnerText }
+
+    [pscustomobject]@{ Blobs = $blobs.ToArray(); NextMarker = $marker.Trim() }
+}
+
+<#
+  Every blob under a prefix, one at a time, following the continuation marker.
+
+  Emitted one at a time rather than returned as a list: ", $list" hands the caller an array holding
+  the array, and a caller that wraps the result in @() - as it should - then has one element that
+  is all of the blobs. Which is how the first real run of this failed: the chooser read
+  $_.LastModified off that one element, got all twenty-five timestamps at once, and reported that
+  it could not make a date out of them. Every blob in the container, in one error message.
 
   A container with a few years of nightly backups in it holds more than one page of results, and a
   listing that stops at the first page quietly picks the newest of the first five thousand - which
@@ -556,31 +600,24 @@ function Get-ContainerBlob {
         [string] $EndpointSuffix = 'blob.core.windows.net'
     )
 
-    $found = New-Object System.Collections.Generic.List[object]
     $marker = ''
     $pages = 0
+    $count = 0
     do {
         $url = 'https://{0}.{1}/{2}?restype=container&comp=list&maxresults=5000' -f $Account, $EndpointSuffix, $Container
         if ($Prefix) { $url += '&prefix=' + [uri]::EscapeDataString($Prefix) }
         if ($marker) { $url += '&marker=' + [uri]::EscapeDataString($marker) }
 
-        $xml = [xml](Invoke-BlobRest -Url $url -Token $Token)
+        $page = ConvertFrom-BlobListXml -Xml (Invoke-BlobRest -Url $url -Token $Token)
         $pages++
-        foreach ($blob in $xml.EnumerationResults.Blobs.Blob) {
-            $found.Add([pscustomobject]@{
-                Name = [string]$blob.Name
-                # the same type Az.Storage hands back, so the choosing below behaves identically.
-                # RFC 1123 with the invariant culture: never the machine's own date settings.
-                LastModified = [System.DateTimeOffset]::Parse([string]$blob.Properties.'Last-Modified',
-                                   [System.Globalization.CultureInfo]::InvariantCulture)
-                Length = [long]$blob.Properties.'Content-Length'
-            })
+        foreach ($blob in $page.Blobs) {
+            $count++
+            $blob
         }
-        $marker = [string]$xml.EnumerationResults.NextMarker
+        $marker = $page.NextMarker
     } while ($marker)
 
-    Write-Deep ('  listed {0} blob(s) under ''{1}'' in {2} page(s)' -f $found.Count, $Prefix, $pages)
-    , $found.ToArray()
+    Write-Deep ('  listed {0} blob(s) under ''{1}'' in {2} page(s)' -f $count, $Prefix, $pages)
 }
 
 # the URL SQL Server restores from. Each segment is escaped, the slashes between them are not: a
@@ -673,6 +710,12 @@ function Select-LatestBackupBlob {
         [string[]] $Extensions = @('.bak'),
         [int] $SiblingWindowSeconds = 120
     )
+
+    foreach ($blob in $Blobs) {
+        if ($blob -isnot [string] -and $blob -is [System.Collections.IEnumerable]) {
+            throw ('the blobs were handed over as one element holding {0} of them, rather than one at a time. That is a fault in whatever called this: a container full of backups would otherwise be reported as having none.' -f @($blob).Count)
+        }
+    }
 
     $usable = @($Blobs | Where-Object {
         $name = ($_.Name -split '/')[-1]
@@ -1461,6 +1504,60 @@ if ($SelfTest) {
     Check 'another cloud is reachable' ($url -like 'https://mycompany.blob.core.usgovcloudapi.net/*') $url
     Check 'the credential statement names the container, quoted' ((New-BlobCredentialStatement 'https://mycompany.blob.core.windows.net/backups') -eq "CREATE CREDENTIAL [https://mycompany.blob.core.windows.net/backups] WITH IDENTITY = 'MANAGED IDENTITY';")
 
+    Write-Host '  reading the container listing' -ForegroundColor Gray
+    # a page of the Blob REST API's answer, cut down but in its real shape. The dates are the
+    # shape it really sends: RFC 1123, GMT, which no regional setting is allowed to touch.
+    $page = @'
+<?xml version="1.0" encoding="utf-8"?>
+<EnumerationResults ServiceEndpoint="https://mycompany.blob.core.windows.net/" ContainerName="backups">
+  <Prefix>FULL/DAILY/MPS3/</Prefix>
+  <MaxResults>5000</MaxResults>
+  <Blobs>
+    <Blob>
+      <Name>FULL/DAILY/MPS3/MPS3_20261014.bak</Name>
+      <Properties><Last-Modified>Wed, 14 Oct 2026 10:50:46 GMT</Last-Modified><Content-Length>1073741824</Content-Length><BlobType>BlockBlob</BlobType></Properties>
+    </Blob>
+    <Blob>
+      <Name>FULL/DAILY/MPS3/MPS3_20261015.bak</Name>
+      <Properties><Last-Modified>Thu, 15 Oct 2026 10:50:17 GMT</Last-Modified><Content-Length>1073748000</Content-Length><BlobType>BlockBlob</BlobType></Properties>
+    </Blob>
+    <Blob>
+      <Name>FULL/DAILY/MPS3/upload.log</Name>
+      <Properties><Last-Modified>Thu, 15 Oct 2026 11:02:00 GMT</Last-Modified><Content-Length>812</Content-Length><BlobType>BlockBlob</BlobType></Properties>
+    </Blob>
+  </Blobs>
+  <NextMarker />
+</EnumerationResults>
+'@
+    $read = ConvertFrom-BlobListXml -Xml $page
+    Check 'every blob on the page is read' (@($read.Blobs).Count -eq 3) ("$(@($read.Blobs).Count) blobs")
+    Check 'an empty NextMarker means there are no more pages' ($read.NextMarker -eq '') ("[$($read.NextMarker)]")
+    Check 'the name comes through whole, folders and all' ($read.Blobs[0].Name -eq 'FULL/DAILY/MPS3/MPS3_20261014.bak') $read.Blobs[0].Name
+    Check 'the size is a number' ($read.Blobs[0].Length -eq 1073741824) "$($read.Blobs[0].Length)"
+    Check 'the date is a DateTimeOffset, not a string' ($read.Blobs[0].LastModified -is [System.DateTimeOffset])
+    Check 'and it is the date the container said, in UTC' ($read.Blobs[0].LastModified -eq [System.DateTimeOffset]::new(2026, 10, 14, 10, 50, 46, [TimeSpan]::Zero)) $read.Blobs[0].LastModified.ToString('o')
+    $withMarker = ConvertFrom-BlobListXml -Xml ($page -replace '<NextMarker />', '<NextMarker>2!abc</NextMarker>')
+    Check 'a real marker is read, so the next page is asked for' ($withMarker.NextMarker -eq '2!abc') $withMarker.NextMarker
+    Check 'and an empty container reads as no blobs rather than failing' (@((ConvertFrom-BlobListXml -Xml '<?xml version="1.0"?><EnumerationResults><Blobs /><NextMarker /></EnumerationResults>').Blobs).Count -eq 0)
+
+    # the seam this had wrong on its first real run: the listing goes straight into the chooser, and
+    # what the chooser gets has to be the blobs themselves, not one element holding all of them
+    $chosen = Select-LatestBackupBlob -Blobs @($read.Blobs)
+    Check 'the listing feeds the chooser directly' ($null -ne $chosen.Chosen) 'nothing was chosen'
+    Check 'and the newest backup out of it wins' ($chosen.Chosen.Name -eq 'FULL/DAILY/MPS3/MPS3_20261015.bak') $chosen.Chosen.Name
+    Check 'the log file in the folder is not mistaken for a backup' ($chosen.Considered -eq 2) "considered $($chosen.Considered)"
+    # and what it used to be handed instead: one element holding every blob. That has to be refused
+    # at the door, because the alternative is not an error - it is "no backups in this container".
+    $wrapped = @(, @($read.Blobs))
+    $threw = ''
+    try { $null = Select-LatestBackupBlob -Blobs $wrapped } catch { $threw = $_.Exception.GetBaseException().Message }
+    Check 'being handed every blob as one element is refused' ($threw -match 'one element holding 3 of them') $threw
+    Check 'and the message says whose fault it is' ($threw -match 'fault in whatever called this') $threw
+    # the same mistake one layer down, for a caller that reaches past the chooser
+    $threw = ''
+    try { $null = ConvertTo-UtcTime @($read.Blobs).LastModified } catch { $threw = $_.Exception.GetBaseException().Message }
+    Check 'and so is handing three timestamps to something that wants one' ($threw -match 'expected one timestamp and was given 3 of them') $threw
+
     Write-Host '  which backup' -ForegroundColor Gray
     $old = Blob 'FULL/DAILY/Sales/Sales_20261011.bak' '2026-10-11 22:05'
     $mid = Blob 'FULL/DAILY/Sales/Sales_20261012.bak' '2026-10-12 22:05'
@@ -1575,9 +1672,19 @@ if ($SelfTest) {
     Check 'a Windows group goes' (-not (Test-SystemPrincipal -PrincipalId 7 -Name 'CONTOSO\Reporting' -Type 'G'))
     Check 'an Entra user goes' (-not (Test-SystemPrincipal -PrincipalId 8 -Name 'jo@contoso.com' -Type 'E'))
 
-    Write-Host '  sizes' -ForegroundColor Gray
-    Check 'gigabytes' ((Format-Size 3221225472) -eq '3.0 GB')
-    Check 'megabytes' ((Format-Size 5242880) -eq '5 MB')
+    Write-Host '  sizes and stamps, whatever the server is set to' -ForegroundColor Gray
+    $was = [System.Threading.Thread]::CurrentThread.CurrentCulture
+    try {
+        foreach ($culture in 'en-GB', 'en-US', 'de-DE') {
+            [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::GetCultureInfo($culture)
+            Check "gigabytes under $culture" ((Format-Size 3221225472) -eq '3.0 GB') (Format-Size 3221225472)
+            Check "megabytes under $culture" ((Format-Size 5242880) -eq '5 MB') (Format-Size 5242880)
+            $stamp = Format-Stamp ([System.DateTimeOffset]::new(2026, 10, 15, 10, 50, 17, [TimeSpan]::Zero)) -Utc
+            Check "a stamp under $culture" ($stamp -eq '15 Oct 2026 10:50 UTC') $stamp
+        }
+    }
+    finally { [System.Threading.Thread]::CurrentThread.CurrentCulture = $was }
+    Check 'and a stamp says UTC, because that is what it is' ((Format-Stamp ([datetime]::UtcNow) -Utc) -match ' UTC$')
 
     Write-Host '  whether this instance can encrypt anything' -ForegroundColor Gray
     # PowerShell refuses to add two hashtables that share a key, so a changed copy is made by hand
@@ -1734,7 +1841,7 @@ SELECT  ServerName   = CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')),
         }
         else {
             Write-Log ('Will encrypt with the certificate {0} ({1}{2})' -f $TdeCertificateName, $tdeReady.Subject,
-                       $(if ($tdeReady.Expiry) { ', expires ' + (Format-Stamp $tdeReady.Expiry) } else { '' }))
+                       $(if ($tdeReady.Expiry) { ', expires ' + (Format-Stamp $tdeReady.Expiry -Utc) } else { '' }))
             Write-Log 'Encrypting any database encrypts tempdb for the whole instance, permanently - a decision about the server, not just these copies.' -Level WARN
             Complete-Step
         }
@@ -1785,7 +1892,7 @@ SELECT  ServerName   = CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')),
             $blob = $choice.Chosen
             $outcome.Blob = $blob.Name
             $outcome.Bytes = $blob.Length
-            Write-Log ('Newest backup: {0} ({1}, written {2})' -f $blob.Name, (Format-Size $blob.Length), (Format-Stamp $choice.ChosenWhen))
+            Write-Log ('Newest backup: {0} ({1}, written {2})' -f $blob.Name, (Format-Size $blob.Length), (Format-Stamp $choice.ChosenWhen -Utc))
             Write-Detail ('  {0} backup file(s) under that prefix' -f $choice.Considered)
             $urls = @(Get-BlobUrl -Account $StorageAccountName -Container $ContainerName -BlobName $blob.Name -EndpointSuffix $BlobEndpointSuffix)
             Complete-Step
@@ -1821,7 +1928,7 @@ SELECT  ServerName   = CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')),
             $outcome.BackupTaken = $taken
             Write-Log ('It holds a {0} backup of [{1}], finished {2}, from SQL Server major version {3}' -f
                        $(switch ($backupType) { 1 { 'full' } 2 { 'transaction log' } 5 { 'differential' } default { "type $backupType" } }),
-                       $inside, (Format-Stamp $taken), $row['SoftwareVersionMajor'])
+                       $inside, (Format-Stamp $taken -Utc), $row['SoftwareVersionMajor'])
 
             if ($backupType -ne 1) {
                 throw ("that is not a full backup, so it cannot be restored on its own. The newest file under {0} is a {1}." -f
@@ -2037,7 +2144,7 @@ finally {
     Write-Log ('Onto:         {0}' -f $DestinationInstance) -Min Quiet
     foreach ($outcome in $results) {
         $line = '{0,-12} {1}' -f $outcome.Result, $outcome.Database
-        if ($outcome.BackupTaken) { $line += ' (data as at {0})' -f (Format-Stamp $outcome.BackupTaken) }
+        if ($outcome.BackupTaken) { $line += ' (data as at {0})' -f (Format-Stamp $outcome.BackupTaken -Utc) }
         if ($outcome.Encryption) { $line += ' - ' + $outcome.Encryption }
         if ($outcome.Detail) { $line += ' - ' + $outcome.Detail }
         Write-Log $line -Level $(if ($outcome.Result -eq 'FAILED') { 'ERROR' } else { 'INFO' }) -Min Quiet
