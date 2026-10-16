@@ -318,10 +318,32 @@ function Get-Scalar {
     if ($v -is [DBNull]) { $null } else { $v }
 }
 
+# a length of time a person can read at a glance: "18m 12s" rather than 1092.4
+function Format-Duration {
+    [CmdletBinding()]
+    param([double] $Seconds)
+
+    if ($Seconds -lt 1) { return '0s' }
+    $span = [TimeSpan]::FromSeconds([math]::Round($Seconds))
+    # the whole hours and the minutes within the hour, taken from the TimeSpan rather than cast out
+    # of a fraction: [int]6.7 is 7 in PowerShell, which turned 6m 42s into 7m 42s
+    if ($span.TotalHours -ge 1) { return ('{0}h {1:00}m {2:00}s' -f [math]::Floor($span.TotalHours), $span.Minutes, $span.Seconds) }
+    if ($span.TotalMinutes -ge 1) { return ('{0}m {1:00}s' -f $span.Minutes, $span.Seconds) }
+    '{0}s' -f $span.Seconds
+}
+
 <#
-  Runs a RESTORE or BACKUP and shows it moving. SQL Server reports progress as informational
-  messages ("40 percent processed."), which arrive on the connection's InfoMessage event, so one
-  connection does the work and the reporting - no polling from a second session.
+  Runs the RESTORE and reports it moving.
+
+  SQL Server reports progress as informational messages - "5 percent processed." - which arrive on
+  the connection's InfoMessage event, so one connection does the work and the reporting and there
+  is no polling from a second session.
+
+  Every one of those is logged as an ordinary line, timestamped like everything else. It used to
+  overwrite itself on one line, which looks neat in a console and is no use at all anywhere a job
+  actually runs: SQL Agent keeps the output, and a line per five percent with the time on it is
+  how you tell a restore that is slow from a restore that has stopped. It is also the only thing
+  between "taking the database offline" and twenty minutes of silence.
 #>
 function Invoke-LongRunningSql {
     [CmdletBinding()]
@@ -329,31 +351,35 @@ function Invoke-LongRunningSql {
 
     $script:Messages.Clear()
     $script:LastPercent = -1
-    $quiet = [Console]::IsOutputRedirected
+    $script:ProgressLabel = $Label
+    $script:ProgressWatch = [System.Diagnostics.Stopwatch]::StartNew()
+
     $connection = New-Object System.Data.SqlClient.SqlConnection (New-ConnectionString $Server 'master' $ConnectTimeoutSeconds)
     $handler = [System.Data.SqlClient.SqlInfoMessageEventHandler] {
         param($sender, $e)
         foreach ($err in $e.Errors) {
             $text = [string]$err.Message
             $script:Messages.Add($text)
-            if ($text -match '(\d+) percent processed') {
-                $pct = [int]$Matches[1]
-                if ($pct -gt $script:LastPercent) {
-                    $script:LastPercent = $pct
-                    if ($script:QuietProgress) {
-                        if ($pct % 25 -eq 0) { Write-Host ("    {0,-12} {1}  {2}%" -f '', $script:ProgressLabel, $pct) -ForegroundColor DarkGray }
-                    }
-                    else {
-                        Write-Host ("`r    {0,-12} {1} {2,3}%  " -f '', $script:ProgressLabel, $pct) -NoNewline -ForegroundColor DarkGray
-                    }
+            if ($text -notmatch '(\d+) percent processed') { continue }
+            $pct = [int]$Matches[1]
+            if ($pct -le $script:LastPercent) { continue }
+            $script:LastPercent = $pct
+
+            # nothing in here may break the restore, which is the only thing that matters while it
+            # is running: a logging fault is swallowed rather than thrown out of an event handler
+            try {
+                $elapsed = $script:ProgressWatch.Elapsed.TotalSeconds
+                $left = ''
+                if ($pct -ge 5 -and $pct -lt 100) {
+                    $remaining = ($elapsed / $pct) * (100 - $pct)
+                    if ($remaining -ge 30) { $left = ', about {0} left' -f (Format-Duration $remaining) }
                 }
+                Write-Log ('  {0} {1}% done ({2} so far{3})' -f $script:ProgressLabel, $pct, (Format-Duration $elapsed), $left)
             }
+            catch { }
         }
     }
-    $script:QuietProgress = $quiet
-    $script:ProgressLabel = $Label
 
-    $watch = [System.Diagnostics.Stopwatch]::StartNew()
     try {
         $connection.add_InfoMessage($handler)
         $connection.Open()
@@ -361,24 +387,25 @@ function Invoke-LongRunningSql {
         $command.CommandText = $Sql
         $command.CommandTimeout = 0        # a big restore takes as long as it takes
         [void]$command.ExecuteNonQuery()
-        $watch.Stop()
-        if (-not $quiet -and $script:LastPercent -ge 0) { Write-Host "`r$(' ' * 60)`r" -NoNewline }
+        $script:ProgressWatch.Stop()
 
         # "RESTORE DATABASE successfully processed 134518 pages in 8.714 seconds (120.586 MB/sec)."
         $summary = @($script:Messages | Where-Object { $_ -match 'successfully processed' }) | Select-Object -Last 1
         $mb = $null
         if ($summary -match 'processed (\d+) pages') { $mb = [math]::Round(([double]$Matches[1] * 8KB) / 1MB, 0) }
+        $rate = $null
+        if ($summary -match '\(([\d.,]+) MB/sec\)') { $rate = $Matches[1] }
         [pscustomobject]@{
-            Ok = $true; Seconds = [math]::Round($watch.Elapsed.TotalSeconds, 1); Megabytes = $mb
-            Message = $summary; Error = $null
+            Ok = $true; Seconds = [math]::Round($script:ProgressWatch.Elapsed.TotalSeconds, 1); Megabytes = $mb
+            Rate = $rate; Message = $summary; Error = $null
         }
     }
     catch {
-        $watch.Stop()
-        if (-not $quiet -and $script:LastPercent -ge 0) { Write-Host "`r$(' ' * 60)`r" -NoNewline }
+        $script:ProgressWatch.Stop()
         [pscustomobject]@{
-            Ok = $false; Seconds = [math]::Round($watch.Elapsed.TotalSeconds, 1); Megabytes = $null
-            Message = $null; Error = ($_.Exception.GetBaseException().Message -split "`r?`n" | Where-Object { $_ } | Select-Object -First 2) -join ' '
+            Ok = $false; Seconds = [math]::Round($script:ProgressWatch.Elapsed.TotalSeconds, 1); Megabytes = $null
+            Rate = $null; Message = $null
+            Error = ($_.Exception.GetBaseException().Message -split "`r?`n" | Where-Object { $_ } | Select-Object -First 2) -join ' '
         }
     }
     finally { $connection.Dispose() }
@@ -1742,6 +1769,13 @@ if ($SelfTest) {
     Check 'a Windows group goes' (-not (Test-SystemPrincipal -PrincipalId 7 -Name 'CONTOSO\Reporting' -Type 'G'))
     Check 'an Entra user goes' (-not (Test-SystemPrincipal -PrincipalId 8 -Name 'jo@contoso.com' -Type 'E'))
 
+    Write-Host '  how long things took, said in a way a person reads' -ForegroundColor Gray
+    Check 'seconds' ((Format-Duration 48) -eq '48s') (Format-Duration 48)
+    Check 'minutes and seconds' ((Format-Duration 402) -eq '6m 42s') (Format-Duration 402)
+    Check 'hours, minutes and seconds' ((Format-Duration 4322) -eq '1h 12m 02s') (Format-Duration 4322)
+    Check 'a restore that was quicker than a second' ((Format-Duration 0.4) -eq '0s') (Format-Duration 0.4)
+    Check 'and the minutes are padded so a log lines up' ((Format-Duration 3605) -eq '1h 00m 05s') (Format-Duration 3605)
+
     Write-Host '  sizes and stamps, whatever the server is set to' -ForegroundColor Gray
     $was = [System.Threading.Thread]::CurrentThread.CurrentCulture
     try {
@@ -2081,10 +2115,16 @@ SELECT  ServerName   = CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')),
             }
 
             if ($isThere) {
-                Write-Log "Taking $dbName offline (rolling back open transactions)"
+                Write-Log "Taking $dbName offline and rolling back anything open in it"
                 [void](Invoke-Sql -Server $DestinationInstance -Query ('ALTER DATABASE {0} SET OFFLINE WITH ROLLBACK IMMEDIATE;' -f (Esc-Name $dbName)))
+                Write-Log "$dbName is offline"
             }
 
+            # said before it starts, not after it finishes: this is the part that takes the time,
+            # and without this line the last thing on screen is the database going offline, which
+            # then looks like the thing that is taking twenty minutes
+            Write-Log ('Restoring {0} from {1} ({2}), straight out of the container. Progress follows every 5%.' -f
+                       $dbName, (Split-Path -Leaf $blob.Name), (Format-Size $blob.Length))
             $r = Invoke-LongRunningSql -Server $DestinationInstance -Sql $sql -Label 'restore'
             if (-not $r.Ok) {
                 if ($isThere) {
@@ -2098,8 +2138,15 @@ SELECT  ServerName   = CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')),
                 }
                 throw ('the restore failed: ' + $r.Error + $extra)
             }
-            Write-Log ('Restored{0} in {1}s{2}' -f $(if ($r.Megabytes) { " $($r.Megabytes) MB" } else { '' }), $r.Seconds,
-                       $(if ($EnableTde) { ', and shut to everyone but its owners until it is encrypted' } else { '' }))
+            # the megabytes are the pages SQL Server processed, not the size of the backup file,
+            # and saying "restored 945 MB" under a line that said 2.3 GB invites the question
+            Write-Log ('Restored {0} in {1}{2}{3}' -f $dbName, (Format-Duration $r.Seconds),
+                       $(if ($r.Megabytes) {
+                             ' - {0} of pages{1}' -f (Format-Size ($r.Megabytes * 1MB)),
+                                 $(if ($r.Rate) { " at $($r.Rate) MB/sec" } else { '' })
+                         } else { '' }),
+                       $(if ($EnableTde) { '. Shut to everyone but its owners until it is encrypted' } else { '' }))
+            Write-Deep ('  the server said: ' + $r.Message)
             Complete-Step
             #endregion
 

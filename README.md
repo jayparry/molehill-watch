@@ -397,6 +397,17 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "D:\Scripts\Clone-Databa
 
   Proven against SQL Server 2025 rather than assumed: the scan does run to completion while the database is `RESTRICTED_USER`, an ordinary login is refused throughout and let in only after the run opens the database, and a wait that runs out leaves it shut. Twenty-two checks, keys and test database taken away afterwards.
 
+* **It says what it is doing while it does it.** The restore is the long part, so it is announced before it starts rather than after it finishes - otherwise the last line on screen is the database going offline, which then looks like the thing taking twenty minutes. SQL Server's own progress comes back as ordinary log lines, one every 5%, with how long it has taken and roughly how long is left:
+
+  ```
+  10:46:44 [INFO] Restoring MPS3 from LEGACYSQL1$LIVE_MPS3_FULL_20261014_231037.bak (109.3 GB), straight out of the container. Progress follows every 5%.
+  10:48:10 [INFO]   restore 5% done (1m 26s so far, about 27m 14s left)
+  ...
+  11:15:02 [INFO] Restored MPS3 in 28m 18s - 104.7 GB of pages at 63.142 MB/sec
+  ```
+
+  Those are log lines rather than something overwriting itself on one line, because SQL Agent keeps the output and a line per five percent with the time on it is how you tell a restore that is slow from a restore that has stopped.
+
 * **A striped backup is restored rather than refused.** One file of a set is not reported as striped by `RESTORE HEADERONLY`, it is refused - so on that refusal the script tries again with the blobs written beside it, and only gives up if the set is still incomplete.
 
 * **No prompts anywhere.** A mandatory parameter would prompt, and a prompt in a job step is a hang rather than a failure, so the arguments are checked and refused with a message instead. `-WhatIf` prints the exact `RESTORE` statement and what would be done to each copy afterwards, and changes nothing.
