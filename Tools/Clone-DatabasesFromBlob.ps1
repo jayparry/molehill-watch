@@ -802,6 +802,54 @@ function New-RestoreCommand {
 }
 
 <#
+  What is wrong with this backup, before anything is restored over an existing copy.
+
+  Pure, so it can be checked without a container: the real run has twice been stopped here by this
+  reasoning rather than by the backup, and a wrong refusal at this point reads exactly like a
+  broken backup.
+
+  What it does NOT do is decide whether a striped set is complete. An incomplete set never reaches
+  here - RESTORE HEADERONLY refuses to read one, which is what the retry in the caller is for - so
+  by the time there is a header to look at, every file of the set has been found. FamilyCount is
+  only worth complaining about when it positively says there is more than one file and the caller
+  has a different number of them; a media header written by an older SQL Server can report 0,
+  which is not a count at all, and treating that as "striped" refuses a backup that is fine.
+#>
+function Get-BackupHeaderProblem {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] $Header,          # BackupType, FamilyCount, DatabaseName, SoftwareVersionMajor
+        [int] $FileCount = 1,
+        [string] $DatabaseName = '',
+        [int] $DestinationMajor = 0,
+        [string] $Prefix = ''
+    )
+
+    $problems = New-Object System.Collections.Generic.List[string]
+    $type = [int]$Header.BackupType
+    $families = [int]$Header.FamilyCount
+
+    if ($type -ne 1) {
+        $what = switch ($type) { 2 { 'transaction log backup' } 5 { 'differential backup' } default { "backup of type $type" } }
+        $problems.Add(("that is not a full backup, so it cannot be restored on its own. The newest file{0} is a {1}." -f
+                       $(if ($Prefix) { " under $Prefix" } else { '' }), $what))
+    }
+
+    if ($families -gt 1 -and $families -ne $FileCount) {
+        $problems.Add(("that backup was written across {0} files and {1} of them could be found beside it in the container. All of them have to be restored together." -f
+                       $families, $FileCount))
+    }
+
+    $major = [int]$Header.SoftwareVersionMajor
+    if ($DestinationMajor -gt 0 -and $major -gt $DestinationMajor) {
+        $problems.Add(('the backup was taken on SQL Server major version {0} and this instance is version {1}: a backup cannot be restored onto an older version' -f
+                       $major, $DestinationMajor))
+    }
+
+    $problems.ToArray()
+}
+
+<#
   Reads the header of a backup set given as one or more URLs.
 
   A striped backup is one backup written across several files, and HEADERONLY on one file of a set
@@ -1625,6 +1673,28 @@ if ($SelfTest) {
     Check 'a quote in a URL is doubled, not left to break out' ($sql -match "o''brien") $sql
     Check 'and a bracket in a database name is escaped' ($sql -match '\[Sales\]\]Odd\]') $sql
 
+    Write-Host '  what is wrong with this backup, if anything' -ForegroundColor Gray
+    function Header([int] $Type, [int] $Families, [int] $Major = 10, [string] $Name = 'MPS3') {
+        [pscustomobject]@{ BackupType = $Type; FamilyCount = $Families; DatabaseName = $Name; SoftwareVersionMajor = $Major }
+    }
+    # the one that stopped a real run: a 2008-era media header reporting no family count at all,
+    # for a single-file full backup that restores perfectly well
+    Check 'a full backup whose header reports no family count is fine' (@(Get-BackupHeaderProblem -Header (Header 1 0) -FileCount 1 -DestinationMajor 17).Count -eq 0) `
+          ((Get-BackupHeaderProblem -Header (Header 1 0) -FileCount 1 -DestinationMajor 17) -join ' ')
+    Check 'and so is one that says it is a single file' (@(Get-BackupHeaderProblem -Header (Header 1 1) -FileCount 1 -DestinationMajor 17).Count -eq 0)
+    Check 'a striped set with every file present is fine' (@(Get-BackupHeaderProblem -Header (Header 1 2) -FileCount 2 -DestinationMajor 17).Count -eq 0)
+    $missing = @(Get-BackupHeaderProblem -Header (Header 1 3) -FileCount 1 -DestinationMajor 17)
+    Check 'a striped set with files missing is refused' ($missing.Count -eq 1 -and $missing[0] -match 'written across 3 files and 1 of them') ($missing -join ' ')
+    $log = @(Get-BackupHeaderProblem -Header (Header 2 1) -FileCount 1 -DestinationMajor 17 -Prefix 'FULL/DAILY/MPS3/')
+    Check 'a log backup is refused for what it is' ($log[0] -match 'transaction log backup') ($log -join ' ')
+    Check 'and the refusal says where it was looking' ($log[0] -match 'FULL/DAILY/MPS3/') ($log -join ' ')
+    $diff = @(Get-BackupHeaderProblem -Header (Header 5 1) -FileCount 1 -DestinationMajor 17)
+    Check 'a differential is refused too' ($diff[0] -match 'differential backup')
+    $newer = @(Get-BackupHeaderProblem -Header (Header 1 1 17) -FileCount 1 -DestinationMajor 16)
+    Check 'a backup from a newer SQL Server than this one is refused' ($newer[0] -match 'cannot be restored onto an older version')
+    Check 'an older one is not' (@(Get-BackupHeaderProblem -Header (Header 1 1 10) -FileCount 1 -DestinationMajor 17).Count -eq 0)
+    Check 'and a backup with two things wrong says both' (@(Get-BackupHeaderProblem -Header (Header 2 4 17) -FileCount 1 -DestinationMajor 16).Count -eq 3)
+
     Write-Host '  where the restored files go' -ForegroundColor Gray
     Check 'data to the data path' ((Get-MoveTarget -PhysicalName 'E:\Prod\Sales.mdf' -FileType 'D' -DataPath 'D:\SqlData' -LogPath 'L:\SqlLogs') -eq 'D:\SqlData\Sales.mdf')
     Check 'the log to the log path' ((Get-MoveTarget -PhysicalName 'E:\Prod\Sales_log.ldf' -FileType 'L' -DataPath 'D:\SqlData' -LogPath 'L:\SqlLogs') -eq 'L:\SqlLogs\Sales_log.ldf')
@@ -1930,20 +2000,27 @@ SELECT  ServerName   = CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')),
                        $(switch ($backupType) { 1 { 'full' } 2 { 'transaction log' } 5 { 'differential' } default { "type $backupType" } }),
                        $inside, (Format-Stamp $taken -Utc), $row['SoftwareVersionMajor'])
 
-            if ($backupType -ne 1) {
-                throw ("that is not a full backup, so it cannot be restored on its own. The newest file under {0} is a {1}." -f
-                       $prefix, $(switch ($backupType) { 2 { 'transaction log backup' } 5 { 'differential backup' } default { "backup of type $backupType" } }))
-            }
-            if ($families -ne @($urls).Count) {
-                throw ("that backup was written across {0} file(s) and {1} of them could be found beside it in the container. All of them have to be restored together." -f
-                       $families, @($urls).Count)
-            }
+            Write-Deep ('  header says: type {0}, {1} media family(ies), compatibility level {2}, position {3}' -f
+                        $backupType, $families, $row['CompatibilityLevel'], $row['Position'])
+
+            $problems = @(Get-BackupHeaderProblem -Header ([pscustomobject]@{
+                              BackupType = $backupType; FamilyCount = $families
+                              DatabaseName = $inside; SoftwareVersionMajor = [int]$row['SoftwareVersionMajor']
+                          }) -FileCount @($urls).Count -DatabaseName $dbName `
+                            -DestinationMajor ([int]$dstInfo['Major']) -Prefix $prefix)
+            if ($problems.Count) { throw ($problems -join ' ') }
+
             if ($inside -ne $dbName) {
                 Write-Log ("The backup is of [{0}] but it was found in the folder for [{1}] and will be restored as [{1}]. Check the container layout if that is not intended." -f $inside, $dbName) -Level WARN
             }
-            if ([int]$row['SoftwareVersionMajor'] -gt [int]$dstInfo['Major']) {
-                throw ('the backup was taken on SQL Server major version {0} and this instance is version {1}: a backup cannot be restored onto an older version' -f
-                       $row['SoftwareVersionMajor'], $dstInfo['Major'])
+            # a backup from an older SQL Server is upgraded on the way in, as long as this engine
+            # still supports the level the database was at - SQL Server 2025 still takes 100, which
+            # is SQL Server 2008. If it will not, the restore itself says so and that is explained
+            # where it happens rather than guessed at here. Not a warning: on a nightly job a line
+            # that always appears and never means anything is noise.
+            if ([int]$row['SoftwareVersionMajor'] -lt [int]$dstInfo['Major']) {
+                Write-Detail ('  taken on major version {0} and restoring onto {1}, so it is upgraded on the way in' -f
+                              $row['SoftwareVersionMajor'], $dstInfo['Major'])
             }
             Complete-Step
             #endregion
@@ -2015,7 +2092,11 @@ SELECT  ServerName   = CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')),
                     try { [void](Invoke-Sql -Server $DestinationInstance -Query ('ALTER DATABASE {0} SET ONLINE;' -f (Esc-Name $dbName))) }
                     catch { Write-Log ('  could not bring it back online: ' + $_.Exception.Message) -Level ERROR }
                 }
-                throw ('the restore failed: ' + $r.Error)
+                $extra = ''
+                if ($r.Error -match 'incompatible with this server|cannot be upgraded|too old') {
+                    $extra = ' That is this instance refusing the backup as too old to upgrade rather than anything wrong with the file: a database can only be restored onto a version that still supports it. It needs an instance old enough to take this backup, and a fresh backup taken from there.'
+                }
+                throw ('the restore failed: ' + $r.Error + $extra)
             }
             Write-Log ('Restored{0} in {1}s{2}' -f $(if ($r.Megabytes) { " $($r.Megabytes) MB" } else { '' }), $r.Seconds,
                        $(if ($EnableTde) { ', and shut to everyone but its owners until it is encrypted' } else { '' }))
