@@ -42,18 +42,38 @@
     The user and secret for whichever -Authentication needs one: a SQL login and its password, an
     Entra account and its password, or a service principal's application id and client secret.
 
-.PARAMETER Authentication
-    How to authenticate, under the same names the connect screen in this toolkit uses. Defaults to
-    Sql when -SqlCredential is given and EntraDefault otherwise.
+.PARAMETER UserName
+    Who to sign in as, without a password. For EntraMfa this is the account the browser prompt
+    starts from; for EntraManagedIdentity it is the client id of a user-assigned identity. Giving
+    this and nothing else means EntraMfa, because a name with no secret is a person about to be
+    prompted.
 
-    Windows, Sql                                 work with no module installed
+.PARAMETER AccessToken
+    A bearer token for https://database.windows.net/, used instead of signing in. Both drivers take
+    one, so this needs no module at all:
+
+        az account get-access-token --resource https://database.windows.net/ --query accessToken -o tsv
+
+    It goes on the connection rather than into the connection string, and cannot be combined with
+    -Authentication, because the driver refuses to have both.
+
+.PARAMETER Authentication
+    How to authenticate, under the same names the connect screen in this toolkit uses. Left out, it
+    follows what else was given: -AccessToken means Token, -SqlCredential means Sql, -UserName alone
+    means EntraMfa, and nothing at all means EntraDefault.
+
+    Windows, Sql, Token                          work with no module installed
     EntraPassword, EntraMfa, EntraIntegrated     Windows PowerShell 5.1 can do these unaided
     EntraDefault, EntraManagedIdentity,
     EntraServicePrincipal, EntraDeviceCode       need Microsoft.Data.SqlClient, which arrives
                                                  with the SqlServer module
 
     Which driver can do what is asked of the driver rather than assumed, so the refusal comes
-    before anything is created rather than at the first connection.
+    before anything is created rather than at the first connection. If signing in fails, what else
+    this machine could have used is printed.
+
+    EntraDefault is the one to be careful with: it walks a chain of ways to sign in and can settle
+    on integrated Windows authentication, which is not what anyone with MFA wants. Say EntraMfa.
 
 .PARAMETER ConnectionString
     A connection string to use instead of building one, for anything the parameters above do not
@@ -93,6 +113,14 @@
 .EXAMPLE
     .\Copy-AzureSqlDatabase.ps1 -SourceServer sql-my-ser -SourceDatabase oof-web-src `
         -TargetServer sql-oof-dev, sql-oof-test -TargetDatabase oof-web `
+        -UserName jay@example.com -Execute
+
+    Entra sign-in with MFA: a browser opens once, and every connection after that reuses the token
+    the driver cached. -UserName on its own means EntraMfa, so -Authentication can be left out.
+
+.EXAMPLE
+    .\Copy-AzureSqlDatabase.ps1 -SourceServer sql-my-ser -SourceDatabase oof-web-src `
+        -TargetServer sql-oof-dev, sql-oof-test -TargetDatabase oof-web `
         -ElasticPool pool-nonprod -Execute
 #>
 [CmdletBinding()]
@@ -106,7 +134,9 @@ param(
     [string]$ServiceObjective,
     [string]$ElasticPool,
     [pscredential]$SqlCredential,
-    [ValidateSet('Windows', 'Sql', 'EntraDefault', 'EntraManagedIdentity', 'EntraServicePrincipal',
+    [string]$UserName,
+    [string]$AccessToken,
+    [ValidateSet('Windows', 'Sql', 'Token', 'EntraDefault', 'EntraManagedIdentity', 'EntraServicePrincipal',
                  'EntraPassword', 'EntraIntegrated', 'EntraMfa', 'EntraDeviceCode')]
     [string]$Authentication,
     [string]$ConnectionString,
@@ -155,6 +185,7 @@ function ConvertTo-SqlLiteral {
 $script:AuthKeyword = @{
     Windows               = $null
     Sql                   = $null
+    Token                 = $null
     EntraDefault          = 'Active Directory Default'
     EntraManagedIdentity  = 'Active Directory Managed Identity'
     EntraServicePrincipal = 'Active Directory Service Principal'
@@ -212,6 +243,7 @@ function New-MasterConnectionString {
         [string]$Database = 'master',
         [string]$Authentication,
         [pscredential]$Credential,
+        [string]$User,
         [string]$Template,
         [int]$Timeout = 30,
         [bool]$Trust = $false
@@ -235,6 +267,14 @@ function New-MasterConnectionString {
         return $builder.ConnectionString
     }
 
+    # a method nobody has heard of would otherwise fall through to no keyword, no user and no
+    # integrated security, which the server answers with "Login failed for user ''" - a message
+    # that describes neither the cause nor the fix
+    if (-not $script:AuthKeyword.ContainsKey([string]$Authentication)) {
+        throw ("There is no way of signing in called '{0}'. It has to be one of: {1}." -f
+               $Authentication, (($script:AuthKeyword.Keys | Sort-Object) -join ', '))
+    }
+
     $builder['Data Source'] = $Server
     $builder['Initial Catalog'] = $Database
     $builder['Connect Timeout'] = $Timeout
@@ -248,17 +288,29 @@ function New-MasterConnectionString {
     $keyword = $script:AuthKeyword[$Authentication]
     if ($keyword) { $builder['Authentication'] = $keyword }
 
+    # -UserName wins over the credential's user, so a name can be given without a password. That
+    # matters for the interactive methods, where there is no password to give: being made to produce
+    # a pscredential just to say who you are means inventing a password for a prompt that will
+    # never use it.
+    $who = $(if ($User) { $User } elseif ($Credential) { $Credential.UserName } else { '' })
+
     if ($Authentication -eq 'Windows') { $builder['Integrated Security'] = $true }
     elseif ($Authentication -eq 'Sql') {
         if (-not $Credential) { throw '-Authentication Sql needs -SqlCredential.' }
-        $builder['User ID'] = $Credential.UserName
+        $builder['User ID'] = $who
         $builder['Password'] = $Credential.GetNetworkCredential().Password
     }
-    elseif ($Credential) {
-        # the Entra methods that take a user take it as the user ID - an account, or a service
-        # principal's application id - and only two of them have a secret to go with it
-        $builder['User ID'] = $Credential.UserName
-        if ($Authentication -eq 'EntraPassword' -or $Authentication -eq 'EntraServicePrincipal') {
+    elseif ($Authentication -eq 'Token') {
+        # nothing goes in the string for this one. The token is set on the connection object, and
+        # the driver refuses to have both: "Cannot set the AccessToken property if 'Authentication'
+        # has been specified in the connection string."
+    }
+    else {
+        # the Entra methods take the user as the user ID - an account to sign in as, a service
+        # principal's application id, or the client id of a user-assigned managed identity - and
+        # only two of them have a secret to go with it
+        if ($who) { $builder['User ID'] = $who }
+        if ($Credential -and ($Authentication -eq 'EntraPassword' -or $Authentication -eq 'EntraServicePrincipal')) {
             $builder['Password'] = $Credential.GetNetworkCredential().Password
         }
     }
@@ -273,11 +325,14 @@ function Invoke-MasterQuery {
         [int]$Timeout = 60
     )
     $connectionString = New-MasterConnectionString -Namespace $script:Driver -Server $Server `
-        -Authentication $script:Authentication -Credential $SqlCredential -Template $ConnectionString `
-        -Timeout $ConnectTimeoutSeconds -Trust ([bool]$TrustServerCertificate)
+        -Authentication $script:AuthMethod -Credential $SqlCredential -User $UserName `
+        -Template $ConnectionString -Timeout $ConnectTimeoutSeconds -Trust ([bool]$TrustServerCertificate)
 
     $connection = New-Object "$script:Driver.SqlConnection" $connectionString
     try {
+        # on the object rather than in the string, which is the only place it can go. Both drivers
+        # take it, so a token needs no module at all - az account get-access-token is enough.
+        if ($script:AuthMethod -eq 'Token') { $connection.AccessToken = $AccessToken }
         $connection.Open()
         $command = $connection.CreateCommand()
         $command.CommandText = $Query
@@ -362,6 +417,65 @@ function Get-SwapPlan {
     # nothing to drop when there was nothing there: the copy is the first database of that name
     if ($TargetExists -and -not $KeepPrevious) { $plan += "DROP DATABASE $qPrev;" }
     $plan
+}
+
+# What a failure that is really about signing in looks like, as opposed to one about the network or
+# the database. Kept in one place because two paths need the same answer, and getting it wrong in
+# either direction is its own annoyance: silence when the advice was wanted, or a lecture about
+# authentication when the server simply is not there.
+#
+# Being refused access to a database is deliberately not in here. "The server principal is not able
+# to access the database" means signing in *worked* and a grant is missing, so telling someone to
+# try a different way of signing in would send them the wrong way entirely.
+$script:SignInPattern = '(?i)login failed|authenticat|\btoken\b|credential|AADSTS|MSAL|interactive|integrated|not supported|password'
+
+function Get-AuthAdvice {
+    # What this machine could actually sign in with, said when signing in did not work. The failure
+    # that prompted this said nothing about the alternatives, and working out that PowerShell 7's
+    # built-in driver takes no Entra keyword - so EntraDefault walks a chain that can land on
+    # integrated Windows authentication and fail there - is not a thing anyone should have to
+    # discover from a stack trace.
+    param([string]$Tried, [string[]]$Available)
+
+    $lines = @("Signing in with -Authentication $Tried did not work. On this machine you can also use:")
+    foreach ($method in $Available) {
+        if ($method -eq $Tried) { continue }
+        $how = switch ($method) {
+            'EntraMfa'              { '-Authentication EntraMfa -UserName you@yourtenant.com   (opens a browser; this is the one for MFA)' }
+            'EntraDeviceCode'       { '-Authentication EntraDeviceCode                          (sign in on another device)' }
+            'EntraPassword'         { '-Authentication EntraPassword -SqlCredential (Get-Credential)' }
+            'EntraIntegrated'       { '-Authentication EntraIntegrated                          (domain joined to Entra, already signed in)' }
+            'EntraManagedIdentity'  { '-Authentication EntraManagedIdentity                     (on an Azure VM)' }
+            'EntraServicePrincipal' { '-Authentication EntraServicePrincipal -SqlCredential (app id as the user, secret as the password)' }
+            'EntraDefault'          { '-Authentication EntraDefault                             (whatever this machine is signed in as)' }
+            'Sql'                   { '-Authentication Sql -SqlCredential (Get-Credential)      (a login on the server)' }
+            'Token'                 { '-AccessToken (az account get-access-token --resource https://database.windows.net/ --query accessToken -o tsv)' }
+            default                 { "-Authentication $method" }
+        }
+        $lines += "    $how"
+    }
+    $lines
+}
+
+function Get-AvailableAuth {
+    # The methods something here can actually carry out, asked of the drivers. Microsoft's driver is
+    # loaded only when a connection needs it, so it is reached for once here as well - otherwise a
+    # run that signed in with the built-in driver reports only what *that* one can do, and the
+    # advice leaves out the very method that would have worked.
+    if (-not ('Microsoft.Data.SqlClient.SqlConnection' -as [type])) {
+        try { Import-Module SqlServer -DisableNameChecking -ErrorAction Stop } catch { }
+    }
+
+    $available = @()
+    foreach ($method in 'Sql', 'Token', 'EntraMfa', 'EntraDeviceCode', 'EntraPassword', 'EntraIntegrated',
+                        'EntraDefault', 'EntraManagedIdentity', 'EntraServicePrincipal', 'Windows') {
+        $keyword = $script:AuthKeyword[$method]
+        if ((Test-AuthKeyword -Namespace 'System.Data.SqlClient' -Keyword $keyword) -or
+            (Test-AuthKeyword -Namespace 'Microsoft.Data.SqlClient' -Keyword $keyword)) {
+            $available += $method
+        }
+    }
+    $available
 }
 
 function Get-SourceClash {
@@ -628,6 +742,81 @@ if ($SelfTest) {
             (Setting $spn 'User ID') -ceq 'svc_copy' -and (Setting $spn 'Password') -ceq $secret) (Setting $spn 'User ID')
     }
 
+    Write-Host '  signing in as a person, with no password to give' -ForegroundColor Gray
+    # the whole point of -UserName: a name without having to invent a credential for a prompt that
+    # will never use the password. Checked against whichever driver here takes the interactive
+    # keyword - 5.1's built-in one does, 7's does not - so this runs on both editions.
+    $mfaDriver = ''
+    foreach ($candidate in 'System.Data.SqlClient', 'Microsoft.Data.SqlClient') {
+        if (-not $mfaDriver -and (Test-AuthKeyword -Namespace $candidate -Keyword 'Active Directory Interactive')) {
+            $mfaDriver = $candidate
+        }
+    }
+    if (-not $mfaDriver) {
+        Write-Host '    SKIP  the interactive user hint: no driver here takes the keyword' -ForegroundColor Yellow
+    }
+    else {
+        $named = Read-Back $mfaDriver (New-MasterConnectionString -Namespace $mfaDriver `
+            -Server 's' -Authentication 'EntraMfa' -User 'jay@example.com')
+        Check 'a user name needs no credential to go with it' (
+            (Setting $named 'User ID') -ceq 'jay@example.com' -and -not (Setting $named 'Password')) (Setting $named 'User ID')
+        Check 'and it carries the interactive keyword, which is what opens the browser' (
+            (Setting $named 'Authentication') -match 'Active\s*Directory\s*Interactive') "$(Setting $named 'Authentication')"
+    }
+
+    $both = Read-Back 'System.Data.SqlClient' (New-MasterConnectionString -Namespace 'System.Data.SqlClient' `
+        -Server 's' -Authentication 'Sql' -Credential $cred -User 'someone.else')
+    Check 'and it wins over the credential''s own user' ((Setting $both 'User ID') -ceq 'someone.else') (Setting $both 'User ID')
+    Check 'while the credential still supplies the password' ((Setting $both 'Password') -ceq $secret) '(not shown)'
+
+    $tokenString = Read-Back 'System.Data.SqlClient' (New-MasterConnectionString -Namespace 'System.Data.SqlClient' `
+        -Server 's' -Authentication 'Token' -User 'ignored')
+    Check 'a token puts nothing in the string: no keyword' (-not (Setting $tokenString 'Authentication'))
+    Check 'no user' (-not (Setting $tokenString 'User ID')) (Setting $tokenString 'User ID')
+    Check 'no password' (-not (Setting $tokenString 'Password'))
+    Check 'and not integrated security either' (-not ((Setting $tokenString 'Integrated Security') -eq $true))
+    Check 'a token needs no module, so the built-in driver can carry it' (
+        (Resolve-SqlDriver -Authentication 'Token') -eq 'System.Data.SqlClient')
+    # proven against the driver rather than assumed: this is why the token cannot go in the string
+    $probe = New-Object System.Data.SqlClient.SqlConnection
+    $probe.ConnectionString = 'Data Source=s'
+    Check 'the connection object really does take a token' (
+        -not (Threw { $probe.AccessToken = 'dummy' }))
+
+    Write-Host '  what to try when signing in did not work' -ForegroundColor Gray
+    $can = @(Get-AvailableAuth)
+    Check 'SQL authentication is always possible' ($can -contains 'Sql') ($can -join ', ')
+    Check 'and so is a token' ($can -contains 'Token')
+    $advice = @(Get-AuthAdvice -Tried 'EntraDefault' -Available $can)
+    Check 'the advice names what was tried' ($advice[0] -match 'EntraDefault did not work') $advice[0]
+    Check 'and never suggests the thing that just failed' (
+        -not @($advice | Select-Object -Skip 1 | Where-Object { $_ -match '-Authentication EntraDefault\b' }).Count)
+    if ($can -contains 'EntraMfa') {
+        Check 'MFA is offered, and says it opens a browser' (
+            @($advice | Where-Object { $_ -match 'EntraMfa' -and $_ -match 'browser' }).Count -eq 1) ($advice -join ' | ')
+        Check 'and it is shown with -UserName, which is how it is usable' (
+            @($advice | Where-Object { $_ -match 'EntraMfa' -and $_ -match '-UserName' }).Count -eq 1)
+    }
+    # the pattern that decides whether the advice is wanted at all, both ways round
+    Check 'a failed login counts as a sign-in problem' (
+        'Login failed for user ''nosuchlogin''.' -match $script:SignInPattern)
+    Check 'so does a token the server would not take' (
+        'The access token is invalid.' -match $script:SignInPattern)
+    # and the one that looks like it belongs here and does not: this is a grant that is missing, not
+    # a sign-in that failed, so offering other ways to sign in would be pointing the wrong way
+    Check 'being refused access to a database is not a sign-in problem' (
+        'The server principal is not able to access the database under the current security context.' `
+        -notmatch $script:SignInPattern)
+    Check 'a server that is not there does not' (
+        'The server was not found or was not accessible. (provider: TCP Provider, error: 0 - No such host is known.)' `
+        -notmatch $script:SignInPattern)
+    Check 'and nor does a database that is simply missing' (
+        'Source database oof-web-src not found on sql-my-ser.database.windows.net.' -notmatch $script:SignInPattern)
+
+    Check 'every line of advice is a thing you could type' (
+        -not @($advice | Select-Object -Skip 1 | Where-Object { $_ -notmatch '-Authentication|-AccessToken' }).Count) `
+        (@($advice | Select-Object -Skip 1 | Where-Object { $_ -notmatch '-Authentication|-AccessToken' }) -join ' | ')
+
     Write-Host '  nothing reaches for Az any more' -ForegroundColor Gray
     $own = Get-Content -Raw -LiteralPath $PSCommandPath
     # the commands this script actually calls, read from its own syntax tree rather than grepped
@@ -724,12 +913,33 @@ $qPrev   = ConvertTo-QuotedName $prevName
 $createSql = New-CopyStatement -SourceServerShort $source.Short -SourceDatabase $SourceDatabase `
                                -CopyName $copyName -ServiceObjective $ServiceObjective -ElasticPool $ElasticPool
 
-# A credential means SQL authentication unless told otherwise, and nothing means whatever the
-# machine is already signed in as - which is the same pair of defaults this had when it went
-# through Az, minus the module.
-$script:Authentication = $Authentication
-if (-not $script:Authentication) {
-    $script:Authentication = $(if ($SqlCredential) { 'Sql' } else { 'EntraDefault' })
+# What was given says what was meant. A token is a token; a credential is a SQL login; a user name
+# with no secret is a person about to be prompted, which is interactive sign-in; and nothing at all
+# is whatever the machine is already signed in as - the same default this had when it went through
+# Az, minus the module.
+# $script:AuthMethod, and not $Authentication itself: a [ValidateSet] attribute belongs to the
+# *variable*, not to the parameter, so assigning the resolved method back into $Authentication is
+# validated too - and the empty string it holds when nobody passed it is not in the set. Doing the
+# obvious thing fails every run that did not say -Authentication explicitly, with "The variable
+# cannot be validated because the value is not a valid value", which names neither the parameter
+# nor the fact that it was *this* script's own assignment that did it.
+$script:AuthMethod = $Authentication
+if (-not $script:AuthMethod) {
+    $script:AuthMethod = $(
+        if ($AccessToken)       { 'Token' }
+        elseif ($SqlCredential) { 'Sql' }
+        elseif ($UserName)      { 'EntraMfa' }
+        else                    { 'EntraDefault' }
+    )
+}
+
+if ($AccessToken -and $script:AuthKeyword[$script:AuthMethod]) {
+    throw ("-AccessToken cannot be combined with -Authentication $script:AuthMethod. The driver " +
+           "refuses to have both: a token goes on the connection and a keyword goes in the string. " +
+           "Drop -Authentication, or drop -AccessToken.")
+}
+if ($script:AuthMethod -eq 'Token' -and -not $AccessToken) {
+    throw '-Authentication Token needs -AccessToken. az account get-access-token --resource https://database.windows.net/ --query accessToken -o tsv produces one.'
 }
 
 # settled before anything is created, so a driver that cannot do what was asked is a refusal rather
@@ -739,7 +949,7 @@ $script:Driver = $(if ($ConnectionString) {
     $(if (Test-AuthKeyword -Namespace 'System.Data.SqlClient' -Keyword $null) { 'System.Data.SqlClient' }
       else { Resolve-SqlDriver -Authentication 'Windows' })
 } else {
-    Resolve-SqlDriver -Authentication $script:Authentication
+    Resolve-SqlDriver -Authentication $script:AuthMethod
 })
 
 $targets = $TargetServer |
@@ -763,8 +973,12 @@ $targets = $TargetServer |
 Write-Log ("Mode: {0}" -f $(if ($Execute) { 'EXECUTE' } else { 'DRY RUN' })) $(if ($Execute) { 'WARN' } else { 'INFO' })
 Write-Log "Source: $($source.Fqdn) / $SourceDatabase"
 Write-Log "Targets: $(($targets.Fqdn) -join ', ')  ->  $TargetDatabase"
-Write-Log ("Signing in with {0} through {1}" -f $(if ($ConnectionString) { 'the connection string given' }
-                                                 else { "-Authentication $script:Authentication" }), $script:Driver)
+Write-Log ("Signing in with {0}{1} through {2}" -f
+           $(if ($ConnectionString) { 'the connection string given' } else { "-Authentication $script:AuthMethod" }),
+           $(if ($UserName) { " as $UserName" } else { '' }), $script:Driver)
+if ($script:AuthMethod -eq 'EntraMfa') {
+    Write-Log 'A browser will open once; the connections after that reuse the token the driver keeps.'
+}
 
 #endregion
 
@@ -772,8 +986,24 @@ Write-Log ("Signing in with {0} through {1}" -f $(if ($ConnectionString) { 'the 
 
 Write-Log 'Preflight checks'
 
-if (-not (Test-DatabaseExists -Server $source.Fqdn -Name $SourceDatabase)) {
-    throw "Source database $SourceDatabase not found on $($source.Fqdn)."
+# The source is checked before the targets and a failure here stops everything, which makes it the
+# first place a wrong way of signing in shows up - so it is also the first place that needs to say
+# what else would have worked. Without this the run ends on the driver's own exception, which names
+# no alternative and does not even mention that authentication was the problem.
+try {
+    if (-not (Test-DatabaseExists -Server $source.Fqdn -Name $SourceDatabase)) {
+        throw "Source database $SourceDatabase not found on $($source.Fqdn)."
+    }
+}
+catch {
+    $why = ($_.Exception.GetBaseException().Message -split "`r?`n")[0]
+    Write-Log ("Could not read the source on {0}: {1}" -f $source.Fqdn, $why) ERROR
+    if ($why -match $script:SignInPattern) {
+        foreach ($line in (Get-AuthAdvice -Tried $script:AuthMethod -Available (Get-AvailableAuth))) {
+            Write-Log $line WARN
+        }
+    }
+    throw $why
 }
 
 foreach ($t in $targets) {
@@ -789,6 +1019,18 @@ foreach ($t in $targets) {
         $t.Status  = 'Failed'
         $t.Message = "Preflight: $($_.Exception.Message)"
         Write-Log "$($t.Fqdn): $($t.Message)" ERROR
+    }
+}
+
+# If nothing got through and it looks like signing in was the problem, say what else this machine
+# could sign in with. The driver's own failure names none of the alternatives, which is the whole
+# reason a wrong default costs an afternoon rather than a minute.
+if (-not @($targets | Where-Object Status -eq 'Pending').Count) {
+    $signIn = @($targets | Where-Object { $_.Message -match $script:SignInPattern })
+    if ($signIn.Count) {
+        foreach ($line in (Get-AuthAdvice -Tried $script:AuthMethod -Available (Get-AvailableAuth))) {
+            Write-Log $line WARN
+        }
     }
 }
 

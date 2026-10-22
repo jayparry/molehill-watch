@@ -442,18 +442,50 @@ environment keeps the database it started with. The copies run in parallel serve
 
 .\Copy-AzureSqlDatabase.ps1 -SourceServer sql-my-ser -SourceDatabase oof-web-src `
     -TargetServer sql-oof-dev, sql-oof-test -TargetDatabase oof-web -ElasticPool pool-nonprod -Execute
+
+# Entra with MFA: a browser opens once, and the connections after it reuse the cached token
+.\Copy-AzureSqlDatabase.ps1 -SourceServer sql-my-ser -SourceDatabase oof-web-src `
+    -TargetServer sql-oof-dev -TargetDatabase oof-web -UserName you@yourtenant.com -Execute
 ```
 
+* **Entra with MFA**: `-UserName you@yourtenant.com` and nothing else. A name with no secret is a
+  person about to be prompted, so that alone means `EntraMfa`: a browser opens once and every
+  connection after it reuses the token the driver cached. `-UserName` exists because the
+  interactive methods have no password to give, and being made to produce a `pscredential` just to
+  say who you are means inventing a password for a prompt that will never read it.
+* **Don't leave it to `EntraDefault`** if you sign in with MFA. That is the default when nothing
+  else is given, and it walks a chain of ways to sign in that can settle on integrated Windows
+  authentication and fail there - which is a confusing place to end up when what you wanted was a
+  browser. Say `EntraMfa`.
 * **Nothing to install, and no `Az` modules.** It connects with a connection string it builds, or
   with one you hand it. `-Authentication` takes the same names as the connect screen above:
-  `Windows` and `Sql` work with nothing installed at all; `EntraPassword`, `EntraMfa` and
+  `Windows`, `Sql` and `Token` work with nothing installed at all; `EntraPassword`, `EntraMfa` and
   `EntraIntegrated` also work unaided on Windows PowerShell 5.1; and `EntraDefault`,
   `EntraManagedIdentity`, `EntraServicePrincipal` and `EntraDeviceCode` need
   `Microsoft.Data.SqlClient`, which is what the `SqlServer` module brings. Which driver can do what
   is **asked of the driver** rather than kept in a table, because the answer moves - PowerShell 7's
   built-in `System.Data.SqlClient` takes no Entra keyword at all, where 5.1's takes three of them.
   A method nothing installed can do is refused before any database is created, with the ways out
-  named. It defaults to `Sql` when given `-SqlCredential` and `EntraDefault` otherwise.
+  named. Left out, it follows what else was given: `-AccessToken` means `Token`, `-SqlCredential`
+  means `Sql`, `-UserName` alone means `EntraMfa`, and nothing at all means `EntraDefault`.
+* **`-AccessToken`** skips signing in altogether, and both drivers take one, so it needs no module:
+  `az account get-access-token --resource https://database.windows.net/ --query accessToken -o tsv`.
+  It goes on the connection rather than into the string, which is the only place it can go - the
+  driver refuses to have both a token and an `Authentication` keyword.
+* **When signing in fails it says what else would have worked**, because the driver's own error
+  names no alternatives and does not always make clear that authentication was the problem at all:
+
+  ```
+  ERROR  Could not read the source on sql-my-ser.database.windows.net: Login failed for user 'x'.
+  WARN   Signing in with -Authentication Sql did not work. On this machine you can also use:
+  WARN       -Authentication EntraMfa -UserName you@yourtenant.com   (opens a browser; this is the one for MFA)
+  WARN       -Authentication EntraDeviceCode                          (sign in on another device)
+  ```
+
+  What it lists is what the drivers here say they can do, not a fixed list. A server that cannot be
+  reached gets no such lecture, and neither does being refused access to a database - that one means
+  signing in *worked* and a grant is missing, so pointing at other sign-in methods would point the
+  wrong way.
 * **`-ConnectionString`** is for anything the parameters do not cover. Its server and database are
   replaced per target, because every statement here runs against one `master` or another;
   everything else in it is kept as written.
