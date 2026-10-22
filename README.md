@@ -166,7 +166,8 @@ MolehillWatch\
    ├─ Restore-DatabaseCopy.ps1              restores databases to another server, directly or via Azure Blob Storage
    ├─ Export-BackupHistory.sql              run on a source you cannot connect to, feeds the above
    ├─ Restore-LatestAzureBackup.ps1         restores the newest backup in a container, then tidies each copy
-   ├─ Clone-DatabasesFromBlob.ps1           the same job for one job: straight from the container, managed identity, no module
+   ├─ Clone-DatabasesFromBlob.ps1           the same job for one job: straight from the container, managed identity, no module
+   ├─ Copy-AzureSqlDatabase.ps1             copies an Azure SQL database onto other logical servers and swaps it in (PowerShell 7)
    ├─ Test-SqlTlsHandshake.ps1              why an instance will not negotiate encryption (old servers)
    ├─ Copy-SqlAccess.ps1                    gives one principal the same access another has, on any instance
    ├─ Get-SqlLicensingAudit.ps1             what needs licensing across an estate, and the total to cover it

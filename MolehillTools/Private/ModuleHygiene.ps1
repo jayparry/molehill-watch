@@ -164,20 +164,42 @@ Register-MhSelfTest -Name 'The module itself' -Test {
     Test-MhSection "the $($tools.Count) scripts in Tools"
 
     $broken = @()
+    $tooNew = @()
     $forced = @()
     $shims = 0
     foreach ($tool in $tools) {
+        $text = Get-Content -Raw -LiteralPath $tool.FullName
+
+        # a script that asks for a newer PowerShell than the one running is not a broken script: it
+        # is one this host cannot read. 5.1 cannot parse a ternary, so a tool written for 7 would be
+        # reported as broken on every 5.1 run - which reads as a regression in the tool rather than
+        # as the #Requires line doing its job. It is counted as skipped and named, so a genuinely
+        # broken script cannot hide behind a #Requires line either.
+        $needs = $null
+        if ($text -match '(?im)^\s*#Requires\s+-Version\s+(\d+(?:\.\d+)?)') {
+            $asked = $Matches[1]
+            if ($asked -notmatch '\.') { $asked = "$asked.0" }
+            $needs = [version]$asked
+        }
+        if ($needs -and $needs -gt $PSVersionTable.PSVersion) {
+            $tooNew += ('{0} asks for {1}' -f $tool.Name, $needs)
+            continue
+        }
+
         $errors = $null
         [void][System.Management.Automation.Language.Parser]::ParseFile($tool.FullName, [ref]$null, [ref]$errors)
         if ($errors) { $broken += "$($tool.Name): $($errors[0].Message)"; continue }
 
-        $text = Get-Content -Raw -LiteralPath $tool.FullName
         if ($text -notmatch 'MolehillTools\.psd1') { continue }
         $shims++
         if ($text -match 'Import-Module[^\r\n]*-Force') { $forced += $tool.Name }
     }
 
-    Test-MhCheck 'every script in Tools parses' (-not $broken.Count) ($broken -join '; ')
+    Test-MhCheck ('{0} of the {1} scripts in Tools parse' -f ($tools.Count - $tooNew.Count), $tools.Count) `
+        (-not $broken.Count) ($broken -join '; ')
+    if ($tooNew.Count) {
+        Test-MhSkip 'the rest need a newer PowerShell than this one' ($tooNew -join ', ')
+    }
     Test-MhCheck 'at least one of them is a shim over this module' ($shims -gt 0) "$shims found"
     Test-MhCheck 'no shim re-imports the module with -Force' (-not $forced.Count) ($forced -join ', ')
 
