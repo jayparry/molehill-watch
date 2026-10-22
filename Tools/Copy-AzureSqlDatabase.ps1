@@ -151,8 +151,26 @@ function Invoke-MasterQuery {
 
 function Test-DatabaseExists {
     param([string]$Server, [string]$Name)
-    $r = Invoke-MasterQuery -Server $Server -Query "SELECT COUNT(*) AS n FROM sys.databases WHERE name = $(ConvertTo-SqlLiteral $Name);"
-    [int]$r.n -gt 0
+
+    # @() and a row count, rather than reading .n off whatever came back. Under
+    # Set-StrictMode -Version Latest a result that is not one row makes $r.n throw "The property
+    # 'n' cannot be found on this object", and the preflight below records that against the server
+    # as its reason for failing - which reads like a bug in this script rather than a server that
+    # answered oddly, and sends whoever is looking at it to the wrong place entirely.
+    $rows = @(Invoke-MasterQuery -Server $Server -Query "SELECT COUNT(*) AS n FROM sys.databases WHERE name = $(ConvertTo-SqlLiteral $Name);")
+    if ($rows.Count -ne 1) {
+        throw "Counting $Name on $Server came back as $($rows.Count) row(s) instead of one, so whether it exists is not known."
+    }
+    [int]$rows[0].n -gt 0
+}
+
+function Get-NameStamp {
+    # The invariant culture, not the server's. 'yyyy' under a Thai or Hijri calendar gives 2569 or
+    # 1448, so the same run would name its databases differently depending on the region the
+    # machine happens to be set to - and nobody looking for yesterday's copy is going to search for
+    # oof-web-prev-256910221700.
+    param([datetime]$When = (Get-Date))
+    $When.ToString('yyyyMMddHHmm', [System.Globalization.CultureInfo]::InvariantCulture)
 }
 
 function New-CopyStatement {
@@ -341,6 +359,46 @@ if ($SelfTest) {
         (Get-SourceClash -TargetFqdn $src.Fqdn -TargetDatabase 'OOF-Web' `
                          -SourceFqdn $src.Fqdn -SourceDatabase 'oof-web') -match 'Refusing')
 
+    Write-Host '  the stamp that goes in the names' -ForegroundColor Gray
+    # the one check here that needs a culture that is not ours: th-TH counts years from a different
+    # era, so a stamp built through the current culture comes out as 2569 rather than 2026
+    $when = New-Object datetime 2026, 10, 22, 16, 45, 0
+    $wasCulture = [System.Threading.Thread]::CurrentThread.CurrentCulture
+    try {
+        foreach ($culture in 'en-GB', 'en-US', 'de-DE', 'th-TH') {
+            [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::GetCultureInfo($culture)
+            Check "the same stamp under $culture" ((Get-NameStamp $when) -ceq '202610221645') (Get-NameStamp $when)
+        }
+    }
+    finally { [System.Threading.Thread]::CurrentThread.CurrentCulture = $wasCulture }
+
+    Write-Host '  counting a database before touching it' -ForegroundColor Gray
+    # the rows Invoke-Sqlcmd would hand back, as the DataRows they really are
+    function CountRows([int[]]$Counts) {
+        $table = New-Object System.Data.DataTable
+        [void]$table.Columns.Add('n', [int])
+        foreach ($one in $Counts) { [void]$table.Rows.Add($one) }
+        $table.Rows
+    }
+    $script:stubRows = @()
+    function Invoke-MasterQuery { param([string]$Server, [string]$Query, [int]$Timeout = 60) $script:stubRows }
+
+    $script:stubRows = @(CountRows 1)
+    Check 'one row saying one means the database is there' (Test-DatabaseExists -Server 's' -Name 'd')
+    $script:stubRows = @(CountRows 0)
+    Check 'one row saying none means it is not' (-not (Test-DatabaseExists -Server 's' -Name 'd'))
+
+    $script:stubRows = @()
+    $noRows = Threw { Test-DatabaseExists -Server 'sql-oof-dev.database.windows.net' -Name 'oof-web' }
+    Check 'no rows at all is refused, not read as a missing property' ($noRows -match 'instead of one') $noRows
+    Check 'and the refusal says which database on which server' (
+        $noRows -match 'oof-web' -and $noRows -match 'sql-oof-dev') $noRows
+    Check 'nothing about a property that cannot be found' ($noRows -notmatch 'cannot be found') $noRows
+
+    $script:stubRows = @(CountRows 1, 1)
+    Check 'and more than one row is refused too' (
+        (Threw { Test-DatabaseExists -Server 's' -Name 'd' }) -match 'instead of one')
+
     Write-Host ''
     if ($script:failed -eq 0) { Write-Host 'All self tests passed.' -ForegroundColor Green; exit 0 }
     Write-Host "$script:failed self test(s) failed." -ForegroundColor Red
@@ -360,7 +418,7 @@ if ($missing.Count) {
            ($missing -join ', '), $(if ($missing.Count -eq 1) { 'is' } else { 'are' }))
 }
 
-$stamp    = Get-Date -Format 'yyyyMMddHHmm'
+$stamp    = Get-NameStamp
 $source   = Resolve-ServerName $SourceServer
 $copyName = "$TargetDatabase-copy-$stamp"
 $prevName = "$TargetDatabase-prev-$stamp"
