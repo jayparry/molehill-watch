@@ -99,6 +99,22 @@ function Invoke-MhSelfTest {
                 }
                 if (-not $hasSelfTest) { continue }
 
+                # a tool that asks for a newer PowerShell than this one cannot be run here, and
+                # PowerShell refuses it on the #Requires line before the script starts. That is the
+                # #Requires line working, not a failing tool, so it is said and passed over rather
+                # than counted as a failure of a run on 5.1.
+                $needs = $ast.ScriptRequirements
+                if ($needs -and $needs.RequiredPSVersion -and $needs.RequiredPSVersion -gt $PSVersionTable.PSVersion) {
+                    Write-Host "  $($script.Name)" -ForegroundColor Gray
+                    Write-Host ("    skipped: it asks for PowerShell {0} and this is {1}" -f
+                                $needs.RequiredPSVersion, $PSVersionTable.PSVersion) -ForegroundColor Yellow
+                    $results.Add([pscustomobject]@{
+                        Name = $script.Name; Passed = 0; Failed = 0; Skipped = 1
+                        ExitCode = 0; Result = 'SKIP'
+                    })
+                    continue
+                }
+
                 Write-Host "  $($script.Name)" -ForegroundColor Gray
                 $global:LASTEXITCODE = 0
                 # 6>&1 as well as 2>&1: a tool draws with Write-Host, which goes to the information
@@ -159,11 +175,19 @@ function Invoke-MhSelfTest {
     $bad = @($results | Where-Object { $_.Result -eq 'FAIL' })
     $shims = @($results | Where-Object { $_.Result -eq 'SHIM' })
     $sets = @($results | Where-Object { $_.Result -eq 'PASS' })
+    $unrunnable = @($results | Where-Object { $_.Result -eq 'SKIP' })
     Write-Host ''
     if ($bad.Count -eq 0) {
         $summary = 'All {0} checks in {1} set(s) passed' -f ($sets | Measure-Object Passed -Sum).Sum, $sets.Count
         if ($shims.Count) { $summary += ', and {0} shim(s) ran and handed over' -f $shims.Count }
-        Write-Host ($summary + '.') -ForegroundColor Green
+        $summary += '.'
+        # said rather than left out: "all passed" while quietly not running one of them is the
+        # sort of green that hides a tool nobody has checked since the day it was written
+        if ($unrunnable.Count) {
+            $summary += ' {0} needed a newer PowerShell than this one: {1}.' -f
+                        $unrunnable.Count, (($unrunnable | ForEach-Object Name) -join ', ')
+        }
+        Write-Host $summary -ForegroundColor $(if ($unrunnable.Count) { 'Yellow' } else { 'Green' })
     }
     else {
         Write-Host ("{0} of {1} failed: {2}" -f $bad.Count, $results.Count, (($bad | ForEach-Object Name) -join ', ')) -ForegroundColor Red

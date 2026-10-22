@@ -55,6 +55,11 @@
 .PARAMETER Execute
     Actually run the copy, rename and drop. Without it the script is a dry run.
 
+.PARAMETER SelfTest
+    Checks the parts of this script that need no server: the name handling, the SQL it builds,
+    the swap plan, and the refusal to copy a database over itself. Connects to nothing.
+    Exit code: 0 = all passed, 1 = something failed.
+
 .EXAMPLE
     .\Copy-AzureSqlDatabase.ps1 -SourceServer sql-my-ser -SourceDatabase oof-web-src `
         -TargetServer sql-oof-dev, sql-oof-test, sql-oof-uat -TargetDatabase oof-web
@@ -68,9 +73,11 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string]$SourceServer,
-    [Parameter(Mandatory)][string]$SourceDatabase,
-    [Parameter(Mandatory)][string[]]$TargetServer,
+    # not Mandatory on purpose: a missing Mandatory parameter makes PowerShell prompt, and a prompt
+    # in a pipeline or a scheduled run is a hang rather than a failure. They are checked below.
+    [string]$SourceServer,
+    [string]$SourceDatabase,
+    [string[]]$TargetServer,
     [string]$TargetDatabase = $SourceDatabase,
     [string]$ServiceObjective,
     [string]$ElasticPool,
@@ -78,7 +85,8 @@ param(
     [ValidateRange(5, 600)][int]$PollSeconds = 30,
     [ValidateRange(1, 1440)][int]$TimeoutMinutes = 240,
     [switch]$KeepPrevious,
-    [switch]$Execute
+    [switch]$Execute,
+    [switch]$SelfTest
 )
 
 Set-StrictMode -Version Latest
@@ -147,33 +155,222 @@ function Test-DatabaseExists {
     [int]$r.n -gt 0
 }
 
+function New-CopyStatement {
+    param(
+        [string]$SourceServerShort,
+        [string]$SourceDatabase,
+        [string]$CopyName,
+        [string]$ServiceObjective,
+        [string]$ElasticPool
+    )
+    if ($ServiceObjective -and $ElasticPool) {
+        throw 'Specify either -ServiceObjective or -ElasticPool, not both.'
+    }
+
+    $qSource = '{0}.{1}' -f (ConvertTo-QuotedName $SourceServerShort), (ConvertTo-QuotedName $SourceDatabase)
+
+    $with = ''
+    if ($ServiceObjective) {
+        $with = " ( SERVICE_OBJECTIVE = '{0}' )" -f $ServiceObjective.Replace("'", "''")
+    }
+    elseif ($ElasticPool) {
+        $with = ' ( SERVICE_OBJECTIVE = ELASTIC_POOL( name = {0} ) )' -f (ConvertTo-QuotedName $ElasticPool)
+    }
+
+    "CREATE DATABASE $(ConvertTo-QuotedName $CopyName) AS COPY OF $qSource$with;"
+}
+
+function Get-SwapPlan {
+    # The statements that put the copy in place, in the order they have to happen. One function so
+    # the dry run prints the plan that the swap below actually carries out, rather than a second
+    # list beside it that can drift from it.
+    param(
+        [string]$TargetDatabase,
+        [string]$CopyName,
+        [string]$PreviousName,
+        [bool]$TargetExists,
+        [bool]$KeepPrevious
+    )
+    $qTarget = ConvertTo-QuotedName $TargetDatabase
+    $qCopy   = ConvertTo-QuotedName $CopyName
+    $qPrev   = ConvertTo-QuotedName $PreviousName
+
+    $plan = @()
+    if ($TargetExists) { $plan += "ALTER DATABASE $qTarget MODIFY NAME = $qPrev;" }
+    $plan += "ALTER DATABASE $qCopy MODIFY NAME = $qTarget;"
+    # nothing to drop when there was nothing there: the copy is the first database of that name
+    if ($TargetExists -and -not $KeepPrevious) { $plan += "DROP DATABASE $qPrev;" }
+    $plan
+}
+
+function Get-SourceClash {
+    # The one refusal that matters. Copying a database over itself would rename the source aside
+    # and then drop it, which is the whole environment gone rather than a failed run. Same server
+    # and same name is the source; same server and a different name is an ordinary copy within one
+    # logical server, and a different server with the same name is the normal case.
+    param(
+        [string]$TargetFqdn,
+        [string]$TargetDatabase,
+        [string]$SourceFqdn,
+        [string]$SourceDatabase
+    )
+    if ($TargetFqdn -eq $SourceFqdn -and $TargetDatabase -eq $SourceDatabase) {
+        return "Target $TargetFqdn / $TargetDatabase is the source database. Refusing to overwrite the source."
+    }
+    ''
+}
+
+#endregion
+
+#region Self test
+
+# Everything above that does not need a server. It runs before the setup below so that -SelfTest
+# never looks for an Az context or opens a connection.
+if ($SelfTest) {
+    $script:failed = 0
+    function Check([string]$Name, [bool]$Ok, [string]$Detail = '') {
+        if ($Ok) { Write-Host "  PASS  $Name" -ForegroundColor Green }
+        else { Write-Host "  FAIL  $Name $Detail" -ForegroundColor Red; $script:failed++ }
+    }
+    function Threw([scriptblock]$Body) {
+        try { & $Body | Out-Null; '' } catch { ($_.Exception.Message -split "`r?`n")[0] }
+    }
+
+    Write-Host 'Copy-AzureSqlDatabase self test' -ForegroundColor Cyan
+    Write-Host '  server names' -ForegroundColor Gray
+
+    # -ceq throughout, not -eq: PowerShell compares strings case-insensitively, so -eq here would
+    # pass whether or not the lower-casing happened at all. These checks are about the case.
+    $short = Resolve-ServerName 'sql-my-ser'
+    Check 'a short name keeps its short form' ($short.Short -ceq 'sql-my-ser') $short.Short
+    Check 'and gets the Azure SQL suffix' ($short.Fqdn -ceq 'sql-my-ser.database.windows.net') $short.Fqdn
+
+    $full = Resolve-ServerName 'sql-my-ser.database.windows.net'
+    Check 'an FQDN is left as it is' ($full.Fqdn -ceq 'sql-my-ser.database.windows.net') $full.Fqdn
+    Check 'and still yields the short name for AS COPY OF' ($full.Short -ceq 'sql-my-ser') $full.Short
+
+    $loud = Resolve-ServerName 'SQL-MY-SER.Database.Windows.Net'
+    Check 'case is flattened, so the same server is the same server' (
+        $loud.Fqdn -ceq $full.Fqdn -and $loud.Short -ceq $full.Short) "$($loud.Short) / $($loud.Fqdn)"
+    Check 'and it really is lower-cased rather than merely compared loosely' (
+        $loud.Short -ceq 'sql-my-ser' -and $loud.Fqdn -ceq 'sql-my-ser.database.windows.net')
+        "$($loud.Short) / $($loud.Fqdn)"
+
+    # a private endpoint or a sovereign cloud is somebody else's suffix, not ours to replace
+    $other = Resolve-ServerName 'sql-my-ser.privatelink.database.chinacloudapi.cn'
+    Check 'a suffix that is not ours is not rewritten' (
+        $other.Fqdn -ceq 'sql-my-ser.privatelink.database.chinacloudapi.cn') $other.Fqdn
+
+    Write-Host '  quoting' -ForegroundColor Gray
+    Check 'a name is bracketed' ((ConvertTo-QuotedName 'oof-web') -eq '[oof-web]') (ConvertTo-QuotedName 'oof-web')
+    Check 'a closing bracket in a name is doubled, not left to close the quoting early' (
+        (ConvertTo-QuotedName 'od]d') -eq '[od]]d]') (ConvertTo-QuotedName 'od]d')
+    Check 'a literal is an N string' ((ConvertTo-SqlLiteral 'oof-web') -eq "N'oof-web'") (ConvertTo-SqlLiteral 'oof-web')
+    Check 'and a quote in one is doubled' ((ConvertTo-SqlLiteral "o'd") -eq "N'o''d'") (ConvertTo-SqlLiteral "o'd")
+
+    Write-Host '  the copy statement' -ForegroundColor Gray
+    $plain = New-CopyStatement -SourceServerShort 'sql-my-ser' -SourceDatabase 'oof-web-src' -CopyName 'oof-web-copy-1'
+    Check 'it copies from server.database, which is what AS COPY OF wants' (
+        $plain -eq 'CREATE DATABASE [oof-web-copy-1] AS COPY OF [sql-my-ser].[oof-web-src];') $plain
+
+    $sized = New-CopyStatement -SourceServerShort 'sql-my-ser' -SourceDatabase 'oof-web-src' `
+                               -CopyName 'oof-web-copy-1' -ServiceObjective 'GP_Gen5_2'
+    Check 'a service objective is passed through' ($sized -match "SERVICE_OBJECTIVE = 'GP_Gen5_2' \)") $sized
+
+    $pooled = New-CopyStatement -SourceServerShort 'sql-my-ser' -SourceDatabase 'oof-web-src' `
+                                -CopyName 'oof-web-copy-1' -ElasticPool 'pool-nonprod'
+    Check 'an elastic pool goes in as a pool, bracketed' (
+        $pooled -match 'ELASTIC_POOL\( name = \[pool-nonprod\] \)') $pooled
+
+    Check 'asking for both is refused' (
+        (Threw { New-CopyStatement -SourceServerShort 's' -SourceDatabase 'd' -CopyName 'c' `
+                                   -ServiceObjective 'S2' -ElasticPool 'p' }) -match 'not both')
+
+    # the objective is a string in the statement rather than an identifier, so it is the one place
+    # a quote could end the literal early
+    $quoted = New-CopyStatement -SourceServerShort 's' -SourceDatabase 'd' -CopyName 'c' -ServiceObjective "S2' --"
+    Check 'a quote in the objective cannot end the string early' ($quoted -match "'S2'' --'") $quoted
+
+    Write-Host '  the swap plan' -ForegroundColor Gray
+    $replace = @(Get-SwapPlan -TargetDatabase 'oof-web' -CopyName 'oof-web-copy-1' `
+                              -PreviousName 'oof-web-prev-1' -TargetExists $true -KeepPrevious $false)
+    Check 'replacing takes three statements' ($replace.Count -eq 3) "$($replace.Count)"
+    Check 'the live one is moved aside first' ($replace[0] -eq 'ALTER DATABASE [oof-web] MODIFY NAME = [oof-web-prev-1];') $replace[0]
+    Check 'then the copy takes its name' ($replace[1] -eq 'ALTER DATABASE [oof-web-copy-1] MODIFY NAME = [oof-web];') $replace[1]
+    Check 'and only the one moved aside is dropped' ($replace[2] -eq 'DROP DATABASE [oof-web-prev-1];') $replace[2]
+
+    $kept = @(Get-SwapPlan -TargetDatabase 'oof-web' -CopyName 'oof-web-copy-1' `
+                           -PreviousName 'oof-web-prev-1' -TargetExists $true -KeepPrevious $true)
+    Check 'keeping the previous one drops nothing' (
+        $kept.Count -eq 2 -and -not @($kept | Where-Object { $_ -match 'DROP' }).Count) ($kept -join ' ')
+
+    $fresh = @(Get-SwapPlan -TargetDatabase 'oof-web' -CopyName 'oof-web-copy-1' `
+                            -PreviousName 'oof-web-prev-1' -TargetExists $false -KeepPrevious $false)
+    Check 'a target that does not exist is only renamed into place' ($fresh.Count -eq 1) ($fresh -join ' ')
+    Check 'and nothing is dropped when there was nothing there' (
+        -not @($fresh | Where-Object { $_ -match 'DROP' }).Count) ($fresh -join ' ')
+
+    # the check that matters: whatever the combination, the only thing a plan ever drops is the
+    # database that was renamed out of the way
+    foreach ($exists in $true, $false) {
+        foreach ($keep in $true, $false) {
+            $plan = @(Get-SwapPlan -TargetDatabase 'oof-web' -CopyName 'oof-web-copy-1' `
+                                   -PreviousName 'oof-web-prev-1' -TargetExists $exists -KeepPrevious $keep)
+            $drops = @($plan | Where-Object { $_ -match '^DROP' })
+            Check "nothing but the moved-aside copy is dropped (exists=$exists, keep=$keep)" (
+                -not @($drops | Where-Object { $_ -notmatch '\[oof-web-prev-1\];$' }).Count) ($drops -join ' ')
+        }
+    }
+
+    Write-Host '  refusing to copy a database over itself' -ForegroundColor Gray
+    $src = Resolve-ServerName 'sql-my-ser'
+    Check 'the same server and the same name is the source, and is refused' (
+        (Get-SourceClash -TargetFqdn $src.Fqdn -TargetDatabase 'oof-web' `
+                         -SourceFqdn $src.Fqdn -SourceDatabase 'oof-web') -match 'Refusing to overwrite the source')
+    Check 'the same server under another name is an ordinary copy' (
+        (Get-SourceClash -TargetFqdn $src.Fqdn -TargetDatabase 'oof-web-dev' `
+                         -SourceFqdn $src.Fqdn -SourceDatabase 'oof-web') -eq '')
+    Check 'another server with the same name is the normal case' (
+        (Get-SourceClash -TargetFqdn 'sql-oof-dev.database.windows.net' -TargetDatabase 'oof-web' `
+                         -SourceFqdn $src.Fqdn -SourceDatabase 'oof-web') -eq '')
+    # the comparison happens after Resolve-ServerName, so a shouted target cannot slip past it
+    Check 'a differently cased server name does not get past it' (
+        (Get-SourceClash -TargetFqdn (Resolve-ServerName 'SQL-MY-SER').Fqdn -TargetDatabase 'oof-web' `
+                         -SourceFqdn $src.Fqdn -SourceDatabase 'oof-web') -match 'Refusing')
+    Check 'and nor does a differently cased database name' (
+        (Get-SourceClash -TargetFqdn $src.Fqdn -TargetDatabase 'OOF-Web' `
+                         -SourceFqdn $src.Fqdn -SourceDatabase 'oof-web') -match 'Refusing')
+
+    Write-Host ''
+    if ($script:failed -eq 0) { Write-Host 'All self tests passed.' -ForegroundColor Green; exit 0 }
+    Write-Host "$script:failed self test(s) failed." -ForegroundColor Red
+    exit 1
+}
+
 #endregion
 
 #region Setup
+
+$missing = @()
+if (-not $SourceServer)   { $missing += '-SourceServer' }
+if (-not $SourceDatabase) { $missing += '-SourceDatabase' }
+if (-not $TargetServer)   { $missing += '-TargetServer' }
+if ($missing.Count) {
+    throw ('{0} {1} needed. See Get-Help .\Copy-AzureSqlDatabase.ps1 for what this takes.' -f
+           ($missing -join ', '), $(if ($missing.Count -eq 1) { 'is' } else { 'are' }))
+}
 
 $stamp    = Get-Date -Format 'yyyyMMddHHmm'
 $source   = Resolve-ServerName $SourceServer
 $copyName = "$TargetDatabase-copy-$stamp"
 $prevName = "$TargetDatabase-prev-$stamp"
 
-$qSource = '{0}.{1}' -f (ConvertTo-QuotedName $source.Short), (ConvertTo-QuotedName $SourceDatabase)
 $qCopy   = ConvertTo-QuotedName $copyName
 $qTarget = ConvertTo-QuotedName $TargetDatabase
 $qPrev   = ConvertTo-QuotedName $prevName
 
-if ($ServiceObjective -and $ElasticPool) {
-    throw 'Specify either -ServiceObjective or -ElasticPool, not both.'
-}
-
-$withClause = ''
-if ($ServiceObjective) {
-    $withClause = " ( SERVICE_OBJECTIVE = '$($ServiceObjective.Replace("'", "''"))' )"
-}
-elseif ($ElasticPool) {
-    $withClause = " ( SERVICE_OBJECTIVE = ELASTIC_POOL( name = $(ConvertTo-QuotedName $ElasticPool) ) )"
-}
-
-$createSql = "CREATE DATABASE $qCopy AS COPY OF $qSource$withClause;"
+$createSql = New-CopyStatement -SourceServerShort $source.Short -SourceDatabase $SourceDatabase `
+                               -CopyName $copyName -ServiceObjective $ServiceObjective -ElasticPool $ElasticPool
 
 if (-not $SqlCredential -and -not (Get-AzContext)) {
     throw 'No -SqlCredential supplied and no Az context found. Run Connect-AzAccount first.'
@@ -183,9 +380,9 @@ $targets = $TargetServer |
     ForEach-Object { Resolve-ServerName $_ } |
     Sort-Object Fqdn -Unique |
     ForEach-Object {
-        if ($_.Fqdn -eq $source.Fqdn -and $TargetDatabase -eq $SourceDatabase) {
-            throw "Target $($_.Fqdn) / $TargetDatabase is the source database. Refusing to overwrite the source."
-        }
+        $clash = Get-SourceClash -TargetFqdn $_.Fqdn -TargetDatabase $TargetDatabase `
+                                 -SourceFqdn $source.Fqdn -SourceDatabase $SourceDatabase
+        if ($clash) { throw $clash }
         [pscustomobject]@{
             Server       = $_.Short
             Fqdn         = $_.Fqdn
@@ -234,10 +431,9 @@ foreach ($t in $targets) {
 if (-not $Execute) {
     foreach ($t in ($targets | Where-Object Status -eq 'Pending')) {
         Write-Log "Planned SQL on $($t.Fqdn) (master):"
-        $plan = @($createSql, '-- poll sys.databases / sys.dm_database_copies until ONLINE')
-        if ($t.TargetExists) { $plan += "ALTER DATABASE $qTarget MODIFY NAME = $qPrev;" }
-        $plan += "ALTER DATABASE $qCopy MODIFY NAME = $qTarget;"
-        if ($t.TargetExists -and -not $KeepPrevious) { $plan += "DROP DATABASE $qPrev;" }
+        $plan = @($createSql, '-- poll sys.databases / sys.dm_database_copies until ONLINE') +
+                @(Get-SwapPlan -TargetDatabase $TargetDatabase -CopyName $copyName -PreviousName $prevName `
+                               -TargetExists $t.TargetExists -KeepPrevious ([bool]$KeepPrevious))
         $plan | ForEach-Object { Write-Host "    $_" }
     }
     Write-Log 'Dry run complete. Re-run with -Execute to apply.' WARN
