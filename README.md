@@ -167,7 +167,7 @@ MolehillWatch\
    ├─ Export-BackupHistory.sql              run on a source you cannot connect to, feeds the above
    ├─ Restore-LatestAzureBackup.ps1         restores the newest backup in a container, then tidies each copy
    ├─ Clone-DatabasesFromBlob.ps1           the same job for one job: straight from the container, managed identity, no module
-   ├─ Copy-AzureSqlDatabase.ps1             copies an Azure SQL database onto other logical servers and swaps it in (PowerShell 7)
+   ├─ Copy-AzureSqlDatabase.ps1             copies an Azure SQL database onto other logical servers and swaps it in
    ├─ Test-SqlTlsHandshake.ps1              why an instance will not negotiate encryption (old servers)
    ├─ Copy-SqlAccess.ps1                    gives one principal the same access another has, on any instance
    ├─ Get-SqlLicensingAudit.ps1             what needs licensing across an estate, and the total to cover it
@@ -427,6 +427,41 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "D:\Scripts\Clone-Databa
 * **No prompts anywhere.** A mandatory parameter would prompt, and a prompt in a job step is a hang rather than a failure, so the arguments are checked and refused with a message instead. `-WhatIf` prints the exact `RESTORE` statement and what would be done to each copy afterwards, and changes nothing.
 
 * Exit codes: `0` every database done (or a clean `-WhatIf`), `1` at least one failed, `2` it could not start. `-SelfTest` runs 65 checks over the choosing, the URLs, the statements and the refusals, with no Azure and no SQL Server at all.
+
+## Refreshing environments from one Azure SQL database (`Tools\Copy-AzureSqlDatabase.ps1`)
+
+`CREATE DATABASE ... AS COPY OF` onto each target logical server, then the copy is swapped in: the
+database already there is renamed to `<name>-prev-<stamp>`, the copy takes its name, and the old one
+is dropped unless `-KeepPrevious`. If the second rename fails the first is rolled back, so the
+environment keeps the database it started with. The copies run in parallel server-side.
+
+```powershell
+# dry run: preflight checks only, and the SQL it would run is printed
+.\Copy-AzureSqlDatabase.ps1 -SourceServer sql-my-ser -SourceDatabase oof-web-src `
+    -TargetServer sql-oof-dev, sql-oof-test, sql-oof-uat -TargetDatabase oof-web
+
+.\Copy-AzureSqlDatabase.ps1 -SourceServer sql-my-ser -SourceDatabase oof-web-src `
+    -TargetServer sql-oof-dev, sql-oof-test -TargetDatabase oof-web -ElasticPool pool-nonprod -Execute
+```
+
+* **Nothing to install, and no `Az` modules.** It connects with a connection string it builds, or
+  with one you hand it. `-Authentication` takes the same names as the connect screen above:
+  `Windows` and `Sql` work with nothing installed at all; `EntraPassword`, `EntraMfa` and
+  `EntraIntegrated` also work unaided on Windows PowerShell 5.1; and `EntraDefault`,
+  `EntraManagedIdentity`, `EntraServicePrincipal` and `EntraDeviceCode` need
+  `Microsoft.Data.SqlClient`, which is what the `SqlServer` module brings. Which driver can do what
+  is **asked of the driver** rather than kept in a table, because the answer moves - PowerShell 7's
+  built-in `System.Data.SqlClient` takes no Entra keyword at all, where 5.1's takes three of them.
+  A method nothing installed can do is refused before any database is created, with the ways out
+  named. It defaults to `Sql` when given `-SqlCredential` and `EntraDefault` otherwise.
+* **`-ConnectionString`** is for anything the parameters do not cover. Its server and database are
+  replaced per target, because every statement here runs against one `master` or another;
+  everything else in it is kept as written.
+* **Safe by default**: without `-Execute` nothing is created, renamed or dropped. It refuses to copy
+  a database over itself, which would otherwise rename the source aside and then drop it.
+* `-SelfTest` checks the name handling, the SQL it builds, the swap plan, the connection strings and
+  that refusal, with nothing installed and no server to connect to. **Exit code** is 0 when every
+  target finished and 1 otherwise.
 
 ## Why encryption will not negotiate (`Tools\Test-SqlTlsHandshake.ps1`)
 

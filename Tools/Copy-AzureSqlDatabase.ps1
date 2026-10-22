@@ -1,5 +1,4 @@
-#Requires -Version 7.0
-#Requires -Modules @{ ModuleName = 'SqlServer'; ModuleVersion = '22.0.0' }
+#Requires -Version 5.1
 
 <#
 .SYNOPSIS
@@ -40,8 +39,33 @@
     Optional elastic pool name on the target server. Cannot be combined with ServiceObjective.
 
 .PARAMETER SqlCredential
-    SQL authentication credential. If omitted, a Microsoft Entra ID access token from the
-    current Az context is used (run Connect-AzAccount first).
+    The user and secret for whichever -Authentication needs one: a SQL login and its password, an
+    Entra account and its password, or a service principal's application id and client secret.
+
+.PARAMETER Authentication
+    How to authenticate, under the same names the connect screen in this toolkit uses. Defaults to
+    Sql when -SqlCredential is given and EntraDefault otherwise.
+
+    Windows, Sql                                 work with no module installed
+    EntraPassword, EntraMfa, EntraIntegrated     Windows PowerShell 5.1 can do these unaided
+    EntraDefault, EntraManagedIdentity,
+    EntraServicePrincipal, EntraDeviceCode       need Microsoft.Data.SqlClient, which arrives
+                                                 with the SqlServer module
+
+    Which driver can do what is asked of the driver rather than assumed, so the refusal comes
+    before anything is created rather than at the first connection.
+
+.PARAMETER ConnectionString
+    A connection string to use instead of building one, for anything the parameters above do not
+    cover. Its Data Source and Initial Catalog are replaced per server, because every statement
+    here runs against one master or another; everything else in it is kept as written.
+
+.PARAMETER ConnectTimeoutSeconds
+    How long to wait for a connection. Default 30.
+
+.PARAMETER TrustServerCertificate
+    Skip validating the server certificate. Azure SQL does not need this; a local instance with a
+    self-signed certificate does.
 
 .PARAMETER PollSeconds
     Seconds between status checks. Default 30.
@@ -82,6 +106,12 @@ param(
     [string]$ServiceObjective,
     [string]$ElasticPool,
     [pscredential]$SqlCredential,
+    [ValidateSet('Windows', 'Sql', 'EntraDefault', 'EntraManagedIdentity', 'EntraServicePrincipal',
+                 'EntraPassword', 'EntraIntegrated', 'EntraMfa', 'EntraDeviceCode')]
+    [string]$Authentication,
+    [string]$ConnectionString,
+    [ValidateRange(5, 300)][int]$ConnectTimeoutSeconds = 30,
+    [switch]$TrustServerCertificate,
     [ValidateRange(5, 600)][int]$PollSeconds = 30,
     [ValidateRange(1, 1440)][int]$TimeoutMinutes = 240,
     [switch]$KeepPrevious,
@@ -120,15 +150,120 @@ function ConvertTo-SqlLiteral {
     "N'" + $Value.Replace("'", "''") + "'"
 }
 
-function Get-SqlAccessToken {
-    # Fetched per call so long-running copies outlive the token lifetime safely.
-    $t = Get-AzAccessToken -ResourceUrl 'https://database.windows.net/'
-    if ($t.Token -is [securestring]) {
-        ConvertFrom-SecureString -SecureString $t.Token -AsPlainText
+# What each way of signing in is called in a connection string. $null means it is not a keyword at
+# all: Windows authentication is Integrated Security, and SQL authentication is a user and password.
+$script:AuthKeyword = @{
+    Windows               = $null
+    Sql                   = $null
+    EntraDefault          = 'Active Directory Default'
+    EntraManagedIdentity  = 'Active Directory Managed Identity'
+    EntraServicePrincipal = 'Active Directory Service Principal'
+    EntraPassword         = 'Active Directory Password'
+    EntraIntegrated       = 'Active Directory Integrated'
+    EntraMfa              = 'Active Directory Interactive'
+    EntraDeviceCode       = 'Active Directory Device Code Flow'
+}
+
+function Test-AuthKeyword {
+    # Asked of the driver rather than kept in a table here, because the answer moves and a table
+    # would quietly stop being true. Measured on this machine: System.Data.SqlClient under Windows
+    # PowerShell 5.1 takes Active Directory Integrated, Password and Interactive; the same namespace
+    # under PowerShell 7 takes no Entra keyword at all; Microsoft.Data.SqlClient takes all of them.
+    param([string]$Namespace, [string]$Keyword)
+
+    $type = "$Namespace.SqlConnectionStringBuilder" -as [type]
+    if (-not $type) { return $false }
+    if (-not $Keyword) { return $true }
+    try {
+        $builder = New-Object $type
+        $builder['Authentication'] = $Keyword
+        $true
     }
-    else {
-        $t.Token
+    catch { $false }
+}
+
+function Resolve-SqlDriver {
+    # The driver that needs nothing installed is preferred, and Microsoft's is reached for only
+    # when what was asked for needs it. If neither can do it, that is said here - before a database
+    # is created - rather than at the first connection, with the three ways out named.
+    param([string]$Authentication)
+
+    $keyword = $script:AuthKeyword[$Authentication]
+    if (Test-AuthKeyword -Namespace 'System.Data.SqlClient' -Keyword $keyword) { return 'System.Data.SqlClient' }
+
+    if (-not ('Microsoft.Data.SqlClient.SqlConnection' -as [type])) {
+        try { Import-Module SqlServer -DisableNameChecking -ErrorAction Stop } catch { }
     }
+    if (Test-AuthKeyword -Namespace 'Microsoft.Data.SqlClient' -Keyword $keyword) { return 'Microsoft.Data.SqlClient' }
+
+    throw ("-Authentication $Authentication needs the Microsoft.Data.SqlClient driver, and nothing " +
+           "on this machine provides it. Install-Module SqlServer brings it; or use " +
+           "-Authentication Sql with -SqlCredential; or hand a whole connection string to " +
+           "-ConnectionString. On Windows PowerShell 5.1 the built-in driver can do EntraPassword, " +
+           "EntraMfa and EntraIntegrated unaided.")
+}
+
+function New-MasterConnectionString {
+    # Everything it needs is passed in rather than read from the script around it, so the string it
+    # builds can be checked without a server to connect to.
+    param(
+        [string]$Namespace,
+        [string]$Server,
+        [string]$Database = 'master',
+        [string]$Authentication,
+        [pscredential]$Credential,
+        [string]$Template,
+        [int]$Timeout = 30,
+        [bool]$Trust = $false
+    )
+
+    $builder = New-Object "$Namespace.SqlConnectionStringBuilder"
+
+    if ($Template) {
+        # handed one wholesale. The server and the database are still settled here: this script
+        # talks to several servers and every statement it runs goes to one master or another, so a
+        # single string cannot carry them.
+        #
+        # .psbase, and not $builder.ConnectionString = ..., because this class implements IDictionary
+        # and PowerShell binds a property *assignment* on it to a dictionary key instead of to the
+        # property. Setting it the obvious way throws "Keyword not supported: 'ConnectionString'",
+        # while *reading* $builder.ConnectionString works fine - which is why only one of the two
+        # needs this.
+        $builder.psbase.ConnectionString = $Template
+        if ($Server) { $builder['Data Source'] = $Server }
+        $builder['Initial Catalog'] = $Database
+        return $builder.ConnectionString
+    }
+
+    $builder['Data Source'] = $Server
+    $builder['Initial Catalog'] = $Database
+    $builder['Connect Timeout'] = $Timeout
+    $builder['Application Name'] = 'Copy-AzureSqlDatabase'
+    # explicit, because the drivers disagree: System.Data.SqlClient defaults to no encryption and
+    # Microsoft.Data.SqlClient 4.0 onwards defaults to requiring it. Azure SQL insists either way,
+    # so saying so here means the string means the same thing whichever driver was picked.
+    $builder['Encrypt'] = $true
+    if ($Trust) { $builder['TrustServerCertificate'] = $true }
+
+    $keyword = $script:AuthKeyword[$Authentication]
+    if ($keyword) { $builder['Authentication'] = $keyword }
+
+    if ($Authentication -eq 'Windows') { $builder['Integrated Security'] = $true }
+    elseif ($Authentication -eq 'Sql') {
+        if (-not $Credential) { throw '-Authentication Sql needs -SqlCredential.' }
+        $builder['User ID'] = $Credential.UserName
+        $builder['Password'] = $Credential.GetNetworkCredential().Password
+    }
+    elseif ($Credential) {
+        # the Entra methods that take a user take it as the user ID - an account, or a service
+        # principal's application id - and only two of them have a secret to go with it
+        $builder['User ID'] = $Credential.UserName
+        if ($Authentication -eq 'EntraPassword' -or $Authentication -eq 'EntraServicePrincipal') {
+            $builder['Password'] = $Credential.GetNetworkCredential().Password
+        }
+    }
+
+    $builder.ConnectionString
 }
 
 function Invoke-MasterQuery {
@@ -137,16 +272,24 @@ function Invoke-MasterQuery {
         [string]$Query,
         [int]$Timeout = 60
     )
-    $p = @{
-        ServerInstance = $Server
-        Database       = 'master'
-        Query          = $Query
-        QueryTimeout   = $Timeout
-        Encrypt        = 'Mandatory'
-        ErrorAction    = 'Stop'
+    $connectionString = New-MasterConnectionString -Namespace $script:Driver -Server $Server `
+        -Authentication $script:Authentication -Credential $SqlCredential -Template $ConnectionString `
+        -Timeout $ConnectTimeoutSeconds -Trust ([bool]$TrustServerCertificate)
+
+    $connection = New-Object "$script:Driver.SqlConnection" $connectionString
+    try {
+        $connection.Open()
+        $command = $connection.CreateCommand()
+        $command.CommandText = $Query
+        $command.CommandTimeout = $Timeout
+        $table = New-Object System.Data.DataTable
+        [void](New-Object "$script:Driver.SqlDataAdapter" $command).Fill($table)
+        # the rows, not the table: that is what Invoke-Sqlcmd handed back, so everything that reads
+        # a column off a result did not have to change. Emitted one at a time rather than returned
+        # as an array, so a caller's @(...).Count is the number of rows and not 1.
+        foreach ($row in $table.Rows) { $row }
     }
-    if ($SqlCredential) { $p.Credential = $SqlCredential } else { $p.AccessToken = Get-SqlAccessToken }
-    Invoke-Sqlcmd @p
+    finally { $connection.Dispose() }
 }
 
 function Test-DatabaseExists {
@@ -359,6 +502,157 @@ if ($SelfTest) {
         (Get-SourceClash -TargetFqdn $src.Fqdn -TargetDatabase 'OOF-Web' `
                          -SourceFqdn $src.Fqdn -SourceDatabase 'oof-web') -match 'Refusing')
 
+    Write-Host '  which driver can do what' -ForegroundColor Gray
+    Check 'a driver that is not installed cannot do anything' (
+        -not (Test-AuthKeyword -Namespace 'Nonsense.Driver' -Keyword $null))
+    Check 'the built-in driver needs no keyword for SQL or Windows authentication' (
+        Test-AuthKeyword -Namespace 'System.Data.SqlClient' -Keyword $null)
+    # true on both editions, measured: managed identity is Microsoft's driver or nothing
+    Check 'and it cannot do managed identity on either edition' (
+        -not (Test-AuthKeyword -Namespace 'System.Data.SqlClient' -Keyword 'Active Directory Managed Identity'))
+
+    Check 'Windows authentication needs nothing installed' (
+        (Resolve-SqlDriver -Authentication 'Windows') -eq 'System.Data.SqlClient')
+    Check 'and nor does SQL authentication' (
+        (Resolve-SqlDriver -Authentication 'Sql') -eq 'System.Data.SqlClient')
+
+    # the invariant that holds whatever is installed and whichever edition this is: the driver
+    # chosen is one that was asked and said yes, and if neither can, it is a refusal that says how
+    # to fix it rather than a failure at the first connection
+    foreach ($method in 'EntraIntegrated', 'EntraManagedIdentity', 'EntraDefault', 'EntraMfa') {
+        $keyword = $script:AuthKeyword[$method]
+        $builtInCan = Test-AuthKeyword -Namespace 'System.Data.SqlClient' -Keyword $keyword
+        $chosen = ''
+        $refusal = Threw { $script:chosen = Resolve-SqlDriver -Authentication $method }
+        if (-not $refusal) { $chosen = $script:chosen }
+
+        if ($builtInCan) {
+            Check "$method goes to the built-in driver, which said it can" ($chosen -eq 'System.Data.SqlClient') $chosen
+        }
+        elseif ($chosen) {
+            Check "$method goes to Microsoft's driver, which said it can" ($chosen -eq 'Microsoft.Data.SqlClient') $chosen
+            Check "and that driver really does take $keyword" (Test-AuthKeyword -Namespace $chosen -Keyword $keyword)
+        }
+        else {
+            Check "$method is refused with the way out named" (
+                $refusal -match 'Install-Module SqlServer' -and $refusal -match '-Authentication Sql') $refusal
+        }
+    }
+
+    Write-Host '  the connection string it builds' -ForegroundColor Gray
+    $secret = "p@ss;word''s"      # a semicolon and quotes, which a connection string must survive
+    $cred = New-Object pscredential 'svc_copy', (ConvertTo-SecureString $secret -AsPlainText -Force)
+    function Read-Back([string]$Namespace, [string]$Text) {
+        $b = New-Object "$Namespace.SqlConnectionStringBuilder"
+        $b.psbase.ConnectionString = $Text      # see the note in New-MasterConnectionString
+        $b
+    }
+    # ContainsKey first, because under Set-StrictMode -Version Latest reading a key the driver does
+    # not support throws "Keyword not supported" rather than coming back empty - and whether a
+    # driver supports Authentication is the very thing some of these checks are asking about
+    function Setting($Builder, [string]$Key) {
+        if (-not $Builder.psbase.ContainsKey($Key)) { return '' }
+        $value = $null
+        if (-not $Builder.psbase.TryGetValue($Key, [ref]$value)) { return '' }
+        $value
+    }
+
+    $windows = Read-Back 'System.Data.SqlClient' (New-MasterConnectionString -Namespace 'System.Data.SqlClient' `
+        -Server 'sql-oof-dev.database.windows.net' -Authentication 'Windows' -Timeout 30)
+    Check 'Windows authentication is integrated security' ((Setting $windows 'Integrated Security') -eq $true)
+    Check 'the database is always master' ((Setting $windows 'Initial Catalog') -ceq 'master') (Setting $windows 'Initial Catalog')
+    Check 'the server is the one asked for' ((Setting $windows 'Data Source') -ceq 'sql-oof-dev.database.windows.net') (Setting $windows 'Data Source')
+    Check 'the timeout is carried through' ((Setting $windows 'Connect Timeout') -eq 30) "$(Setting $windows 'Connect Timeout')"
+    Check 'and it says which script opened the connection' ((Setting $windows 'Application Name') -ceq 'Copy-AzureSqlDatabase') (Setting $windows 'Application Name')
+    Check 'encryption is asked for rather than left to the driver default' (
+        (Setting $windows 'Encrypt') -eq $true) "$(Setting $windows 'Encrypt')"
+
+    $sql = Read-Back 'System.Data.SqlClient' (New-MasterConnectionString -Namespace 'System.Data.SqlClient' `
+        -Server 'sql-oof-dev.database.windows.net' -Authentication 'Sql' -Credential $cred)
+    Check 'SQL authentication carries the login' ((Setting $sql 'User ID') -ceq 'svc_copy') (Setting $sql 'User ID')
+    Check 'and a password with a semicolon and quotes in it survives the round trip' (
+        (Setting $sql 'Password') -ceq $secret) '(not shown)'
+    Check 'SQL authentication is not an Entra keyword' (-not (Setting $sql 'Authentication'))
+
+    Check 'SQL authentication with no credential is refused by name' (
+        (Threw { New-MasterConnectionString -Namespace 'System.Data.SqlClient' -Server 's' -Authentication 'Sql' }) `
+        -match '-SqlCredential')
+
+    Check 'a trusted certificate is only set when asked for' (
+        -not (Setting (Read-Back 'System.Data.SqlClient' (New-MasterConnectionString -Namespace 'System.Data.SqlClient' `
+            -Server 's' -Authentication 'Windows')) 'TrustServerCertificate'))
+    Check 'and is set when it is' (
+        (Setting (Read-Back 'System.Data.SqlClient' (New-MasterConnectionString -Namespace 'System.Data.SqlClient' `
+            -Server 's' -Authentication 'Windows' -Trust $true)) 'TrustServerCertificate') -eq $true)
+
+    # a whole connection string keeps everything in it except where it points, because this script
+    # talks to several servers and one string cannot name them all
+    $template = 'Data Source=somewhere-else;Initial Catalog=the-wrong-one;Application Name=Theirs;Connect Timeout=7'
+    $fromTemplate = Read-Back 'System.Data.SqlClient' (New-MasterConnectionString -Namespace 'System.Data.SqlClient' `
+        -Server 'sql-oof-test.database.windows.net' -Template $template)
+    Check 'the server in a given connection string is replaced per target' (
+        (Setting $fromTemplate 'Data Source') -ceq 'sql-oof-test.database.windows.net') (Setting $fromTemplate 'Data Source')
+    Check 'and so is the database, because every statement here runs against master' (
+        (Setting $fromTemplate 'Initial Catalog') -ceq 'master') (Setting $fromTemplate 'Initial Catalog')
+    Check 'everything else in it is left exactly as written' (
+        (Setting $fromTemplate 'Application Name') -ceq 'Theirs' -and (Setting $fromTemplate 'Connect Timeout') -eq 7) `
+        "$(Setting $fromTemplate 'Application Name') / $(Setting $fromTemplate 'Connect Timeout')"
+
+    $entraDriver = ''
+    foreach ($candidate in 'System.Data.SqlClient', 'Microsoft.Data.SqlClient') {
+        if (-not $entraDriver -and (Test-AuthKeyword -Namespace $candidate -Keyword 'Active Directory Default')) {
+            $entraDriver = $candidate
+        }
+    }
+    if (-not $entraDriver) {
+        Write-Host '    SKIP  the Entra strings: no driver here takes the keywords' -ForegroundColor Yellow
+    }
+    else {
+        $def = Read-Back $entraDriver (New-MasterConnectionString -Namespace $entraDriver `
+            -Server 's' -Authentication 'EntraDefault')
+        # the spaces come back out: a builder stores the keyword and hands it back as the enum name,
+        # ActiveDirectoryDefault, so an assertion on the string as it went in would fail
+        Check 'EntraDefault is the keyword and nothing else' (
+            (Setting $def 'Authentication') -match 'Active\s*Directory\s*Default' -and
+            -not (Setting $def 'User ID') -and -not (Setting $def 'Password')) `
+            "$(Setting $def 'Authentication')"
+
+        $mi = Read-Back $entraDriver (New-MasterConnectionString -Namespace $entraDriver `
+            -Server 's' -Authentication 'EntraManagedIdentity' -Credential $cred)
+        Check 'a user-assigned identity passes its client id as the user, with no password' (
+            (Setting $mi 'User ID') -ceq 'svc_copy' -and -not (Setting $mi 'Password')) (Setting $mi 'User ID')
+
+        $spn = Read-Back $entraDriver (New-MasterConnectionString -Namespace $entraDriver `
+            -Server 's' -Authentication 'EntraServicePrincipal' -Credential $cred)
+        Check 'a service principal passes both its application id and its secret' (
+            (Setting $spn 'User ID') -ceq 'svc_copy' -and (Setting $spn 'Password') -ceq $secret) (Setting $spn 'User ID')
+    }
+
+    Write-Host '  nothing reaches for Az any more' -ForegroundColor Gray
+    $own = Get-Content -Raw -LiteralPath $PSCommandPath
+    # the commands this script actually calls, read from its own syntax tree rather than grepped
+    # out of its text: these very checks have to name Get-AzAccessToken and Invoke-Sqlcmd to say
+    # they are gone, so searching the source for the names would always find them
+    $ownAst = [System.Management.Automation.Language.Parser]::ParseFile($PSCommandPath, [ref]$null, [ref]$null)
+    $called = @($ownAst.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandAst] }, $true) |
+                ForEach-Object { $_.GetCommandName() } | Where-Object { $_ })
+    $az = @($called | Where-Object { $_ -match '^(?i)[a-z]+-Az[A-Z]' })
+    Check 'no Az cmdlet is called' (-not $az.Count) ($az -join ', ')
+    Check 'Invoke-Sqlcmd is not called either' (
+        -not @($called | Where-Object { $_ -match '^(?i)Invoke-Sqlcmd$' }).Count)
+    Check 'and no module is required for this to start at all' ($own -notmatch '(?im)^#Requires\s+-Modules')
+    # SqlServer is still reached for, but only to borrow Microsoft's driver when something asked
+    # for needs it, and never in a way that stops the script when it is not installed
+    Check 'the SqlServer module is only ever reached for inside a try' (
+        $own -match '(?s)try\s*\{\s*Import-Module SqlServer[^}]*\}\s*catch')
+    # a structural check rather than a behavioural one, deliberately. A connection that is never
+    # handed back cannot be caught by watching: the pool holds a hundred, and the garbage collector
+    # returns the ones nobody disposed before a run this size notices. So the shape is checked
+    # instead - this script polls once per interval for hours, and the hundred-and-first connection
+    # failing is the sort of fault that shows up late and cannot be reproduced quickly.
+    Check 'every connection it opens is handed back in a finally' (
+        $own -match '(?s)\$connection\s*=\s*New-Object[^\r\n]+SqlConnection.+?finally\s*\{\s*\$connection\.Dispose\(\)\s*\}')
+
     Write-Host '  the stamp that goes in the names' -ForegroundColor Gray
     # the one check here that needs a culture that is not ours: th-TH counts years from a different
     # era, so a stamp built through the current culture comes out as 2569 rather than 2026
@@ -430,9 +724,23 @@ $qPrev   = ConvertTo-QuotedName $prevName
 $createSql = New-CopyStatement -SourceServerShort $source.Short -SourceDatabase $SourceDatabase `
                                -CopyName $copyName -ServiceObjective $ServiceObjective -ElasticPool $ElasticPool
 
-if (-not $SqlCredential -and -not (Get-AzContext)) {
-    throw 'No -SqlCredential supplied and no Az context found. Run Connect-AzAccount first.'
+# A credential means SQL authentication unless told otherwise, and nothing means whatever the
+# machine is already signed in as - which is the same pair of defaults this had when it went
+# through Az, minus the module.
+$script:Authentication = $Authentication
+if (-not $script:Authentication) {
+    $script:Authentication = $(if ($SqlCredential) { 'Sql' } else { 'EntraDefault' })
 }
+
+# settled before anything is created, so a driver that cannot do what was asked is a refusal rather
+# than a half-finished run. A whole connection string carries its own authentication, so the driver
+# only has to exist.
+$script:Driver = $(if ($ConnectionString) {
+    $(if (Test-AuthKeyword -Namespace 'System.Data.SqlClient' -Keyword $null) { 'System.Data.SqlClient' }
+      else { Resolve-SqlDriver -Authentication 'Windows' })
+} else {
+    Resolve-SqlDriver -Authentication $script:Authentication
+})
 
 $targets = $TargetServer |
     ForEach-Object { Resolve-ServerName $_ } |
@@ -452,9 +760,11 @@ $targets = $TargetServer |
         }
     }
 
-Write-Log ("Mode: {0}" -f ($Execute ? 'EXECUTE' : 'DRY RUN')) ($Execute ? 'WARN' : 'INFO')
+Write-Log ("Mode: {0}" -f $(if ($Execute) { 'EXECUTE' } else { 'DRY RUN' })) $(if ($Execute) { 'WARN' } else { 'INFO' })
 Write-Log "Source: $($source.Fqdn) / $SourceDatabase"
 Write-Log "Targets: $(($targets.Fqdn) -join ', ')  ->  $TargetDatabase"
+Write-Log ("Signing in with {0} through {1}" -f $(if ($ConnectionString) { 'the connection string given' }
+                                                 else { "-Authentication $script:Authentication" }), $script:Driver)
 
 #endregion
 
@@ -473,7 +783,7 @@ foreach ($t in $targets) {
         }
         $t.TargetExists = Test-DatabaseExists -Server $t.Fqdn -Name $TargetDatabase
         Write-Log ('{0}: reachable; {1} {2}' -f $t.Fqdn, $TargetDatabase,
-            ($t.TargetExists ? 'exists and will be replaced' : 'does not exist and will be created'))
+            $(if ($t.TargetExists) { 'exists and will be replaced' } else { 'does not exist and will be created' }))
     }
     catch {
         $t.Status  = 'Failed'
