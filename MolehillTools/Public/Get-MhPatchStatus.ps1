@@ -96,6 +96,14 @@ function Get-MhPatchStatus {
         [Parameter(ParameterSetName = 'Check')] [int] $SqlCuBehindCritical = 3,
         [Parameter(ParameterSetName = 'Check')] [int] $WindowsGraceDays = 14,
         [Parameter(ParameterSetName = 'Check')] [ValidateRange(1, 300)] [int] $ConnectTimeoutSeconds = 10,
+        [Parameter(ParameterSetName = 'Check')] [string[]] $EmailTo,
+        [Parameter(ParameterSetName = 'Check')] [string] $EmailFrom,
+        [Parameter(ParameterSetName = 'Check')] [string] $SmtpServer,
+        [Parameter(ParameterSetName = 'Check')] [ValidateRange(1, 65535)] [int] $SmtpPort = 25,
+        [Parameter(ParameterSetName = 'Check')] [switch] $SmtpUseSsl,
+        [Parameter(ParameterSetName = 'Check')] [pscredential] $SmtpCredential,
+        [Parameter(ParameterSetName = 'Check')] [string] $EmailSubject,
+        [Parameter(ParameterSetName = 'Check')] [ValidateSet('Always', 'Critical', 'CriticalOrWarning')] [string] $EmailWhen = 'Always',
         [Parameter(ParameterSetName = 'Download', Mandatory)] [string] $SaveReference,
         [ValidateRange(2, 12)] [int] $Months = 3
     )
@@ -116,6 +124,15 @@ function Get-MhPatchStatus {
             Write-Host "Saved $($rows.Count) builds to $SaveReference. Copy it next to Get-PatchStatus.ps1 on the server (or pass -ReferenceFile)." -ForegroundColor Green
             return
         }
+        # before anything is scanned or downloaded: a report over an estate takes minutes, and
+        # finding out at the end that the mail settings were wrong means running it all again
+        if ($EmailTo -or $EmailFrom -or $SmtpServer) {
+            $emailProblems = @(Get-PatchEmailProblem -To $EmailTo -From $EmailFrom -Server $SmtpServer)
+            if ($emailProblems.Count) {
+                throw ("The email settings are not usable, so nothing was scanned:`n  " + ($emailProblems -join "`n  "))
+            }
+        }
+
         if (-not $ReferenceFile) {
             $besideScript = Join-Path $PSScriptRoot 'patch-reference.json'
             if (Test-Path $besideScript) { $ReferenceFile = $besideScript }
@@ -277,6 +294,30 @@ $rowsHtml
         [System.IO.File]::WriteAllText($OutputPath, $html, [System.Text.Encoding]::UTF8)
         Write-Host "Report saved: $OutputPath" -ForegroundColor Green
         if ($Open) { Start-Process $OutputPath }
+
+        if ($EmailTo) {
+            if (-not (Test-PatchEmailWanted -When $EmailWhen -Counts $counts)) {
+                Write-Host "No email sent: -EmailWhen $EmailWhen, and there is nothing in that category." -ForegroundColor Gray
+            }
+            else {
+                $serverCount = @($results | ForEach-Object { $_.Server } | Select-Object -Unique).Count
+                $subject = $(if ($EmailSubject) { $EmailSubject } else { Get-PatchEmailSubject -Counts $counts -Overall $overall -ServerCount $serverCount })
+                $body = Get-PatchEmailBody -Rows $sorted -Counts $counts -Overall $overall `
+                                           -ReportName (Split-Path -Leaf $OutputPath) -ReferenceDate $referenceDate
+                try {
+                    Send-PatchEmail -To $EmailTo -From $EmailFrom -Subject $subject -Body $body `
+                                    -AttachmentPath $OutputPath -Server $SmtpServer -Port $SmtpPort `
+                                    -UseSsl ([bool]$SmtpUseSsl) -Credential $SmtpCredential
+                    Write-Host ("Emailed to {0} via {1}:{2}" -f (@($EmailTo) -join ', '), $SmtpServer, $SmtpPort) -ForegroundColor Green
+                }
+                catch {
+                    # the report is already on disk, so a mail server that will not take it is worth
+                    # saying loudly and is not worth throwing away a finished scan over
+                    $why = ($_.Exception.GetBaseException().Message -split "`r?`n")[0]
+                    Write-Warning ("The report was produced but could not be emailed: {0}`nIt is saved at {1}." -f $why, $OutputPath)
+                }
+            }
+        }
     }
 }
 
@@ -592,6 +633,147 @@ function Add-PatchResult($Server, $Instance, $Component, $Product, $Installed, $
 
 function Get-PatchHtmlEncoded($s) { [System.Net.WebUtility]::HtmlEncode([string]$s) }
 
+<#
+  Everything wrong with the email settings, in one go and before the scan starts.
+
+  Said all at once rather than one at a time, and said at the beginning: a report over an estate
+  takes minutes, and finding out at the end that -SmtpServer was missing means running the whole
+  thing again. The addresses are checked by the framework's own parser rather than by a regex,
+  because an address is harder to describe than it looks and MailAddress already knows how.
+#>
+function Get-PatchEmailProblem {
+    [CmdletBinding()]
+    param([AllowEmptyCollection()] [string[]] $To, [string] $From, [string] $Server)
+
+    $problems = @()
+    $addresses = @(@($To) | Where-Object { $_ })
+    if (-not $addresses.Count) { $problems += '-EmailTo needs at least one address.' }
+    if (-not $From) { $problems += '-EmailFrom is needed: a mail server will not take mail with no sender.' }
+    if (-not $Server) { $problems += '-SmtpServer is needed: this does not guess at a mail server.' }
+
+    foreach ($address in ($addresses + @($From | Where-Object { $_ }))) {
+        try { [void](New-Object System.Net.Mail.MailAddress $address) }
+        catch { $problems += ("'{0}' is not an email address." -f $address) }
+    }
+    $problems
+}
+
+# whether this run is worth an email at all, so a nightly job can be told to speak up only when
+# something is actually wrong rather than filling an inbox with good news
+function Test-PatchEmailWanted {
+    [CmdletBinding()]
+    param([string] $When, [hashtable] $Counts)
+
+    if ($When -eq 'Critical') { return [bool]$Counts['Critical'] }
+    if ($When -eq 'CriticalOrWarning') { return [bool]($Counts['Critical'] + $Counts['Warning']) }
+    $true
+}
+
+# the subject line, which for most people is the whole report: it has to say the answer, not the
+# question. "3 critical" belongs in the subject, not three screens into an attachment.
+function Get-PatchEmailSubject {
+    [CmdletBinding()]
+    param([hashtable] $Counts, [string] $Overall, [int] $ServerCount)
+
+    $what = $(
+        if ($Overall -eq 'Critical') { '{0} critical' -f $Counts['Critical'] }
+        elseif ($Overall -eq 'Warning') { '{0} needing attention' -f $Counts['Warning'] }
+        else { 'all up to date' }
+    )
+    'Patch status: {0} across {1} server{2}' -f $what, $ServerCount, $(if ($ServerCount -eq 1) { '' } else { 's' })
+}
+
+<#
+  The body of the email: the things that are not fine, and nothing else.
+
+  Styles are written on each element rather than in a stylesheet, because mail clients throw a
+  <style> block away and the report's own one would come out as unstyled text. The full report goes
+  along as an attachment, so this only has to be enough to decide whether to open it.
+#>
+function Get-PatchEmailBody {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()] [object[]] $Rows, [hashtable] $Counts, [string] $Overall,
+        [string] $ReportName, [datetime] $ReferenceDate
+    )
+
+    $colour = @{ Critical = '#D64545'; Warning = '#F2A93B'; OK = '#3FA66B' }[$Overall]
+    $heading = @{ Critical = 'Action required'; Warning = 'Attention recommended'; OK = 'No issues found' }[$Overall]
+    $cell = 'padding:6px 10px;border-bottom:1px solid #E2DEDD;vertical-align:top;font-size:13px'
+
+    $interesting = @($Rows | Where-Object { $_.Severity -eq 'Critical' -or $_.Severity -eq 'Warning' })
+    $body = New-Object System.Collections.Generic.List[string]
+    $body.Add('<div style="font-family:Segoe UI,Arial,sans-serif;color:#231F20">')
+    $body.Add(('<p style="margin:0 0 4px 0;padding:8px 14px;background:{0};color:#fff;font-weight:700;display:inline-block">{1}</p>' -f $colour, $heading))
+    $body.Add(('<p style="font-size:14px">{0} critical, {1} needing attention, {2} up to date. Microsoft update data from {3}.</p>' -f
+               $Counts['Critical'], $Counts['Warning'], $Counts['OK'], $ReferenceDate.ToString('dd MMM yyyy')))
+
+    if ($interesting.Count) {
+        $body.Add('<table style="border-collapse:collapse;background:#fff">')
+        $body.Add(('<tr>{0}</tr>' -f (@('Server', 'Component', 'Installed', 'Latest', 'Status') |
+                   ForEach-Object { '<th style="background:#231F20;color:#fff;text-align:left;padding:6px 10px;font-size:13px">' + $_ + '</th>' }) -join ''))
+        foreach ($row in $interesting) {
+            $severity = $(if ($row.Severity -eq 'Critical') { 'background:#D64545;color:#fff;font-weight:600' } else { 'background:#F9D58C;font-weight:600' })
+            $what = Get-PatchHtmlEncoded $row.Component
+            if ($row.Instance) { $what += ' (' + (Get-PatchHtmlEncoded $row.Instance) + ')' }
+            $body.Add('<tr>' +
+                ('<td style="{0}">{1}</td>' -f $cell, (Get-PatchHtmlEncoded $row.Server)) +
+                ('<td style="{0}">{1}</td>' -f $cell, $what) +
+                ('<td style="{0}">{1}</td>' -f $cell, (Get-PatchHtmlEncoded $row.Installed)) +
+                ('<td style="{0}">{1}</td>' -f $cell, (Get-PatchHtmlEncoded $row.Latest)) +
+                ('<td style="{0};{1}">{2}</td>' -f $cell, $severity, (Get-PatchHtmlEncoded $row.Status)) +
+                '</tr>')
+        }
+        $body.Add('</table>')
+    }
+    else { $body.Add('<p style="font-size:14px">Nothing is behind. The full report is attached anyway.</p>') }
+
+    $body.Add(('<p style="color:#7A7473;font-size:12px">The full report is attached as {0}. Produced by Molehill Watch on {1}; nothing was changed on any server.</p>' -f
+               (Get-PatchHtmlEncoded $ReportName), (Get-PatchHtmlEncoded $env:COMPUTERNAME)))
+    $body.Add('</div>')
+    $body -join "`n"
+}
+
+# the sending itself, kept apart from everything that decides what to send so the deciding can be
+# checked without a mail server in the room
+function Send-PatchEmail {
+    [CmdletBinding()]
+    param(
+        [string[]] $To, [string] $From, [string] $Subject, [string] $Body,
+        [string] $AttachmentPath, [string] $Server, [int] $Port, [bool] $UseSsl, [pscredential] $Credential
+    )
+
+    $message = New-Object System.Net.Mail.MailMessage
+    $client = New-Object System.Net.Mail.SmtpClient $Server, $Port
+    $attachment = $null
+    try {
+        $message.From = New-Object System.Net.Mail.MailAddress $From
+        foreach ($one in @($To) | Where-Object { $_ }) { $message.To.Add($one.Trim()) }
+        $message.Subject = $Subject
+        $message.Body = $Body
+        $message.IsBodyHtml = $true
+        if ($AttachmentPath -and (Test-Path -LiteralPath $AttachmentPath)) {
+            # the type said out loud rather than left as application/octet-stream, which is what
+            # .NET falls back to and what a mail gateway is most suspicious of
+            $attachment = New-Object System.Net.Mail.Attachment $AttachmentPath, 'text/html'
+            $attachment.Name = Split-Path -Leaf $AttachmentPath
+            $message.Attachments.Add($attachment)
+        }
+        $client.EnableSsl = $UseSsl
+        if ($Credential) {
+            $client.Credentials = New-Object System.Net.NetworkCredential $Credential.UserName, $Credential.GetNetworkCredential().Password
+        }
+        else { $client.UseDefaultCredentials = $true }
+        $client.Send($message)
+    }
+    finally {
+        # the attachment holds the file open, so it is disposed before the message that owns it
+        if ($attachment) { $attachment.Dispose() }
+        $message.Dispose()
+        $client.Dispose()
+    }
+}
+
 Register-MhSelfTest -Name 'Get-MhPatchStatus' -Test {
     # the reference data these verdicts are read against, small enough to reason about. The
     # functions read it from the caller's scope, which is how the tool itself passes it to them.
@@ -695,4 +877,73 @@ Register-MhSelfTest -Name 'Get-MhPatchStatus' -Test {
     Test-MhCheck 'a KB with no prefix is still read' ($parsed[1].KB -eq '5104824') $parsed[1].KB
     Test-MhCheck 'and nothing at all parses to nothing' (@(Get-PatchSqlBuildsFromHtml '').Count -eq 0)
 
+    Test-MhSection 'emailing the report'
+
+    # everything that is wrong with the settings, said at once and before the scan rather than after
+    Test-MhCheck 'nothing missing is no complaint' (
+        -not @(Get-PatchEmailProblem -To @('ops@example.com') -From 'reports@example.com' -Server 'smtp.example.com').Count)
+    $none = @(Get-PatchEmailProblem -To @() -From '' -Server '')
+    Test-MhCheck 'all three missing are reported together, not one per run' ($none.Count -eq 3) ($none -join ' | ')
+    Test-MhCheck 'a missing recipient is named' (@($none | Where-Object { $_ -match '-EmailTo' }).Count -eq 1)
+    Test-MhCheck 'a missing sender is named, and says why one is needed' (
+        @($none | Where-Object { $_ -match '-EmailFrom' -and $_ -match 'no sender' }).Count -eq 1)
+    Test-MhCheck 'a missing mail server is named' (@($none | Where-Object { $_ -match '-SmtpServer' }).Count -eq 1)
+    $bad = @(Get-PatchEmailProblem -To @('ops@example.com', 'not an address') -From 'reports@example.com' -Server 'smtp')
+    Test-MhCheck 'an address that is not one is caught' ($bad.Count -eq 1 -and $bad[0] -match 'not an email address') ($bad -join ' | ')
+    Test-MhCheck 'and the good ones beside it are not' ($bad[0] -notmatch 'ops@example.com') $bad[0]
+    # -join, not -match against the array: -match on a list hands back the matching items, which is
+    # an array, and Test-MhCheck wants a yes or no
+    Test-MhCheck 'a sender that is not an address is caught too' (
+        (@(Get-PatchEmailProblem -To @('ops@example.com') -From 'nope' -Server 'smtp') -join ' ') -match "'nope' is not an email address")
+
+    # whether a run is worth an email: a nightly job should be able to stay quiet when all is well
+    $clean = @{ Critical = 0; Warning = 0; Info = 2; OK = 9 }
+    $warned = @{ Critical = 0; Warning = 3; Info = 0; OK = 6 }
+    $urgent = @{ Critical = 2; Warning = 1; Info = 0; OK = 4 }
+    Test-MhCheck 'Always sends when all is well' (Test-PatchEmailWanted -When 'Always' -Counts $clean)
+    Test-MhCheck 'Critical stays quiet when all is well' (-not (Test-PatchEmailWanted -When 'Critical' -Counts $clean))
+    Test-MhCheck 'and stays quiet for warnings alone' (-not (Test-PatchEmailWanted -When 'Critical' -Counts $warned))
+    Test-MhCheck 'but speaks up for something critical' (Test-PatchEmailWanted -When 'Critical' -Counts $urgent)
+    Test-MhCheck 'CriticalOrWarning speaks up for a warning' (Test-PatchEmailWanted -When 'CriticalOrWarning' -Counts $warned)
+    Test-MhCheck 'and stays quiet when there is neither' (-not (Test-PatchEmailWanted -When 'CriticalOrWarning' -Counts $clean))
+
+    # the subject line, which for most people is the whole report
+    $subject = Get-PatchEmailSubject -Counts $urgent -Overall 'Critical' -ServerCount 4
+    Test-MhCheck 'the subject leads with the number that matters' ($subject -match '^Patch status: 2 critical') $subject
+    Test-MhCheck 'and says how many servers it covers' ($subject -match '4 servers') $subject
+    Test-MhCheck 'one server is not "1 servers"' (
+        (Get-PatchEmailSubject -Counts $clean -Overall 'OK' -ServerCount 1) -match '1 server$') (Get-PatchEmailSubject -Counts $clean -Overall 'OK' -ServerCount 1)
+    Test-MhCheck 'a clean run says so in the subject' (
+        (Get-PatchEmailSubject -Counts $clean -Overall 'OK' -ServerCount 3) -match 'all up to date')
+    Test-MhCheck 'and a warning run does not call itself critical' (
+        (Get-PatchEmailSubject -Counts $warned -Overall 'Warning' -ServerCount 3) -match '3 needing attention')
+
+    # the body: what is wrong, and nothing else
+    $rows = @(
+        [pscustomobject]@{ Server = 'SQL01'; Component = 'SQL Server'; Instance = 'SQL01\PROD'; Installed = '16.0.4100.1'
+                           Latest = '16.0.4305.5'; Status = '3 CUs behind'; Severity = 'Critical' }
+        [pscustomobject]@{ Server = 'SQL01'; Component = 'Windows'; Instance = ''; Installed = '20348.2700'
+                           Latest = '20348.2966'; Status = 'One update behind'; Severity = 'Warning' }
+        [pscustomobject]@{ Server = 'SQL02'; Component = 'SQL Server'; Instance = 'SQL02'; Installed = '16.0.4305.5'
+                           Latest = '16.0.4305.5'; Status = 'Up to date'; Severity = 'OK' }
+    )
+    $body = Get-PatchEmailBody -Rows $rows -Counts $urgent -Overall 'Critical' -ReportName 'PatchStatus.html' -ReferenceDate ([datetime]'2026-10-15')
+    Test-MhCheck 'the critical row is in the body' ($body -match 'SQL01\\PROD' -and $body -match '3 CUs behind')
+    Test-MhCheck 'so is the warning' ($body -match 'One update behind')
+    Test-MhCheck 'the one that is fine is left out' ($body -notmatch 'SQL02')
+    Test-MhCheck 'the attachment is named so it can be found' ($body -match 'PatchStatus\.html')
+    Test-MhCheck 'and it says nothing was changed' ($body -match 'nothing was changed')
+    # a <style> block would be thrown away by mail clients, so the styling has to be on the elements
+    Test-MhCheck 'the styling is inline, because mail clients discard a stylesheet' (
+        $body -notmatch '<style' -and $body -match 'style="[^"]+"')
+    $allWell = Get-PatchEmailBody -Rows @($rows[2]) -Counts $clean -Overall 'OK' -ReportName 'P.html' -ReferenceDate ([datetime]'2026-10-15')
+    Test-MhCheck 'a clean run says so rather than showing an empty table' (
+        $allWell -match 'Nothing is behind' -and $allWell -notmatch '<table') $allWell
+    # the report's own data is server names and version numbers, but it is still put through the
+    # encoder: a server named with an ampersand must not break the email
+    $odd = @([pscustomobject]@{ Server = 'SQL&<01>'; Component = 'SQL Server'; Instance = ''; Installed = '1'
+                                Latest = '2'; Status = 'behind'; Severity = 'Critical' })
+    $encoded = Get-PatchEmailBody -Rows $odd -Counts $urgent -Overall 'Critical' -ReportName 'P.html' -ReferenceDate ([datetime]'2026-10-15')
+    Test-MhCheck 'a name with markup in it is encoded, not pasted in' (
+        $encoded -match 'SQL&amp;&lt;01&gt;' -and $encoded -notmatch 'SQL&<01>')
 }

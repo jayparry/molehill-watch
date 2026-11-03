@@ -194,6 +194,19 @@ A single script, separate from Molehill Watch, for a quick "how out of date is t
 * **Exit code** is 0 (OK), 1 (warnings) or 2 (critical).
 * **No internet on the server?** Run `.\Get-PatchStatus.ps1 -SaveReference patch-reference.json` somewhere with internet, and copy that file next to the script. It's picked up automatically.
 
+* **It can email itself.** `-EmailTo`, `-EmailFrom` and `-SmtpServer` send the report as well as
+  saving it: the HTML file rides along as an attachment, and the body lists whatever is behind so
+  the email is worth reading on a phone without opening anything. The subject says the answer
+  rather than the question - "Patch status: 2 critical across 9 servers". `-EmailWhen Critical`
+  makes a nightly job stay quiet until something actually needs doing, and the settings are checked
+  **before** the scan starts, because finding out that `-SmtpServer` was missing after ten minutes
+  of scanning an estate means running the whole thing again. A mail server that will not take it is
+  a warning, not a lost report - the file is already on disk by then.
+* **What the account needs is written down**: [Get-PatchStatus-Permissions.md](Docs/Get-PatchStatus-Permissions.md)
+  is a one-page handout for whoever approves it. The short version is a SQL login that can connect
+  and nothing else, plus read access to one Windows registry key. Verified by creating a login with
+  nothing granted and running the report's own query as it.
+
 ## Database status check (`Tools\Test-DatabaseStatus.ps1`)
 
 For straight after a patch, a reboot, a failover or a VM snapshot restore, when the only question is whether every database is back and connectable. It takes seconds, changes nothing, and gives a green line per database or a red one with the reason.

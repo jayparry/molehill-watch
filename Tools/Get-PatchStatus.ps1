@@ -65,11 +65,45 @@
 .PARAMETER Months
     How many months of Windows security updates to read. Default 3.
 
+.PARAMETER EmailTo
+    Who to email the report to, as well as saving it. The HTML report goes along as an attachment
+    and the body lists whatever is behind, so the email is readable without opening anything.
+    Needs -EmailFrom and -SmtpServer, and all three are checked before the scan starts rather than
+    after it.
+
+.PARAMETER EmailFrom
+    The sender address. A mail server will not take mail without one.
+
+.PARAMETER SmtpServer
+    The mail server to hand it to. Nothing is guessed.
+
+.PARAMETER SmtpPort
+    Default 25. Usually 587 with -SmtpUseSsl.
+
+.PARAMETER SmtpUseSsl
+    Encrypt the connection to the mail server.
+
+.PARAMETER SmtpCredential
+    Sign in to the mail server. Left out, the account running the script is used.
+
+.PARAMETER EmailSubject
+    Your own subject line. Left out, it says the answer rather than the question - for example
+    "Patch status: 2 critical across 9 servers".
+
+.PARAMETER EmailWhen
+    Always (the default), Critical, or CriticalOrWarning. For a scheduled run, Critical means an
+    inbox that stays quiet until something actually needs doing.
+
 .PARAMETER SelfTest
     Check the patch verdicts - how far behind counts as what - with no server and no internet.
 
 .EXAMPLE
     .\Get-PatchStatus.ps1 -ComputerName SQL01, SQL02
+
+.EXAMPLE
+    # a nightly job that only speaks up when something is critical
+    .\Get-PatchStatus.ps1 -ServerList .\sql-servers.txt -EmailTo dba@example.com `
+        -EmailFrom molehill@example.com -SmtpServer smtp.example.com -EmailWhen Critical
 
 .EXAMPLE
     # once, somewhere with internet
@@ -94,6 +128,14 @@ param(
     [Parameter(ParameterSetName = 'Check')] [int] $SqlCuBehindCritical = 3,
     [Parameter(ParameterSetName = 'Check')] [int] $WindowsGraceDays = 14,
     [Parameter(ParameterSetName = 'Check')] [ValidateRange(1, 300)] [int] $ConnectTimeoutSeconds = 10,
+    [Parameter(ParameterSetName = 'Check')] [string[]] $EmailTo,
+    [Parameter(ParameterSetName = 'Check')] [string] $EmailFrom,
+    [Parameter(ParameterSetName = 'Check')] [string] $SmtpServer,
+    [Parameter(ParameterSetName = 'Check')] [ValidateRange(1, 65535)] [int] $SmtpPort = 25,
+    [Parameter(ParameterSetName = 'Check')] [switch] $SmtpUseSsl,
+    [Parameter(ParameterSetName = 'Check')] [pscredential] $SmtpCredential,
+    [Parameter(ParameterSetName = 'Check')] [string] $EmailSubject,
+    [Parameter(ParameterSetName = 'Check')] [ValidateSet('Always', 'Critical', 'CriticalOrWarning')] [string] $EmailWhen = 'Always',
     [Parameter(ParameterSetName = 'Download', Mandatory)] [string] $SaveReference,
     [ValidateRange(2, 12)] [int] $Months = 3,
     [switch] $SelfTest
