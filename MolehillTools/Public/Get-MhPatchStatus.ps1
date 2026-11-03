@@ -104,6 +104,8 @@ function Get-MhPatchStatus {
         [Parameter(ParameterSetName = 'Check')] [pscredential] $SmtpCredential,
         [Parameter(ParameterSetName = 'Check')] [string] $EmailSubject,
         [Parameter(ParameterSetName = 'Check')] [ValidateSet('Always', 'Critical', 'CriticalOrWarning')] [string] $EmailWhen = 'Always',
+        [Parameter(ParameterSetName = 'Check')] [ValidateSet('Pdf', 'Html', 'Both')] [string] $AttachAs = 'Pdf',
+        [Parameter(ParameterSetName = 'Check')] [string] $PdfPath,
         [Parameter(ParameterSetName = 'Download', Mandatory)] [string] $SaveReference,
         [ValidateRange(2, 12)] [int] $Months = 3
     )
@@ -295,18 +297,37 @@ $rowsHtml
         Write-Host "Report saved: $OutputPath" -ForegroundColor Green
         if ($Open) { Start-Process $OutputPath }
 
+        # the PDF: written when it was asked for, or when it is what the email will carry
+        $pdfWanted = [bool]$PdfPath -or ($EmailTo -and $AttachAs -ne 'Html')
+        if ($pdfWanted) {
+            if (-not $PdfPath) { $PdfPath = [System.IO.Path]::ChangeExtension($OutputPath, '.pdf') }
+            try {
+                [System.IO.File]::WriteAllBytes($PdfPath, (New-PatchPdf -Rows $sorted -Counts $counts -Overall $overall -ReferenceDate $referenceDate))
+                Write-Host "PDF saved: $PdfPath" -ForegroundColor Green
+            }
+            catch {
+                # the HTML is already written, so a PDF that could not be built falls back to it
+                # rather than taking the whole run down with it
+                Write-Warning ("Could not write the PDF ({0}); the HTML report is at {1}." -f ($_.Exception.GetBaseException().Message -split "`r?`n")[0], $OutputPath)
+                $PdfPath = ''
+            }
+        }
+
         if ($EmailTo) {
             if (-not (Test-PatchEmailWanted -When $EmailWhen -Counts $counts)) {
                 Write-Host "No email sent: -EmailWhen $EmailWhen, and there is nothing in that category." -ForegroundColor Gray
             }
             else {
                 $serverCount = @($results | ForEach-Object { $_.Server } | Select-Object -Unique).Count
-                $subject = $(if ($EmailSubject) { $EmailSubject } else { Get-PatchEmailSubject -Counts $counts -Overall $overall -ServerCount $serverCount })
+                $subject = Get-PatchEmailSubject -Counts $counts -Overall $overall -ServerCount $serverCount -Template $EmailSubject
+                $attach = @()
+                if ($AttachAs -ne 'Html' -and $PdfPath) { $attach += $PdfPath }
+                if ($AttachAs -ne 'Pdf' -or -not $PdfPath) { $attach += $OutputPath }
                 $body = Get-PatchEmailBody -Rows $sorted -Counts $counts -Overall $overall `
-                                           -ReportName (Split-Path -Leaf $OutputPath) -ReferenceDate $referenceDate
+                                           -ReportName ((@($attach) | ForEach-Object { Split-Path -Leaf $_ }) -join ' and ') -ReferenceDate $referenceDate
                 try {
                     Send-PatchEmail -To $EmailTo -From $EmailFrom -Subject $subject -Body $body `
-                                    -AttachmentPath $OutputPath -Server $SmtpServer -Port $SmtpPort `
+                                    -AttachmentPath $attach -Server $SmtpServer -Port $SmtpPort `
                                     -UseSsl ([bool]$SmtpUseSsl) -Credential $SmtpCredential
                     Write-Host ("Emailed to {0} via {1}:{2}" -f (@($EmailTo) -join ', '), $SmtpServer, $SmtpPort) -ForegroundColor Green
                 }
@@ -669,11 +690,36 @@ function Test-PatchEmailWanted {
     $true
 }
 
-# the subject line, which for most people is the whole report: it has to say the answer, not the
-# question. "3 critical" belongs in the subject, not three screens into an attachment.
+<#
+  The subject line, which for most people is the whole report: it has to say the answer, not the
+  question. "3 critical" belongs in the subject, not three screens into an attachment.
+
+  -EmailSubject replaces it outright, and can carry the numbers into whatever wording it likes:
+  {Critical} {Warning} {Info} {OK} {Servers} {Overall} {Date}. That matters when the recipient is a
+  ticket mailbox, where the subject becomes the title of the ticket - a fixed title every night is
+  either a pile of identical tickets or, worse, one that nobody notices has changed.
+
+  A token that is not one of these is left exactly as written, because a subject is also where
+  people put their own reference numbers in braces and having those eaten would be its own bug.
+#>
 function Get-PatchEmailSubject {
     [CmdletBinding()]
-    param([hashtable] $Counts, [string] $Overall, [int] $ServerCount)
+    param([hashtable] $Counts, [string] $Overall, [int] $ServerCount, [string] $Template, [datetime] $When = (Get-Date))
+
+    if ($Template) {
+        $tokens = @{
+            '{Critical}' = [string]$Counts['Critical']
+            '{Warning}'  = [string]$Counts['Warning']
+            '{Info}'     = [string]$Counts['Info']
+            '{OK}'       = [string]$Counts['OK']
+            '{Servers}'  = [string]$ServerCount
+            '{Overall}'  = $Overall
+            '{Date}'     = $When.ToString('yyyy-MM-dd')
+        }
+        $subject = $Template
+        foreach ($token in $tokens.Keys) { $subject = $subject.Replace($token, $tokens[$token]) }
+        return $subject
+    }
 
     $what = $(
         if ($Overall -eq 'Critical') { '{0} critical' -f $Counts['Critical'] }
@@ -734,30 +780,353 @@ function Get-PatchEmailBody {
     $body -join "`n"
 }
 
+<#
+  The report as a PDF, written by hand.
+
+  Not converted from the HTML. Everything that turns HTML into PDF needs something installed -
+  headless Edge is absent on Server Core, wkhtmltopdf is a download, Word is Word - and this tool's
+  whole point is that it installs nothing. The rows are already structured, so they are laid out
+  directly and the PDF is assembled from scratch. That also means it renders identically on a
+  locked-down box as on a laptop, which an HTML-to-PDF converter cannot promise.
+
+  PDF is a text format with a byte-offset table at the end, so the one thing that must be exact is
+  where each object starts. Those offsets are recorded while writing rather than worked out
+  afterwards, and the self test reads the table back and checks every one of them lands on its
+  object - which is the only part of this a reader will refuse outright if it is wrong.
+
+  The base-14 fonts are used (Helvetica and Helvetica-Bold), so nothing has to be embedded.
+#>
+
+# Helvetica character widths per 1000 units, for ASCII 32-126, so text can be wrapped to a column
+# instead of running off the edge of it. Bold is measured as a little wider rather than carrying a
+# second table: the only bold here is short header words.
+$script:PatchHelveticaWidths = @(
+    278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278,
+    556, 556, 556, 556, 556, 556, 556, 556, 556, 556, 278, 278, 584, 584, 584, 556,
+    1015, 667, 667, 722, 722, 667, 611, 778, 722, 278, 500, 667, 556, 833, 722, 778,
+    667, 778, 722, 667, 611, 722, 667, 944, 667, 667, 611, 278, 278, 278, 469, 556,
+    333, 556, 556, 500, 556, 556, 278, 556, 556, 222, 222, 500, 222, 833, 556, 556,
+    556, 556, 333, 500, 278, 556, 500, 722, 500, 500, 500, 334, 260, 334, 584
+)
+
+function Get-PatchTextWidth {
+    [CmdletBinding()]
+    param([string] $Text, [double] $Size, [bool] $Bold = $false)
+
+    $units = 0
+    foreach ($char in [char[]]$Text) {
+        $code = [int]$char
+        # anything outside the table is measured as an average letter rather than as nothing, so a
+        # name with an accent in it still pushes the wrap
+        $units += $(if ($code -ge 32 -and $code -le 126) { $script:PatchHelveticaWidths[$code - 32] } else { 556 })
+    }
+    $width = ($units / 1000.0) * $Size
+    if ($Bold) { $width * 1.08 } else { $width }
+}
+
+# a cell's text broken into lines that fit the column, on word boundaries where it can and mid-word
+# where a single word is longer than the column (a file path, usually)
+function Split-PatchTextToWidth {
+    [CmdletBinding()]
+    param([string] $Text, [double] $Width, [double] $Size, [bool] $Bold = $false)
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($paragraph in ([string]$Text -split "`r?`n")) {
+        $current = ''
+        foreach ($word in ($paragraph -split ' ' | Where-Object { $_ -ne '' })) {
+
+            # a word wider than the column can never fit beside anything, so it is broken on
+            # character boundaries first and its pieces then treated as words. A file path is the
+            # usual culprit, and left whole it runs out of the table and across the next column.
+            $pieces = @($word)
+            if ((Get-PatchTextWidth -Text $word -Size $Size -Bold $Bold) -gt $Width) {
+                $pieces = @()
+                $piece = ''
+                foreach ($char in [char[]]$word) {
+                    if ($piece -and (Get-PatchTextWidth -Text ($piece + $char) -Size $Size -Bold $Bold) -gt $Width) {
+                        $pieces += $piece
+                        $piece = [string]$char
+                    }
+                    else { $piece += $char }
+                }
+                if ($piece) { $pieces += $piece }
+            }
+
+            foreach ($part in $pieces) {
+                if (-not $current) { $current = $part; continue }
+                if ((Get-PatchTextWidth -Text "$current $part" -Size $Size -Bold $Bold) -le $Width) { $current = "$current $part" }
+                else { $lines.Add($current); $current = $part }
+            }
+        }
+        $lines.Add($current)
+    }
+    # never nothing: an empty cell still takes one line, or the row heights stop lining up
+    if (-not $lines.Count) { $lines.Add('') }
+    $lines.ToArray()
+}
+
+# ( ) and \ end or escape a PDF string, so they are escaped. Everything is written as Windows-1252
+# later, which is what /WinAnsiEncoding on the font means.
+#
+# The replacement side of -replace takes backslashes literally, so '\\' there means two of them -
+# which is what one backslash has to become. '\\\\' would produce four and put a stray pair into
+# every Windows path in the report.
+function Get-PatchPdfString {
+    param([string] $Text)
+    '(' + (([string]$Text) -replace '\\', '\\' -replace '\(', '\(' -replace '\)', '\)') + ')'
+}
+
+function New-PatchPdf {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()] [object[]] $Rows,
+        [hashtable] $Counts,
+        [string] $Overall,
+        [datetime] $ReferenceDate,
+        [datetime] $When = (Get-Date)
+    )
+
+    # A4 landscape: the table has eight columns and portrait makes every one of them too narrow
+    $pageWidth = 842.0
+    $pageHeight = 595.0
+    $margin = 36.0
+    $bodySize = 7.5
+    $lineHeight = 9.5
+
+    $columns = @(
+        @{ Header = 'Server';    Width = 78.0;  Property = 'Server' }
+        @{ Header = 'Component'; Width = 92.0;  Property = 'Component' }
+        @{ Header = 'Product';   Width = 118.0; Property = 'Product' }
+        @{ Header = 'Installed'; Width = 92.0;  Property = 'Installed' }
+        @{ Header = 'Latest';    Width = 92.0;  Property = 'Latest' }
+        @{ Header = 'Released';  Width = 56.0;  Property = 'Released' }
+        @{ Header = 'Status';    Width = 102.0; Property = 'Status' }
+        @{ Header = 'Action / notes'; Width = 140.0; Property = 'Action' }
+    )
+
+    $severityFill = @{
+        Critical = '0.839 0.271 0.271 rg'
+        Warning  = '0.976 0.835 0.549 rg'
+        Info     = '0.867 0.953 0.988 rg'
+        OK       = '0.835 0.933 0.867 rg'
+    }
+    $severityText = @{ Critical = '1 1 1 rg'; Warning = '0 0 0 rg'; Info = '0 0 0 rg'; OK = '0 0 0 rg' }
+    $ragFill = @{ Critical = '0.839 0.271 0.271 rg'; Warning = '0.949 0.663 0.231 rg'; OK = '0.247 0.651 0.420 rg' }
+    $ragText = @{ Critical = 'Action required'; Warning = 'Attention recommended'; OK = 'No issues found' }
+
+    # every row measured first, so a row is never split across a page break
+    $measured = New-Object System.Collections.Generic.List[object]
+    foreach ($row in @($Rows)) {
+        $cells = @()
+        $tallest = 1
+        foreach ($column in $columns) {
+            $text = [string]$row.($column.Property)
+            if ($column.Property -eq 'Component' -and $row.Instance) { $text = "$text ($($row.Instance))" }
+            if ($column.Property -eq 'Latest' -and -not $text) { $text = '-' }
+            if ($column.Property -eq 'Action' -and $row.Notes) { $text = (("$text " + $row.Notes)).Trim() }
+            $lines = @(Split-PatchTextToWidth -Text $text -Width ($column.Width - 8) -Size $bodySize)
+            $cells += , $lines
+            if ($lines.Count -gt $tallest) { $tallest = $lines.Count }
+        }
+        $measured.Add([pscustomobject]@{ Cells = $cells; Lines = $tallest
+                                        Height = ($tallest * $lineHeight) + 4
+                                        Severity = [string]$row.Severity })
+    }
+
+    # title block and the four counts, on the first page only. Deep enough to clear the cards: at
+    # 118 the table's header bar was drawn over the bottom of them and swallowed their labels, which
+    # a structural check cannot see and only looking at the page showed up.
+    $headerDepth = 134.0
+    $tableTop = $pageHeight - $margin - $headerDepth
+    $laterTop = $pageHeight - $margin - 24.0
+    $bottom = $margin + 18.0
+
+    # split into pages
+    $pages = New-Object System.Collections.Generic.List[object]
+    $current = New-Object System.Collections.Generic.List[object]
+    $y = $tableTop
+    $first = $true
+    foreach ($row in $measured) {
+        if (($y - $row.Height) -lt $bottom) {
+            $pages.Add([pscustomobject]@{ Rows = $current.ToArray(); First = $first })
+            $current = New-Object System.Collections.Generic.List[object]
+            $first = $false
+            $y = $laterTop
+        }
+        $current.Add($row)
+        $y -= $row.Height
+    }
+    $pages.Add([pscustomobject]@{ Rows = $current.ToArray(); First = $first })
+
+    # ---- the content stream for each page
+    $contents = New-Object System.Collections.Generic.List[string]
+    for ($p = 0; $p -lt $pages.Count; $p++) {
+        $page = $pages[$p]
+        $out = New-Object System.Collections.Generic.List[string]
+        $out.Add('0.957 0.949 0.945 rg')
+        $out.Add("0 0 $pageWidth $pageHeight re f")
+
+        $top = $(if ($page.First) { $tableTop } else { $laterTop })
+
+        if ($page.First) {
+            $out.Add('0.137 0.122 0.125 rg')
+            $out.Add(("{0} {1} {2} {3} re f" -f $margin, ($pageHeight - $margin - 70), ($pageWidth - 2 * $margin), 70))
+            $out.Add('1 1 1 rg')
+            $out.Add(('BT /F2 17 Tf {0} {1} Td {2} Tj ET' -f ($margin + 14), ($pageHeight - $margin - 30), (Get-PatchPdfString 'SQL Server & Windows patch status')))
+            $out.Add('0.749 0.733 0.729 rg')
+            $out.Add(('BT /F1 8 Tf {0} {1} Td {2} Tj ET' -f ($margin + 14), ($pageHeight - $margin - 43),
+                     (Get-PatchPdfString ("Run {0} on {1} as {2}\{3}  -  Microsoft update data from {4}" -f
+                        $When.ToString('dddd dd MMMM yyyy HH:mm'), $env:COMPUTERNAME,
+                        [Environment]::UserDomainName, [Environment]::UserName, $ReferenceDate.ToString('dd MMM yyyy')))))
+
+            # the overall verdict, as a block of colour someone can see from across a desk
+            $ragWidth = (Get-PatchTextWidth -Text $ragText[$Overall] -Size 9 -Bold $true) + 20
+            $out.Add($ragFill[$Overall])
+            $out.Add(("{0} {1} {2} 20 re f" -f ($margin + 14), ($pageHeight - $margin - 68), $ragWidth))
+            $out.Add($(if ($Overall -eq 'Warning') { '0 0 0 rg' } else { '1 1 1 rg' }))
+            $out.Add(('BT /F2 9 Tf {0} {1} Td {2} Tj ET' -f ($margin + 24), ($pageHeight - $margin - 62), (Get-PatchPdfString $ragText[$Overall])))
+
+            # the four counts
+            $cardX = $margin
+            foreach ($name in 'Critical', 'Warning', 'Info', 'OK') {
+                $label = $(if ($name -eq 'OK') { 'Up to date' } else { $name })
+                $out.Add('1 1 1 rg')
+                $out.Add(("{0} {1} 118 34 re f" -f $cardX, ($pageHeight - $margin - 112)))
+                $out.Add($(switch ($name) { 'Critical' { '0.839 0.271 0.271 rg' } 'Warning' { '0.949 0.663 0.231 rg' } 'Info' { '0.267 0.784 0.961 rg' } default { '0.247 0.651 0.420 rg' } }))
+                $out.Add(("{0} {1} 118 3 re f" -f $cardX, ($pageHeight - $margin - 81)))
+                $out.Add('0.137 0.122 0.125 rg')
+                $out.Add(('BT /F2 15 Tf {0} {1} Td {2} Tj ET' -f ($cardX + 10), ($pageHeight - $margin - 100), (Get-PatchPdfString ([string]$Counts[$name]))))
+                $out.Add('0.478 0.455 0.451 rg')
+                $out.Add(('BT /F1 7.5 Tf {0} {1} Td {2} Tj ET' -f ($cardX + 10), ($pageHeight - $margin - 110), (Get-PatchPdfString $label)))
+                $cardX += 126
+            }
+        }
+
+        # the table header, repeated on every page: a table whose columns are only labelled on page
+        # one is unreadable by page three
+        $out.Add('0.137 0.122 0.125 rg')
+        $out.Add(("{0} {1} {2} 14 re f" -f $margin, $top, ($pageWidth - 2 * $margin)))
+        $out.Add('1 1 1 rg')
+        $x = $margin
+        foreach ($column in $columns) {
+            $out.Add(('BT /F2 7.5 Tf {0} {1} Td {2} Tj ET' -f ($x + 4), ($top + 4), (Get-PatchPdfString $column.Header)))
+            $x += $column.Width
+        }
+
+        $y = $top
+        foreach ($row in $page.Rows) {
+            $y -= $row.Height
+            $x = $margin
+            for ($c = 0; $c -lt $columns.Count; $c++) {
+                $column = $columns[$c]
+                # the status cell is filled with the severity colour; the rest are white
+                $isStatus = ($column.Property -eq 'Status')
+                $out.Add($(if ($isStatus -and $severityFill.ContainsKey($row.Severity)) { $severityFill[$row.Severity] } else { '1 1 1 rg' }))
+                $out.Add(("{0} {1} {2} {3} re f" -f $x, $y, $column.Width, $row.Height))
+                $out.Add($(if ($isStatus -and $severityText.ContainsKey($row.Severity)) { $severityText[$row.Severity] } else { '0.137 0.122 0.125 rg' }))
+                $textY = $y + $row.Height - $lineHeight + 1
+                foreach ($line in $row.Cells[$c]) {
+                    if ($line) {
+                        $out.Add(('BT /F1 {0} Tf {1} {2} Td {3} Tj ET' -f $bodySize, ($x + 4), $textY, (Get-PatchPdfString $line)))
+                    }
+                    $textY -= $lineHeight
+                }
+                $x += $column.Width
+            }
+            # a hairline under each row, so the eye can follow one across eight columns
+            $out.Add('0.886 0.871 0.867 RG 0.5 w')
+            $out.Add(("{0} {1} m {2} {1} l S" -f $margin, $y, ($pageWidth - $margin)))
+        }
+
+        $out.Add('0.478 0.455 0.451 rg')
+        $out.Add(('BT /F1 7 Tf {0} {1} Td {2} Tj ET' -f $margin, ($margin + 4),
+                 (Get-PatchPdfString ("Molehill Watch  -  page {0} of {1}  -  read-only: nothing was changed on any server" -f ($p + 1), $pages.Count))))
+        $contents.Add($out -join "`n")
+    }
+
+    # ---- assemble, recording where every object starts
+    $encoding = [System.Text.Encoding]::GetEncoding(1252)
+    $stream = New-Object System.IO.MemoryStream
+    $offsets = @{}
+    function Write-Raw { param($Text) $bytes = $encoding.GetBytes($Text); $stream.Write($bytes, 0, $bytes.Length) }
+
+    $pageCount = $pages.Count
+    # 1 catalog, 2 pages, 3 and 4 the fonts, then two objects per page
+    $pageIds = @(1..$pageCount | ForEach-Object { 5 + (($_ - 1) * 2) })
+    $totalObjects = 4 + ($pageCount * 2)
+
+    # the second line is the conventional "this file has binary in it" marker: four bytes above 127
+    # so that anything copying the file in text mode is known to have corrupted it
+    Write-Raw ("%PDF-1.4`n%" + [string][char]0xE2 + [char]0xE3 + [char]0xCF + [char]0xD3 + "`n")
+
+    $offsets[1] = $stream.Position
+    Write-Raw "1 0 obj`n<< /Type /Catalog /Pages 2 0 R >>`nendobj`n"
+
+    $offsets[2] = $stream.Position
+    Write-Raw ("2 0 obj`n<< /Type /Pages /Kids [{0}] /Count {1} >>`nendobj`n" -f (($pageIds | ForEach-Object { "$_ 0 R" }) -join ' '), $pageCount)
+
+    $offsets[3] = $stream.Position
+    Write-Raw "3 0 obj`n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>`nendobj`n"
+
+    $offsets[4] = $stream.Position
+    Write-Raw "4 0 obj`n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>`nendobj`n"
+
+    for ($i = 0; $i -lt $pageCount; $i++) {
+        $pageId = $pageIds[$i]
+        $contentId = $pageId + 1
+        $offsets[$pageId] = $stream.Position
+        Write-Raw ("{0} 0 obj`n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {1} {2}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents {3} 0 R >>`nendobj`n" -f
+                   $pageId, $pageWidth, $pageHeight, $contentId)
+
+        $body = $contents[$i]
+        $offsets[$contentId] = $stream.Position
+        # the length is the length in bytes after encoding, not in characters
+        Write-Raw ("{0} 0 obj`n<< /Length {1} >>`nstream`n" -f $contentId, $encoding.GetByteCount($body))
+        Write-Raw $body
+        Write-Raw "`nendstream`nendobj`n"
+    }
+
+    $xrefAt = $stream.Position
+    Write-Raw ("xref`n0 {0}`n" -f ($totalObjects + 1))
+    Write-Raw "0000000000 65535 f `n"
+    for ($id = 1; $id -le $totalObjects; $id++) {
+        Write-Raw ("{0:0000000000} 00000 n `n" -f [int64]$offsets[$id])
+    }
+    Write-Raw ("trailer`n<< /Size {0} /Root 1 0 R >>`nstartxref`n{1}`n%%EOF`n" -f ($totalObjects + 1), [int64]$xrefAt)
+
+    $bytes = $stream.ToArray()
+    $stream.Dispose()
+    , $bytes
+}
+
 # the sending itself, kept apart from everything that decides what to send so the deciding can be
 # checked without a mail server in the room
 function Send-PatchEmail {
     [CmdletBinding()]
     param(
         [string[]] $To, [string] $From, [string] $Subject, [string] $Body,
-        [string] $AttachmentPath, [string] $Server, [int] $Port, [bool] $UseSsl, [pscredential] $Credential
+        [AllowEmptyCollection()] [string[]] $AttachmentPath, [string] $Server, [int] $Port,
+        [bool] $UseSsl, [pscredential] $Credential
     )
 
     $message = New-Object System.Net.Mail.MailMessage
     $client = New-Object System.Net.Mail.SmtpClient $Server, $Port
-    $attachment = $null
+    $attachments = New-Object System.Collections.Generic.List[object]
     try {
         $message.From = New-Object System.Net.Mail.MailAddress $From
         foreach ($one in @($To) | Where-Object { $_ }) { $message.To.Add($one.Trim()) }
         $message.Subject = $Subject
         $message.Body = $Body
         $message.IsBodyHtml = $true
-        if ($AttachmentPath -and (Test-Path -LiteralPath $AttachmentPath)) {
+        foreach ($path in @($AttachmentPath) | Where-Object { $_ }) {
+            if (-not (Test-Path -LiteralPath $path)) { continue }
             # the type said out loud rather than left as application/octet-stream, which is what
             # .NET falls back to and what a mail gateway is most suspicious of
-            $attachment = New-Object System.Net.Mail.Attachment $AttachmentPath, 'text/html'
-            $attachment.Name = Split-Path -Leaf $AttachmentPath
-            $message.Attachments.Add($attachment)
+            $type = $(if ([System.IO.Path]::GetExtension($path) -eq '.pdf') { 'application/pdf' } else { 'text/html' })
+            $one = New-Object System.Net.Mail.Attachment $path, $type
+            $one.Name = Split-Path -Leaf $path
+            $attachments.Add($one)
+            $message.Attachments.Add($one)
         }
         $client.EnableSsl = $UseSsl
         if ($Credential) {
@@ -767,8 +1136,8 @@ function Send-PatchEmail {
         $client.Send($message)
     }
     finally {
-        # the attachment holds the file open, so it is disposed before the message that owns it
-        if ($attachment) { $attachment.Dispose() }
+        # each attachment holds its file open, so they go before the message that owns them
+        foreach ($one in $attachments) { $one.Dispose() }
         $message.Dispose()
         $client.Dispose()
     }
@@ -918,6 +1287,24 @@ Register-MhSelfTest -Name 'Get-MhPatchStatus' -Test {
     Test-MhCheck 'and a warning run does not call itself critical' (
         (Get-PatchEmailSubject -Counts $warned -Overall 'Warning' -ServerCount 3) -match '3 needing attention')
 
+    # a subject of your own, which matters when the recipient is a ticket mailbox and the subject
+    # becomes the title of the ticket
+    Test-MhCheck 'a given subject replaces the built-in one' (
+        (Get-PatchEmailSubject -Counts $urgent -Overall 'Critical' -ServerCount 4 -Template 'SQL patching review') -ceq 'SQL patching review')
+    $filled = Get-PatchEmailSubject -Counts $urgent -Overall 'Critical' -ServerCount 4 `
+                                    -Template '[SQL] {Critical} critical, {Warning} warning on {Servers} servers - {Overall} - {Date}' `
+                                    -When ([datetime]'2026-11-03')
+    Test-MhCheck 'and can still carry the numbers into its own wording' (
+        $filled -ceq '[SQL] 2 critical, 1 warning on 4 servers - Critical - 2026-11-03') $filled
+    Test-MhCheck 'no token is left behind unfilled' ($filled -notmatch '\{(Critical|Warning|Info|OK|Servers|Overall|Date)\}') $filled
+    Test-MhCheck 'the up-to-date and info counts are available too' (
+        (Get-PatchEmailSubject -Counts $urgent -Overall 'Critical' -ServerCount 4 -Template '{OK} fine, {Info} noted') -ceq '4 fine, 0 noted')
+    # someone's own reference in braces must survive: a subject is exactly where those get put
+    Test-MhCheck 'a brace that is not one of ours is left exactly as written' (
+        (Get-PatchEmailSubject -Counts $urgent -Overall 'Critical' -ServerCount 4 -Template 'Ticket {REF-1234}: {Critical} critical') -ceq 'Ticket {REF-1234}: 2 critical')
+    Test-MhCheck 'and with no subject given the default still says the answer' (
+        (Get-PatchEmailSubject -Counts $urgent -Overall 'Critical' -ServerCount 4 -Template '') -match '^Patch status: 2 critical')
+
     # the body: what is wrong, and nothing else
     $rows = @(
         [pscustomobject]@{ Server = 'SQL01'; Component = 'SQL Server'; Instance = 'SQL01\PROD'; Installed = '16.0.4100.1'
@@ -946,4 +1333,92 @@ Register-MhSelfTest -Name 'Get-MhPatchStatus' -Test {
     $encoded = Get-PatchEmailBody -Rows $odd -Counts $urgent -Overall 'Critical' -ReportName 'P.html' -ReferenceDate ([datetime]'2026-10-15')
     Test-MhCheck 'a name with markup in it is encoded, not pasted in' (
         $encoded -match 'SQL&amp;&lt;01&gt;' -and $encoded -notmatch 'SQL&<01>')
+
+    Test-MhSection 'the report as a PDF'
+
+    Test-MhCheck 'the width table has one entry per printable character' ($script:PatchHelveticaWidths.Count -eq 95) "$($script:PatchHelveticaWidths.Count)"
+    Test-MhCheck 'a wider string measures wider' (
+        (Get-PatchTextWidth -Text 'WWWWW' -Size 10) -gt (Get-PatchTextWidth -Text 'iiiii' -Size 10))
+    $wrapped = @(Split-PatchTextToWidth -Text 'Apply cumulative update CU27 to bring this instance up to date' -Width 80 -Size 7.5)
+    Test-MhCheck 'a sentence wraps onto several lines' ($wrapped.Count -gt 1) "$($wrapped.Count)"
+    Test-MhCheck 'every wrapped line fits its column' (
+        -not @($wrapped | Where-Object { (Get-PatchTextWidth -Text $_ -Size 7.5) -gt 80.01 }).Count)
+    Test-MhCheck 'and no word is lost in the wrapping' (
+        (($wrapped -join ' ') -replace '\s+', ' ') -ceq 'Apply cumulative update CU27 to bring this instance up to date')
+    # a path is one long word, and left whole it runs out of the table and over the next column
+    Test-MhCheck 'a word too wide for the column is cut rather than overflowing' (
+        -not @(Split-PatchTextToWidth -Text 'C:\Program Files\Microsoft SQL Server\MSSQL16.MSSQLSERVER\MSSQL\DATA' -Width 50 -Size 7.5 |
+               Where-Object { (Get-PatchTextWidth -Text $_ -Size 7.5) -gt 50.01 }).Count)
+    Test-MhCheck 'an empty cell is still one line, so rows line up' ((@(Split-PatchTextToWidth -Text '' -Width 50 -Size 7.5)).Count -eq 1)
+    # the replacement side of -replace takes backslashes literally, so one must become exactly two
+    Test-MhCheck 'a backslash becomes two, not four' ((Get-PatchPdfString 'SQL01\PROD') -ceq '(SQL01\\PROD)') (Get-PatchPdfString 'SQL01\PROD')
+    Test-MhCheck 'and a bracket cannot end the string early' (
+        (Get-PatchPdfString 'Standard Edition (64-bit)') -ceq '(Standard Edition \(64-bit\))') (Get-PatchPdfString 'Standard Edition (64-bit)')
+
+    $pdfRows = @(
+        [pscustomobject]@{ Server = 'SQL01'; Instance = 'SQL01\PROD'; Component = 'SQL Server'; Product = 'SQL Server 2022 Standard Edition (64-bit)'
+                           Installed = '16.0.4100.1 - CU10'; Latest = '16.0.4305.5'; LatestRelease = ''; Released = '13 Oct 2026'
+                           Status = '3 CUs behind'; Severity = 'Critical'; Action = 'Apply CU27.'; Support = ''; Notes = '' }
+        [pscustomobject]@{ Server = 'SQL02'; Instance = ''; Component = 'Windows'; Product = 'Windows Server 2022'
+                           Installed = '20348.2966'; Latest = '20348.2966'; LatestRelease = ''; Released = '14 Oct 2026'
+                           Status = 'Up to date'; Severity = 'OK'; Action = ''; Support = ''; Notes = '' }
+    )
+    $pdfBytes = New-PatchPdf -Rows $pdfRows -Counts $urgent -Overall 'Critical' -ReferenceDate ([datetime]'2026-10-15')
+    $pdfText = [System.Text.Encoding]::GetEncoding(1252).GetString($pdfBytes)
+    Test-MhCheck 'it starts and ends the way a PDF must' ($pdfText.StartsWith('%PDF-1.4') -and $pdfText.TrimEnd().EndsWith('%%EOF'))
+    Test-MhCheck 'with a catalog, a page tree and both base fonts' (
+        $pdfText -match '/Type /Catalog' -and $pdfText -match '/Type /Pages' -and
+        $pdfText -match '/BaseFont /Helvetica\b' -and $pdfText -match '/BaseFont /Helvetica-Bold')
+    Test-MhCheck 'and the report inside it' ($pdfText -match 'SQL01\\\\PROD' -and $pdfText -match '3 CUs behind')
+
+    # the cross-reference table is the one part a reader refuses outright if it is wrong: every
+    # entry is a byte offset, and one wrong number makes the file unopenable. Read back and checked.
+    $startXref = [regex]::Match($pdfText, 'startxref\s+(\d+)\s+%%EOF')
+    Test-MhCheck 'the trailer points at the cross-reference table' (
+        $startXref.Success -and $pdfText.Substring([int]$startXref.Groups[1].Value, 4) -ceq 'xref')
+    $xrefEntries = [regex]::Matches($pdfText.Substring([int]$startXref.Groups[1].Value), '(?m)^(\d{10}) (\d{5}) ([nf]) $')
+    Test-MhCheck 'it has one entry per object plus the free head' (
+        $xrefEntries.Count -eq [int]([regex]::Match($pdfText, 'xref\s+0 (\d+)').Groups[1].Value)) "$($xrefEntries.Count)"
+    $badOffsets = @()
+    for ($i = 1; $i -lt $xrefEntries.Count; $i++) {
+        $at = [int]$xrefEntries[$i].Groups[1].Value
+        $expect = "$i 0 obj"
+        if ($at -le 0 -or ($at + $expect.Length) -gt $pdfText.Length -or $pdfText.Substring($at, $expect.Length) -cne $expect) {
+            $badOffsets += "object $i"
+        }
+    }
+    Test-MhCheck 'and every offset lands exactly on its object' (-not $badOffsets.Count) ($badOffsets -join ', ')
+    $badStreams = @()
+    foreach ($m in [regex]::Matches($pdfText, '<< /Length (\d+) >>\s*stream\r?\n')) {
+        $from = $m.Index + $m.Length
+        if (($pdfText.IndexOf("`nendstream", $from) - $from) -ne [int]$m.Groups[1].Value) { $badStreams += $m.Groups[1].Value }
+    }
+    Test-MhCheck 'every stream declares the length it really is' (-not $badStreams.Count) ($badStreams -join ', ')
+
+    # a report longer than a page, where the offsets are easiest to get wrong
+    $longRows = @(1..40 | ForEach-Object {
+        [pscustomobject]@{ Server = "SQL$_"; Instance = "SQL$_\INST"; Component = 'SQL Server'; Product = 'SQL Server 2022 Standard Edition (64-bit)'
+                           Installed = '16.0.4100.1 - CU10'; Latest = '16.0.4305.5'; LatestRelease = ''; Released = '13 Oct 2026'
+                           Status = '3 CUs behind'; Severity = 'Critical'; Action = 'Apply CU27 before the next maintenance window.'; Support = ''; Notes = '' }
+    })
+    $longText = [System.Text.Encoding]::GetEncoding(1252).GetString((New-PatchPdf -Rows $longRows -Counts $urgent -Overall 'Critical' -ReferenceDate ([datetime]'2026-10-15')))
+    $longPages = [int]([regex]::Match($longText, '/Count (\d+)').Groups[1].Value)
+    Test-MhCheck 'forty rows run onto more than one page' ($longPages -gt 1) "$longPages pages"
+    Test-MhCheck 'the page objects match the count the tree declares' (
+        ([regex]::Matches($longText, '/Type /Page[^s]')).Count -eq $longPages)
+    # a table whose columns are only labelled on page one is unreadable by page three
+    Test-MhCheck 'and the column headers are repeated on every page' (
+        ([regex]::Matches($longText, '\(Action / notes\)')).Count -eq $longPages) `
+        ("$(([regex]::Matches($longText, '\(Action / notes\)')).Count) for $longPages pages")
+    $longBad = @()
+    $longEntries = [regex]::Matches($longText.Substring([int][regex]::Match($longText, 'startxref\s+(\d+)\s+%%EOF').Groups[1].Value), '(?m)^(\d{10}) (\d{5}) ([nf]) $')
+    for ($i = 1; $i -lt $longEntries.Count; $i++) {
+        $at = [int]$longEntries[$i].Groups[1].Value
+        if ($pdfText.Length -gt 0 -and $longText.Substring($at, "$i 0 obj".Length) -cne "$i 0 obj") { $longBad += "object $i" }
+    }
+    Test-MhCheck 'a multi-page file still has every offset right' (-not $longBad.Count) ($longBad -join ', ')
+
+    $emptyText = [System.Text.Encoding]::GetEncoding(1252).GetString((New-PatchPdf -Rows @() -Counts @{ Critical = 0; Warning = 0; Info = 0; OK = 0 } -Overall 'OK' -ReferenceDate ([datetime]'2026-10-15')))
+    Test-MhCheck 'and a report with nothing in it is still one valid page' (
+        $emptyText.StartsWith('%PDF') -and $emptyText -match '/Count 1' -and $emptyText -match 'No issues found')
 }

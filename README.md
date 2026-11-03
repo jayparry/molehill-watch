@@ -197,11 +197,29 @@ A single script, separate from Molehill Watch, for a quick "how out of date is t
 * **It can email itself.** `-EmailTo`, `-EmailFrom` and `-SmtpServer` send the report as well as
   saving it: the HTML file rides along as an attachment, and the body lists whatever is behind so
   the email is worth reading on a phone without opening anything. The subject says the answer
-  rather than the question - "Patch status: 2 critical across 9 servers". `-EmailWhen Critical`
+  rather than the question - "Patch status: 2 critical across 9 servers", and `-EmailSubject`
+  replaces it with your own, which can still carry the numbers: `{Critical} {Warning} {Info} {OK}
+  {Servers} {Overall} {Date}`. That is for a **ticket mailbox**, where the subject becomes the
+  title of the ticket and the same title every night is either a pile of identical tickets or one
+  nobody notices has changed. Anything else in braces is left alone, so your own reference numbers
+  survive. `-EmailWhen Critical`
   makes a nightly job stay quiet until something actually needs doing, and the settings are checked
   **before** the scan starts, because finding out that `-SmtpServer` was missing after ten minutes
   of scanning an estate means running the whole thing again. A mail server that will not take it is
   a warning, not a lost report - the file is already on disk by then.
+* **The attachment is a PDF**, built by the script rather than converted. Everything that turns
+  HTML into PDF needs something installed - headless Edge is absent on Server Core, wkhtmltopdf is a
+  download, Word is Word - so the rows are laid out directly and the file assembled from scratch,
+  using the base-14 fonts so nothing has to be embedded. It renders identically on a locked-down box
+  as on a laptop, which no converter can promise, and it matters because plenty of mail gateways
+  quarantine `.html` attachments whoever sent them. `-AttachAs Html` or `Both` if you would rather,
+  and `-PdfPath` writes one without emailing anything.
+
+  The part a reader refuses outright is the cross-reference table at the end - every entry is a byte
+  offset and one wrong number makes the file unopenable - so the self test reads that table back and
+  checks every offset lands on its object, on a single-page and a multi-page file. Windows' own PDF
+  engine was then used to open and rasterise the result, so it has been looked at rather than only
+  asserted about.
 * **What the account needs is written down**: [Get-PatchStatus-Permissions.md](Docs/Get-PatchStatus-Permissions.md)
   is a one-page handout for whoever approves it. The short version is a SQL login that can connect
   and nothing else, plus read access to one Windows registry key. Verified by creating a login with

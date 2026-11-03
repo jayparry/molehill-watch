@@ -87,8 +87,26 @@
     Sign in to the mail server. Left out, the account running the script is used.
 
 .PARAMETER EmailSubject
-    Your own subject line. Left out, it says the answer rather than the question - for example
-    "Patch status: 2 critical across 9 servers".
+    Your own subject line, which replaces the built-in one entirely. Left out, it says the answer
+    rather than the question - for example "Patch status: 2 critical across 9 servers".
+
+    It can carry the numbers into its own wording with {Critical} {Warning} {Info} {OK} {Servers}
+    {Overall} {Date}, which is what a ticket mailbox wants: the subject becomes the title of the
+    ticket, and the same title every night is either a pile of identical tickets or one nobody
+    notices has changed. Anything else in braces is left exactly as written, so your own reference
+    numbers survive.
+
+        -EmailSubject '[SQL] Patching: {Critical} critical on {Servers} servers ({Date})'
+
+.PARAMETER AttachAs
+    What to attach: Pdf (the default), Html, or Both. The PDF is built by this script rather than
+    converted, so it needs nothing installed and looks the same on a locked-down server as it does
+    on a laptop. Some mail gateways quarantine .html attachments whoever sent them, which is the
+    reason the PDF is the default.
+
+.PARAMETER PdfPath
+    Write the PDF here. Without it, the PDF sits beside the HTML report with the same name when one
+    is needed for an email.
 
 .PARAMETER EmailWhen
     Always (the default), Critical, or CriticalOrWarning. For a scheduled run, Critical means an
@@ -136,6 +154,8 @@ param(
     [Parameter(ParameterSetName = 'Check')] [pscredential] $SmtpCredential,
     [Parameter(ParameterSetName = 'Check')] [string] $EmailSubject,
     [Parameter(ParameterSetName = 'Check')] [ValidateSet('Always', 'Critical', 'CriticalOrWarning')] [string] $EmailWhen = 'Always',
+    [Parameter(ParameterSetName = 'Check')] [ValidateSet('Pdf', 'Html', 'Both')] [string] $AttachAs = 'Pdf',
+    [Parameter(ParameterSetName = 'Check')] [string] $PdfPath,
     [Parameter(ParameterSetName = 'Download', Mandatory)] [string] $SaveReference,
     [ValidateRange(2, 12)] [int] $Months = 3,
     [switch] $SelfTest
