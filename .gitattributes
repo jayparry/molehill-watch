@@ -1,0 +1,12 @@
+# A PDF written by hand is plain enough that git calls it text, and autocrlf then rewrites
+# every line feed in it on checkout - which moves every byte in the file past the first one and
+# invalidates the cross-reference table the reader needs. These are bytes, not lines.
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.zip binary
+*.exe binary
+*.dll binary

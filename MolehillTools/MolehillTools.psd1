@@ -14,6 +14,7 @@
     FunctionsToExport = @(
         'Add-MhTuiChar',
         'Clear-MhTuiScreen',
+        'Convert-MhMarkdownToPdf',
         'ConvertTo-MhTuiKeys',
         'Copy-MhSqlAccess',
         'Export-MhDatabaseSample',

@@ -61,6 +61,25 @@ function Get-MhNameClaim([string] $Kind) {
     return $claims
 }
 
+function Get-MhFormatMistake([object[]] $File) {
+    # $list.Add('{0} {1}' -f $a, $b) hands $b to Add rather than to -f, because inside a method call
+    # a comma separates arguments: the format string is left with one value and writes the first of
+    # its placeholders followed by an error. It has now cost two afternoons across two files, which
+    # is one more than remembering it is worth - so it is checked instead.
+    $found = @()
+    foreach ($one in @($File)) {
+        foreach ($call in (Get-MhFileAst $one.FullName).FindAll({
+                    $args[0] -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true)) {
+            if (@($call.Arguments).Count -lt 2) { continue }
+            $first = @($call.Arguments)[0]
+            if ($first -is [System.Management.Automation.Language.BinaryExpressionAst] -and $first.Operator -eq 'Format') {
+                $found += '{0} line {1}' -f $one.Name, $call.Extent.StartLineNumber
+            }
+        }
+    }
+    $found
+}
+
 Register-MhSelfTest -Name 'The module itself' -Test {
     $files = @(Get-MhModuleFile)
     Test-MhSection "$($files.Count) files"
@@ -88,6 +107,24 @@ Register-MhSelfTest -Name 'The module itself' -Test {
         foreach ($one in $found) { $exits += "$($file.Name):$($one.Extent.StartLineNumber) $($one.Extent.Text)" }
     }
     Test-MhCheck 'no module file calls exit' (-not $exits.Count) ($exits -join '; ')
+
+    Test-MhSection 'the files themselves'
+
+    $mangled = @(Get-MhFormatMistake $files)
+    Test-MhCheck 'no method call takes a format string''s arguments for its own' (-not $mangled.Count) ($mangled -join '; ')
+
+    # a stray control character is invisible in an editor and survives a passing test: one got into
+    # a regular expression in the PDF writer as the two bytes it was meant to describe, where it
+    # read as working and would have been committed
+    $stray = @()
+    foreach ($file in $files) {
+        $found = @([regex]::Matches((Get-Content -Raw -LiteralPath $file.FullName), '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]'))
+        if ($found.Count) {
+            $stray += '{0} has {1}' -f $file.Name,
+                      ((@($found | ForEach-Object { '0x{0:X2}' -f [int]$_.Value[0] }) | Select-Object -Unique) -join ' ')
+        }
+    }
+    Test-MhCheck 'and none of them has a control character in it' (-not $stray.Count) ($stray -join '; ')
 
     Test-MhSection 'commands that are not there'
 
@@ -166,6 +203,7 @@ Register-MhSelfTest -Name 'The module itself' -Test {
     $broken = @()
     $tooNew = @()
     $forced = @()
+    $readable = @()
     $shims = 0
     foreach ($tool in $tools) {
         $text = Get-Content -Raw -LiteralPath $tool.FullName
@@ -189,6 +227,7 @@ Register-MhSelfTest -Name 'The module itself' -Test {
         $errors = $null
         [void][System.Management.Automation.Language.Parser]::ParseFile($tool.FullName, [ref]$null, [ref]$errors)
         if ($errors) { $broken += "$($tool.Name): $($errors[0].Message)"; continue }
+        $readable += $tool
 
         if ($text -notmatch 'MolehillTools\.psd1') { continue }
         $shims++
@@ -202,6 +241,8 @@ Register-MhSelfTest -Name 'The module itself' -Test {
     }
     Test-MhCheck 'at least one of them is a shim over this module' ($shims -gt 0) "$shims found"
     Test-MhCheck 'no shim re-imports the module with -Force' (-not $forced.Count) ($forced -join ', ')
+    $shimMangled = @(Get-MhFormatMistake $readable)
+    Test-MhCheck 'and none of them takes a format string''s arguments for its own' (-not $shimMangled.Count) ($shimMangled -join '; ')
 
     Test-MhSection 'the shims and the functions agree'
 

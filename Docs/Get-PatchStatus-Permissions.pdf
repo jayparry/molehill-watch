@@ -1,0 +1,1281 @@
+%PDF-1.4
+%ту╧╙
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [8 0 R 10 0 R 12 0 R] /Count 3 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>
+endobj
+6 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Oblique /Encoding /WinAnsiEncoding >>
+endobj
+7 0 obj
+<< /Title (What the patch report needs Ч one page for whoever approves it) /Author (Molehill Data Services) /Producer (Molehill Watch) /CreationDate (D:20261103230902+00'00') >>
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R /F4 6 0 R >> >> /Contents 9 0 R >>
+endobj
+9 0 obj
+<< /Length 18374 >>
+stream
+0.137 0.122 0.125 rg
+0 750 595 92 re f
+1 1 1 rg
+BT /F2 17 Tf 52 811 Td (What) Tj ET
+BT /F2 17 Tf 98.27 811 Td (the) Tj ET
+BT /F2 17 Tf 128.5 811 Td (patch) Tj ET
+BT /F2 17 Tf 178.56 811 Td (report) Tj ET
+BT /F2 17 Tf 232.4 811 Td (needs) Tj ET
+BT /F2 17 Tf 286.26 811 Td (Ч) Tj ET
+BT /F2 17 Tf 307.99 811 Td (one) Tj ET
+BT /F2 17 Tf 342.94 811 Td (page) Tj ET
+BT /F2 17 Tf 387.34 811 Td (for) Tj ET
+BT /F2 17 Tf 414.73 811 Td (whoever) Tj ET
+1 1 1 rg
+BT /F2 17 Tf 52 790 Td (approves) Tj ET
+BT /F2 17 Tf 132.31 790 Td (it) Tj ET
+0.729 0.714 0.706 rg
+BT /F1 8.5 Tf 52 770 Td (Get-PatchStatus-Permissions.md  -  03 November 2026) Tj ET
+0.957 0.953 0.945 rg
+51 705.6 110.3 10.92 re f
+0.137 0.122 0.125 rg
+BT /F3 9.5 Tf 52 707.5 Td (Get-PatchStatus.ps1) Tj ET
+BT /F1 9.5 Tf 162.94 707.5 Td (reports) Tj ET
+BT /F1 9.5 Tf 195.15 707.5 Td (how) Tj ET
+BT /F1 9.5 Tf 215.21 707.5 Td (far) Tj ET
+BT /F1 9.5 Tf 228.94 707.5 Td (behind) Tj ET
+BT /F1 9.5 Tf 260.1 707.5 Td (each) Tj ET
+BT /F1 9.5 Tf 283.33 707.5 Td (SQL) Tj ET
+BT /F1 9.5 Tf 304.98 707.5 Td (Server) Tj ET
+BT /F1 9.5 Tf 335.6 707.5 Td (and) Tj ET
+BT /F1 9.5 Tf 354.09 707.5 Td (the) Tj ET
+BT /F1 9.5 Tf 369.94 707.5 Td (Windows) Tj ET
+BT /F1 9.5 Tf 411.11 707.5 Td (under) Tj ET
+BT /F1 9.5 Tf 438.04 707.5 Td (it) Tj ET
+BT /F1 9.5 Tf 445.43 707.5 Td (is.) Tj ET
+BT /F1 9.5 Tf 457.57 707.5 Td (It) Tj ET
+BT /F1 9.5 Tf 465.5 707.5 Td (is) Tj ET
+BT /F2 9.5 Tf 475 707.5 Td (read-only) Tj ET
+BT /F1 9.5 Tf 517.76 707.5 Td (:) Tj ET
+BT /F1 9.5 Tf 523.04 707.5 Td (it) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 52 694.5 Td (installs) Tj ET
+BT /F1 9.5 Tf 83.67 694.5 Td (nothing,) Tj ET
+BT /F1 9.5 Tf 120.12 694.5 Td (writes) Tj ET
+BT /F1 9.5 Tf 147.56 694.5 Td (nothing) Tj ET
+BT /F1 9.5 Tf 181.36 694.5 Td (to) Tj ET
+BT /F1 9.5 Tf 191.93 694.5 Td (any) Tj ET
+BT /F1 9.5 Tf 209.88 694.5 Td (SQL) Tj ET
+BT /F1 9.5 Tf 231.53 694.5 Td (Server,) Tj ET
+BT /F1 9.5 Tf 264.79 694.5 Td (changes) Tj ET
+BT /F1 9.5 Tf 303.34 694.5 Td (no) Tj ET
+BT /F1 9.5 Tf 316.55 694.5 Td (setting,) Tj ET
+BT /F1 9.5 Tf 349.82 694.5 Td (and) Tj ET
+BT /F1 9.5 Tf 368.3 694.5 Td (reads) Tj ET
+BT /F1 9.5 Tf 394.7 694.5 Td (no) Tj ET
+BT /F1 9.5 Tf 407.91 694.5 Td (data) Tj ET
+BT /F1 9.5 Tf 429.04 694.5 Td (out) Tj ET
+BT /F1 9.5 Tf 444.88 694.5 Td (of) Tj ET
+BT /F1 9.5 Tf 455.45 694.5 Td (any) Tj ET
+BT /F1 9.5 Tf 473.4 694.5 Td (database.) Tj ET
+0.137 0.122 0.125 rg
+BT /F2 12.5 Tf 52 661.5 Td (The) Tj ET
+BT /F2 12.5 Tf 77.7 661.5 Td (short) Tj ET
+BT /F2 12.5 Tf 112.43 661.5 Td (version) Tj ET
+0.863 0.851 0.843 RG 0.7 w
+52 653.12 m 543 653.12 l S
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 52 634.62 Td (One) Tj ET
+BT /F1 9.5 Tf 72.6 634.62 Td (service) Tj ET
+BT /F1 9.5 Tf 105.32 634.62 Td (account.) Tj ET
+BT /F1 9.5 Tf 143.87 634.62 Td (On) Tj ET
+BT /F1 9.5 Tf 159.19 634.62 Td (SQL) Tj ET
+BT /F1 9.5 Tf 180.84 634.62 Td (Server,) Tj ET
+BT /F1 9.5 Tf 214.1 634.62 Td (a) Tj ET
+BT /F1 9.5 Tf 222.02 634.62 Td (login) Tj ET
+BT /F1 9.5 Tf 244.73 634.62 Td (that) Tj ET
+BT /F1 9.5 Tf 263.21 634.62 Td (can) Tj ET
+BT /F1 9.5 Tf 281.17 634.62 Td (connect) Tj ET
+BT /F1 9.5 Tf 317.08 634.62 Td (and) Tj ET
+BT /F1 9.5 Tf 335.57 634.62 Td (nothing) Tj ET
+BT /F1 9.5 Tf 369.37 634.62 Td (else.) Tj ET
+BT /F1 9.5 Tf 392.07 634.62 Td (On) Tj ET
+BT /F1 9.5 Tf 407.39 634.62 Td (Windows,) Tj ET
+BT /F1 9.5 Tf 451.2 634.62 Td (read) Tj ET
+BT /F1 9.5 Tf 472.85 634.62 Td (access) Tj ET
+BT /F1 9.5 Tf 505.06 634.62 Td (to) Tj ET
+BT /F1 9.5 Tf 515.62 634.62 Td (one) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 52 621.62 Td (registry) Tj ET
+BT /F1 9.5 Tf 85.78 621.62 Td (key.) Tj ET
+0.137 0.122 0.125 rg
+BT /F2 12.5 Tf 52 588.62 Td (The) Tj ET
+BT /F2 12.5 Tf 77.7 588.62 Td (ask,) Tj ET
+BT /F2 12.5 Tf 105.5 588.62 Td (in) Tj ET
+BT /F2 12.5 Tf 120.09 588.62 Td (full) Tj ET
+0.863 0.851 0.843 RG 0.7 w
+52 580.25 m 543 580.25 l S
+0.137 0.122 0.125 rg
+52 552.25 491 16 re f
+1 1 1 rg
+BT /F2 8.5 Tf 57 556.25 Td (#) Tj ET
+1 1 1 rg
+BT /F2 8.5 Tf 71.73 556.25 Td (What) Tj ET
+1 1 1 rg
+BT /F2 8.5 Tf 262.82 556.25 Td (Where) Tj ET
+1 1 1 rg
+BT /F2 8.5 Tf 363.35 556.25 Td (Why) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 57 540.25 Td (1) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 71.73 540.25 Td (A) Tj ET
+BT /F1 8.5 Tf 79.76 540.25 Td (domain) Tj ET
+BT /F1 8.5 Tf 109.99 540.25 Td (account) Tj ET
+BT /F1 8.5 Tf 142.12 540.25 Td (in) Tj ET
+BT /F1 8.5 Tf 151.1 540.25 Td (no) Tj ET
+BT /F1 8.5 Tf 162.91 540.25 Td (privileged) Tj ET
+BT /F1 8.5 Tf 201.65 540.25 Td (group) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 262.82 540.25 Td (Active) Tj ET
+BT /F1 8.5 Tf 288.33 540.25 Td (Directory) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 363.35 540.25 Td (the) Tj ET
+BT /F1 8.5 Tf 377.53 540.25 Td (identity) Tj ET
+BT /F1 8.5 Tf 406.82 540.25 Td (the) Tj ET
+BT /F1 8.5 Tf 421 540.25 Td (report) Tj ET
+BT /F1 8.5 Tf 445.56 540.25 Td (runs) Tj ET
+BT /F1 8.5 Tf 464.46 540.25 Td (as) Tj ET
+0.863 0.851 0.843 RG 0.5 w
+52 536.25 m 543 536.25 l S
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 57 524.25 Td (2) Tj ET
+0.957 0.953 0.945 rg
+70.73 522.55 37.7 9.77 re f
+0.957 0.953 0.945 rg
+106.43 522.55 32.6 9.77 re f
+0.957 0.953 0.945 rg
+137.03 522.55 109.1 9.77 re f
+0.137 0.122 0.125 rg
+BT /F3 8.5 Tf 71.73 524.25 Td (CREATE ) Tj ET
+BT /F3 8.5 Tf 107.43 524.25 Td (LOGIN ) Tj ET
+BT /F3 8.5 Tf 138.03 524.25 Td ([DOM\\svc_patchreport]) Tj ET
+0.957 0.953 0.945 rg
+70.73 511.55 27.5 9.77 re f
+0.957 0.953 0.945 rg
+96.23 511.55 42.8 9.77 re f
+0.137 0.122 0.125 rg
+BT /F3 8.5 Tf 71.73 513.25 Td (FROM ) Tj ET
+BT /F3 8.5 Tf 97.23 513.25 Td (WINDOWS;) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 262.82 524.25 Td (every) Tj ET
+BT /F1 8.5 Tf 285.96 524.25 Td (SQL) Tj ET
+BT /F1 8.5 Tf 305.34 524.25 Td (Server) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 262.82 513.25 Td (instance) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 363.35 524.25 Td (read) Tj ET
+BT /F1 8.5 Tf 382.72 524.25 Td (its) Tj ET
+BT /F1 8.5 Tf 393.59 524.25 Td (version) Tj ET
+BT /F1 8.5 Tf 423.34 524.25 Td (and) Tj ET
+BT /F1 8.5 Tf 439.89 524.25 Td (edition) Tj ET
+0.863 0.851 0.843 RG 0.5 w
+52 509.25 m 543 509.25 l S
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 57 497.25 Td (3) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 71.73 497.25 Td (User) Tj ET
+BT /F1 8.5 Tf 92.03 497.25 Td (right) Tj ET
+BT /F2 8.5 Tf 110.93 497.25 Td (Access) Tj ET
+BT /F2 8.5 Tf 143.06 497.25 Td (this) Tj ET
+BT /F2 8.5 Tf 160.53 497.25 Td (computer) Tj ET
+BT /F2 8.5 Tf 201.62 497.25 Td (from) Tj ET
+BT /F2 8.5 Tf 222.87 497.25 Td (the) Tj ET
+0.137 0.122 0.125 rg
+BT /F2 8.5 Tf 71.73 486.25 Td (network) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 262.82 497.25 Td (every) Tj ET
+BT /F1 8.5 Tf 285.96 497.25 Td (target) Tj ET
+BT /F1 8.5 Tf 310.06 497.25 Td (server) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 363.35 497.25 Td (needed) Tj ET
+BT /F1 8.5 Tf 394.07 497.25 Td (to) Tj ET
+BT /F1 8.5 Tf 403.52 497.25 Td (connect) Tj ET
+BT /F1 8.5 Tf 435.65 497.25 Td (at) Tj ET
+BT /F1 8.5 Tf 445.1 497.25 Td (all) Tj ET
+0.863 0.851 0.843 RG 0.5 w
+52 482.25 m 543 482.25 l S
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 57 470.25 Td (4) Tj ET
+0.137 0.122 0.125 rg
+BT /F2 8.5 Tf 71.73 470.25 Td (Remote) Tj ET
+BT /F2 8.5 Tf 105.26 470.25 Td (Registry) Tj ET
+BT /F1 8.5 Tf 141.63 470.25 Td (service) Tj ET
+BT /F1 8.5 Tf 170.91 470.25 Td (running,) Tj ET
+BT /F1 8.5 Tf 203.99 470.25 Td (and) Tj ET
+BT /F1 8.5 Tf 220.53 470.25 Td (read) Tj ET
+BT /F1 8.5 Tf 239.9 470.25 Td (on) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 71.73 459.25 Td (one) Tj ET
+BT /F1 8.5 Tf 88.27 459.25 Td (key) Tj ET
+BT /F1 8.5 Tf 103.86 459.25 Td (\(below\)) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 262.82 470.25 Td (every) Tj ET
+BT /F1 8.5 Tf 285.96 470.25 Td (target) Tj ET
+BT /F1 8.5 Tf 310.06 470.25 Td (server) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 363.35 470.25 Td (read) Tj ET
+BT /F1 8.5 Tf 382.72 470.25 Td (the) Tj ET
+BT /F1 8.5 Tf 396.9 470.25 Td (Windows) Tj ET
+BT /F1 8.5 Tf 433.74 470.25 Td (build) Tj ET
+BT /F1 8.5 Tf 454.05 470.25 Td (number) Tj ET
+0.863 0.851 0.843 RG 0.5 w
+52 455.25 m 543 455.25 l S
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 57 443.25 Td (5) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 71.73 443.25 Td (UDP) Tj ET
+BT /F1 8.5 Tf 92.03 443.25 Td (1434,) Tj ET
+BT /F1 8.5 Tf 115.66 443.25 Td (TCP) Tj ET
+BT /F1 8.5 Tf 135.03 443.25 Td (1433) Tj ET
+BT /F1 8.5 Tf 156.29 443.25 Td (\(plus) Tj ET
+BT /F1 8.5 Tf 177.08 443.25 Td (any) Tj ET
+BT /F1 8.5 Tf 193.14 443.25 Td (fixed) Tj ET
+BT /F1 8.5 Tf 213.46 443.25 Td (instance) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 71.73 432.25 Td (ports\),) Tj ET
+BT /F1 8.5 Tf 98.18 432.25 Td (TCP) Tj ET
+BT /F1 8.5 Tf 117.54 432.25 Td (445) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 262.82 443.25 Td (firewall,) Tj ET
+BT /F1 8.5 Tf 293.99 443.25 Td (reporting) Tj ET
+BT /F1 8.5 Tf 329.89 443.25 Td (box) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 262.82 432.25 Td (->) Tj ET
+BT /F1 8.5 Tf 272.98 432.25 Td (targets) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 363.35 443.25 Td (instance) Tj ET
+BT /F1 8.5 Tf 397.37 443.25 Td (discovery,) Tj ET
+BT /F1 8.5 Tf 437.99 443.25 Td (SQL,) Tj ET
+BT /F1 8.5 Tf 459.72 443.25 Td (registry) Tj ET
+0.863 0.851 0.843 RG 0.5 w
+52 428.25 m 543 428.25 l S
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 57 416.25 Td (6) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 71.73 416.25 Td (Outbound) Tj ET
+BT /F1 8.5 Tf 111.42 416.25 Td (HTTPS) Tj ET
+BT /F1 8.5 Tf 141.65 416.25 Td (to) Tj ET
+BT /F1 8.5 Tf 151.1 416.25 Td (two) Tj ET
+BT /F1 8.5 Tf 166.69 416.25 Td (Microsoft) Tj ET
+BT /F1 8.5 Tf 203.53 416.25 Td (hosts) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 71.73 405.25 Td (\(below\)) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 262.82 416.25 Td (firewall,) Tj ET
+BT /F1 8.5 Tf 293.99 416.25 Td (reporting) Tj ET
+BT /F1 8.5 Tf 329.89 416.25 Td (box) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 262.82 405.25 Td (only) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 363.35 416.25 Td (Microsoft's) Tj ET
+BT /F1 8.5 Tf 406.06 416.25 Td (own) Tj ET
+BT /F1 8.5 Tf 424.02 416.25 Td (patch) Tj ET
+BT /F1 8.5 Tf 447.17 416.25 Td (data) Tj ET
+BT /F1 8.5 Tf 466.07 416.25 Td (Ч) Tj ET
+BT /F2 8.5 Tf 476.94 416.25 Td (avoidable) Tj ET
+BT /F1 8.5 Tf 516.15 416.25 Td (,) Tj ET
+BT /F1 8.5 Tf 520.87 416.25 Td (see) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 363.35 405.25 Td (the) Tj ET
+BT /F1 8.5 Tf 377.53 405.25 Td (last) Tj ET
+BT /F1 8.5 Tf 393.12 405.25 Td (section) Tj ET
+0.863 0.851 0.843 RG 0.5 w
+52 401.25 m 543 401.25 l S
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 52 384.75 Td (Nothing) Tj ET
+BT /F1 9.5 Tf 87.38 384.75 Td (in) Tj ET
+BT /F1 9.5 Tf 97.41 384.75 Td (this) Tj ET
+BT /F1 9.5 Tf 114.83 384.75 Td (list) Tj ET
+BT /F1 9.5 Tf 129.08 384.75 Td (is) Tj ET
+BT /F1 9.5 Tf 138.58 384.75 Td (needed) Tj ET
+BT /F1 9.5 Tf 172.92 384.75 Td (on) Tj ET
+BT /F1 9.5 Tf 186.12 384.75 Td (the) Tj ET
+BT /F1 9.5 Tf 201.97 384.75 Td (box) Tj ET
+BT /F1 9.5 Tf 219.92 384.75 Td (the) Tj ET
+BT /F1 9.5 Tf 235.77 384.75 Td (report) Tj ET
+BT /F1 9.5 Tf 263.22 384.75 Td (runs) Tj ET
+BT /F4 9.5 Tf 284.34 384.75 Td (from) Tj ET
+BT /F1 9.5 Tf 305.98 384.75 Td (beyond) Tj ET
+BT /F1 9.5 Tf 339.78 384.75 Td (the) Tj ET
+BT /F1 9.5 Tf 355.63 384.75 Td (account) Tj ET
+BT /F1 9.5 Tf 391.54 384.75 Td (being) Tj ET
+BT /F1 9.5 Tf 417.42 384.75 Td (able) Tj ET
+BT /F1 9.5 Tf 438.01 384.75 Td (to) Tj ET
+BT /F1 9.5 Tf 448.58 384.75 Td (log) Tj ET
+BT /F1 9.5 Tf 463.89 384.75 Td (on) Tj ET
+BT /F1 9.5 Tf 477.1 384.75 Td (to) Tj ET
+BT /F1 9.5 Tf 487.66 384.75 Td (it) Tj ET
+BT /F1 9.5 Tf 495.05 384.75 Td (and) Tj ET
+BT /F1 9.5 Tf 513.54 384.75 Td (write) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 52 371.75 Td (the) Tj ET
+BT /F1 9.5 Tf 67.85 371.75 Td (output) Tj ET
+BT /F1 9.5 Tf 96.9 371.75 Td (file) Tj ET
+BT /F1 9.5 Tf 111.68 371.75 Td (where) Tj ET
+BT /F1 9.5 Tf 140.19 371.75 Td (you) Tj ET
+BT /F1 9.5 Tf 158.14 371.75 Td (point) Tj ET
+BT /F1 9.5 Tf 181.38 371.75 Td (it.) Tj ET
+0.137 0.122 0.125 rg
+BT /F2 12.5 Tf 52 338.75 Td (2.) Tj ET
+BT /F2 12.5 Tf 65.9 338.75 Td (On) Tj ET
+BT /F2 12.5 Tf 86.74 338.75 Td (SQL) Tj ET
+BT /F2 12.5 Tf 115.91 338.75 Td (Server:) Tj ET
+BT /F2 12.5 Tf 162.46 338.75 Td (this) Tj ET
+BT /F2 12.5 Tf 188.16 338.75 Td (and) Tj ET
+BT /F2 12.5 Tf 213.86 338.75 Td (nothing) Tj ET
+BT /F2 12.5 Tf 263.16 338.75 Td (else) Tj ET
+0.863 0.851 0.843 RG 0.7 w
+52 330.38 m 543 330.38 l S
+0.957 0.953 0.945 rg
+52 284.38 491 35 re f
+0.863 0.851 0.843 RG 0.7 w
+52 284.38 491 35 re S
+0.180 0.165 0.157 rg
+BT /F3 8.5 Tf 62 304.88 Td (CREATE LOGIN [CONTOSO\\svc_patchreport] FROM WINDOWS;) Tj ET
+BT /F3 8.5 Tf 62 293.38 Td (-- No server role. No database user. No GRANT. Stop here.) Tj ET
+0.957 0.953 0.945 rg
+126.4 265.98 47.6 10.92 re f
+0.957 0.953 0.945 rg
+172 265.98 19.1 10.92 re f
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 52 267.88 Td (A) Tj ET
+BT /F1 9.5 Tf 60.98 267.88 Td (new) Tj ET
+BT /F1 9.5 Tf 81.04 267.88 Td (login) Tj ET
+BT /F1 9.5 Tf 103.75 267.88 Td (gets) Tj ET
+BT /F3 9.5 Tf 127.4 267.88 Td (CONNECT ) Tj ET
+BT /F3 9.5 Tf 173 267.88 Td (SQL) Tj ET
+BT /F1 9.5 Tf 192.74 267.88 Td (by) Tj ET
+BT /F1 9.5 Tf 205.42 267.88 Td (default,) Tj ET
+BT /F1 9.5 Tf 239.22 267.88 Td (and) Tj ET
+BT /F1 9.5 Tf 257.7 267.88 Td (that) Tj ET
+BT /F1 9.5 Tf 276.19 267.88 Td (is) Tj ET
+BT /F1 9.5 Tf 285.69 267.88 Td (the) Tj ET
+BT /F1 9.5 Tf 301.54 267.88 Td (whole) Tj ET
+BT /F1 9.5 Tf 328.99 267.88 Td (requirement.) Tj ET
+BT /F1 9.5 Tf 384.96 267.88 Td (The) Tj ET
+BT /F1 9.5 Tf 403.97 267.88 Td (report) Tj ET
+BT /F1 9.5 Tf 431.42 267.88 Td (reads) Tj ET
+BT /F1 9.5 Tf 457.82 267.88 Td (only) Tj ET
+BT /F1 9.5 Tf 477.89 267.88 Td (these,) Tj ET
+BT /F1 9.5 Tf 506.4 267.88 Td (all) Tj ET
+BT /F1 9.5 Tf 518.55 267.88 Td (of) Tj ET
+0.957 0.953 0.945 rg
+148.04 252.98 36.2 10.92 re f
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 52 254.88 Td (which) Tj ET
+BT /F1 9.5 Tf 78.92 254.88 Td (are) Tj ET
+BT /F1 9.5 Tf 95.29 254.88 Td (available) Tj ET
+BT /F1 9.5 Tf 135.42 254.88 Td (to) Tj ET
+BT /F3 9.5 Tf 149.04 254.88 Td (public) Tj ET
+BT /F1 9.5 Tf 183.24 254.88 Td (:) Tj ET
+0.137 0.122 0.125 rg
+52 225.38 491 16 re f
+1 1 1 rg
+BT /F2 8.5 Tf 57 229.38 Td (Reads) Tj ET
+1 1 1 rg
+BT /F2 8.5 Tf 316.85 229.38 Td (Returns) Tj ET
+0.957 0.953 0.945 rg
+56 211.68 165.2 9.77 re f
+0.137 0.122 0.125 rg
+BT /F3 8.5 Tf 57 213.38 Td (SERVERPROPERTY\('ProductVersion'\)) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 316.85 213.38 Td (16.0.4215.2) Tj ET
+0.863 0.851 0.843 RG 0.5 w
+52 209.38 m 543 209.38 l S
+0.957 0.953 0.945 rg
+56 195.68 129.5 9.77 re f
+0.137 0.122 0.125 rg
+BT /F3 8.5 Tf 57 197.38 Td (SERVERPROPERTY\('Edition'\)) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 316.85 197.38 Td (Standard) Tj ET
+BT /F1 8.5 Tf 353.71 197.38 Td (Edition) Tj ET
+BT /F1 8.5 Tf 382.05 197.38 Td (\(64-bit\)) Tj ET
+0.863 0.851 0.843 RG 0.5 w
+52 193.38 m 543 193.38 l S
+0.957 0.953 0.945 rg
+56 179.68 185.6 9.77 re f
+0.137 0.122 0.125 rg
+BT /F3 8.5 Tf 57 181.38 Td (SERVERPROPERTY\('ProductUpdateLevel'\)) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 316.85 181.38 Td (CU14) Tj ET
+0.863 0.851 0.843 RG 0.5 w
+52 177.38 m 543 177.38 l S
+0.957 0.953 0.945 rg
+56 163.68 231.5 9.77 re f
+0.137 0.122 0.125 rg
+BT /F3 8.5 Tf 57 165.38 Td (SERVERPROPERTY\('ComputerNamePhysicalNetBIOS'\)) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 316.85 165.38 Td (which) Tj ET
+BT /F1 8.5 Tf 340.94 165.38 Td (machine) Tj ET
+BT /F1 8.5 Tf 375.42 165.38 Td (the) Tj ET
+BT /F1 8.5 Tf 389.6 165.38 Td (instance) Tj ET
+BT /F1 8.5 Tf 423.62 165.38 Td (is) Tj ET
+BT /F1 8.5 Tf 432.12 165.38 Td (on) Tj ET
+0.863 0.851 0.843 RG 0.5 w
+52 161.38 m 543 161.38 l S
+0.957 0.953 0.945 rg
+56 147.68 63.2 9.77 re f
+0.957 0.953 0.945 rg
+124.66 147.68 47.9 9.77 re f
+0.137 0.122 0.125 rg
+BT /F3 8.5 Tf 57 149.38 Td (@@SERVERNAME) Tj ET
+BT /F1 8.5 Tf 118.2 149.38 Td (,) Tj ET
+BT /F3 8.5 Tf 125.66 149.38 Td (@@VERSION) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 316.85 149.38 Td (name,) Tj ET
+BT /F1 8.5 Tf 342.84 149.38 Td (and) Tj ET
+BT /F1 8.5 Tf 359.38 149.38 Td (whether) Tj ET
+BT /F1 8.5 Tf 391.97 149.38 Td (it) Tj ET
+BT /F1 8.5 Tf 398.59 149.38 Td (is) Tj ET
+BT /F1 8.5 Tf 407.09 149.38 Td (Linux) Tj ET
+0.863 0.851 0.843 RG 0.5 w
+52 145.38 m 543 145.38 l S
+0.957 0.953 0.945 rg
+56 131.68 144.8 9.77 re f
+0.137 0.122 0.125 rg
+BT /F3 8.5 Tf 57 133.38 Td (IS_SRVROLEMEMBER\('sysadmin'\)) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 316.85 133.38 Td (its) Tj ET
+BT /F4 8.5 Tf 327.71 133.38 Td (own) Tj ET
+BT /F1 8.5 Tf 345.67 133.38 Td (membership,) Tj ET
+BT /F1 8.5 Tf 397.15 133.38 Td (to) Tj ET
+BT /F1 8.5 Tf 406.6 133.38 Td (explain) Tj ET
+BT /F1 8.5 Tf 435.89 133.38 Td (itself) Tj ET
+BT /F1 8.5 Tf 455.73 133.38 Td (in) Tj ET
+BT /F1 8.5 Tf 464.71 133.38 Td (the) Tj ET
+BT /F1 8.5 Tf 478.89 133.38 Td (report) Tj ET
+0.863 0.851 0.843 RG 0.5 w
+52 129.38 m 543 129.38 l S
+0.957 0.953 0.945 rg
+154.89 110.98 47.6 10.92 re f
+0.957 0.953 0.945 rg
+208.83 110.98 64.7 10.92 re f
+0.957 0.953 0.945 rg
+279.87 110.98 76.1 10.92 re f
+0.957 0.953 0.945 rg
+362.31 110.98 30.5 10.92 re f
+0.957 0.953 0.945 rg
+390.81 110.98 41.9 10.92 re f
+0.957 0.953 0.945 rg
+430.71 110.98 30.5 10.92 re f
+0.957 0.953 0.945 rg
+467.56 110.98 30.5 10.92 re f
+0.957 0.953 0.945 rg
+496.06 110.98 19.1 10.92 re f
+0.137 0.122 0.125 rg
+BT /F2 9.5 Tf 52 112.88 Td (Explicitly) Tj ET
+BT /F2 9.5 Tf 96.36 112.88 Td (not) Tj ET
+BT /F2 9.5 Tf 113.77 112.88 Td (needed:) Tj ET
+BT /F3 9.5 Tf 155.89 112.88 Td (sysadmin) Tj ET
+BT /F1 9.5 Tf 201.49 112.88 Td (,) Tj ET
+BT /F3 9.5 Tf 209.83 112.88 Td (serveradmin) Tj ET
+BT /F1 9.5 Tf 272.53 112.88 Td (,) Tj ET
+BT /F3 9.5 Tf 280.87 112.88 Td (securityadmin) Tj ET
+BT /F1 9.5 Tf 354.97 112.88 Td (,) Tj ET
+BT /F3 9.5 Tf 363.31 112.88 Td (VIEW ) Tj ET
+BT /F3 9.5 Tf 391.81 112.88 Td (SERVER ) Tj ET
+BT /F3 9.5 Tf 431.71 112.88 Td (STATE) Tj ET
+BT /F1 9.5 Tf 460.21 112.88 Td (,) Tj ET
+BT /F3 9.5 Tf 468.56 112.88 Td (VIEW ) Tj ET
+BT /F3 9.5 Tf 497.06 112.88 Td (ANY) Tj ET
+0.957 0.953 0.945 rg
+51 97.98 59 10.92 re f
+0.957 0.953 0.945 rg
+116.34 97.98 76.1 10.92 re f
+0.137 0.122 0.125 rg
+BT /F3 9.5 Tf 52 99.88 Td (DEFINITION) Tj ET
+BT /F1 9.5 Tf 109 99.88 Td (,) Tj ET
+BT /F3 9.5 Tf 117.34 99.88 Td (db_datareader) Tj ET
+BT /F1 9.5 Tf 191.44 99.88 Td (,) Tj ET
+BT /F1 9.5 Tf 196.72 99.88 Td (or) Tj ET
+BT /F1 9.5 Tf 207.81 99.88 Td (access) Tj ET
+BT /F1 9.5 Tf 240.01 99.88 Td (to) Tj ET
+BT /F1 9.5 Tf 250.58 99.88 Td (any) Tj ET
+BT /F1 9.5 Tf 268.53 99.88 Td (user) Tj ET
+BT /F1 9.5 Tf 289.65 99.88 Td (database.) Tj ET
+0.863 0.851 0.843 RG 0.5 w
+52 64 m 543 64 l S
+0.420 0.400 0.396 rg
+BT /F1 7.5 Tf 52 54 Td (Molehill Data Services) Tj ET
+BT /F1 7.5 Tf 504.64 54 Td (Page 1 of 3) Tj ET
+endstream
+endobj
+10 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R /F4 6 0 R >> >> /Contents 11 0 R >>
+endobj
+11 0 obj
+<< /Length 18007 >>
+stream
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 52 780.5 Td (This) Tj ET
+BT /F1 9.5 Tf 72.59 780.5 Td (was) Tj ET
+BT /F1 9.5 Tf 92.12 780.5 Td (verified) Tj ET
+BT /F1 9.5 Tf 125.38 780.5 Td (by) Tj ET
+BT /F1 9.5 Tf 138.05 780.5 Td (creating) Tj ET
+BT /F1 9.5 Tf 174.48 780.5 Td (a) Tj ET
+BT /F1 9.5 Tf 182.41 780.5 Td (login) Tj ET
+BT /F1 9.5 Tf 205.11 780.5 Td (with) Tj ET
+BT /F1 9.5 Tf 224.64 780.5 Td (nothing) Tj ET
+BT /F1 9.5 Tf 258.44 780.5 Td (granted,) Tj ET
+BT /F1 9.5 Tf 295.94 780.5 Td (connecting) Tj ET
+BT /F1 9.5 Tf 344.52 780.5 Td (as) Tj ET
+BT /F1 9.5 Tf 357.2 780.5 Td (it,) Tj ET
+BT /F1 9.5 Tf 367.23 780.5 Td (and) Tj ET
+BT /F1 9.5 Tf 385.72 780.5 Td (running) Tj ET
+BT /F1 9.5 Tf 420.04 780.5 Td (the) Tj ET
+BT /F1 9.5 Tf 435.89 780.5 Td (report's) Tj ET
+BT /F1 9.5 Tf 469.9 780.5 Td (exact) Tj ET
+BT /F1 9.5 Tf 495.25 780.5 Td (query.) Tj ET
+BT /F1 9.5 Tf 524.29 780.5 Td (It) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 52 767.5 Td (worked,) Tj ET
+BT /F1 9.5 Tf 87.9 767.5 Td (and) Tj ET
+BT /F1 9.5 Tf 106.39 767.5 Td (the) Tj ET
+BT /F1 9.5 Tf 122.23 767.5 Td (same) Tj ET
+BT /F1 9.5 Tf 148.1 767.5 Td (login) Tj ET
+BT /F1 9.5 Tf 170.81 767.5 Td (was) Tj ET
+BT /F1 9.5 Tf 190.34 767.5 Td (refused) Tj ET
+BT /F1 9.5 Tf 224.66 767.5 Td (when) Tj ET
+BT /F1 9.5 Tf 250.01 767.5 Td (it) Tj ET
+BT /F1 9.5 Tf 257.4 767.5 Td (tried) Tj ET
+BT /F1 9.5 Tf 278.52 767.5 Td (to:) Tj ET
+0.420 0.400 0.396 rg
+BT /F1 9.5 Tf 56 747.5 Td (Х) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 68 747.5 Td (connect) Tj ET
+BT /F1 9.5 Tf 103.91 747.5 Td (to) Tj ET
+BT /F1 9.5 Tf 114.47 747.5 Td (a) Tj ET
+BT /F1 9.5 Tf 122.4 747.5 Td (user) Tj ET
+BT /F1 9.5 Tf 143.52 747.5 Td (database) Tj ET
+0.420 0.400 0.396 rg
+BT /F1 9.5 Tf 56 731.5 Td (Х) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 68 731.5 Td (read) Tj ET
+BT /F1 9.5 Tf 89.65 731.5 Td (a) Tj ET
+BT /F1 9.5 Tf 97.57 731.5 Td (user) Tj ET
+BT /F1 9.5 Tf 118.69 731.5 Td (database's) Tj ET
+BT /F1 9.5 Tf 166.98 731.5 Td (tables) Tj ET
+0.420 0.400 0.396 rg
+BT /F1 9.5 Tf 56 715.5 Td (Х) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 68 715.5 Td (see) Tj ET
+BT /F1 9.5 Tf 85.96 715.5 Td (any) Tj ET
+BT /F1 9.5 Tf 103.91 715.5 Td (session) Tj ET
+BT /F1 9.5 Tf 138.76 715.5 Td (other) Tj ET
+BT /F1 9.5 Tf 163.05 715.5 Td (than) Tj ET
+BT /F1 9.5 Tf 184.18 715.5 Td (its) Tj ET
+BT /F1 9.5 Tf 196.32 715.5 Td (own) Tj ET
+0.420 0.400 0.396 rg
+BT /F1 9.5 Tf 56 699.5 Td (Х) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 68 699.5 Td (list) Tj ET
+BT /F1 9.5 Tf 82.25 699.5 Td (the) Tj ET
+BT /F1 9.5 Tf 98.1 699.5 Td (databases') Tj ET
+BT /F1 9.5 Tf 146.38 699.5 Td (files) Tj ET
+BT /F1 9.5 Tf 165.92 699.5 Td (on) Tj ET
+BT /F1 9.5 Tf 179.12 699.5 Td (disk) Tj ET
+0.420 0.400 0.396 rg
+BT /F1 9.5 Tf 56 683.5 Td (Х) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 68 683.5 Td (create,) Tj ET
+BT /F1 9.5 Tf 99.68 683.5 Td (alter) Tj ET
+BT /F1 9.5 Tf 120.8 683.5 Td (or) Tj ET
+BT /F1 9.5 Tf 131.89 683.5 Td (drop) Tj ET
+BT /F1 9.5 Tf 153.54 683.5 Td (anything) Tj ET
+0.137 0.122 0.125 rg
+BT /F2 12.5 Tf 52 650.5 Td (4.) Tj ET
+BT /F2 12.5 Tf 65.9 650.5 Td (On) Tj ET
+BT /F2 12.5 Tf 86.74 650.5 Td (Windows:) Tj ET
+BT /F2 12.5 Tf 149.24 650.5 Td (read) Tj ET
+BT /F2 12.5 Tf 179.11 650.5 Td (one) Tj ET
+BT /F2 12.5 Tf 204.81 650.5 Td (key) Tj ET
+0.863 0.851 0.843 RG 0.7 w
+52 642.12 m 543 642.12 l S
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 52 623.62 Td (The) Tj ET
+BT /F1 9.5 Tf 71.01 623.62 Td (Windows) Tj ET
+BT /F1 9.5 Tf 112.18 623.62 Td (half) Tj ET
+BT /F1 9.5 Tf 130.14 623.62 Td (of) Tj ET
+BT /F1 9.5 Tf 140.7 623.62 Td (the) Tj ET
+BT /F1 9.5 Tf 156.55 623.62 Td (report) Tj ET
+BT /F1 9.5 Tf 184 623.62 Td (needs) Tj ET
+BT /F1 9.5 Tf 212.52 623.62 Td (four) Tj ET
+BT /F1 9.5 Tf 231.53 623.62 Td (values) Tj ET
+BT /F1 9.5 Tf 261.63 623.62 Td (from) Tj ET
+BT /F1 9.5 Tf 283.27 623.62 Td (one) Tj ET
+BT /F1 9.5 Tf 301.76 623.62 Td (key:) Tj ET
+0.957 0.953 0.945 rg
+52 564.62 491 46.5 re f
+0.863 0.851 0.843 RG 0.7 w
+52 564.62 491 46.5 re S
+0.180 0.165 0.157 rg
+BT /F3 8.5 Tf 62 596.62 Td (HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion) Tj ET
+BT /F3 8.5 Tf 62 585.12 Td (    CurrentBuild        InstallationType) Tj ET
+BT /F3 8.5 Tf 62 573.62 Td (    UBR                 ProductName) Tj ET
+0.957 0.953 0.945 rg
+103.69 546.22 30.5 10.92 re f
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 52 548.12 Td (The) Tj ET
+BT /F1 9.5 Tf 71.01 548.12 Td (built-in) Tj ET
+BT /F3 9.5 Tf 104.69 548.12 Td (Users) Tj ET
+BT /F1 9.5 Tf 135.83 548.12 Td (group) Tj ET
+BT /F1 9.5 Tf 162.76 548.12 Td (already) Tj ET
+BT /F1 9.5 Tf 196.55 548.12 Td (has) Tj ET
+BT /F1 9.5 Tf 214.51 548.12 Td (read) Tj ET
+BT /F1 9.5 Tf 236.16 548.12 Td (on) Tj ET
+BT /F1 9.5 Tf 249.36 548.12 Td (that) Tj ET
+BT /F1 9.5 Tf 267.85 548.12 Td (key) Tj ET
+BT /F1 9.5 Tf 285.27 548.12 Td (on) Tj ET
+BT /F1 9.5 Tf 298.48 548.12 Td (a) Tj ET
+BT /F1 9.5 Tf 306.4 548.12 Td (default) Tj ET
+BT /F1 9.5 Tf 337.56 548.12 Td (install,) Tj ET
+BT /F1 9.5 Tf 367.12 548.12 Td (so) Tj ET
+BT /F1 9.5 Tf 379.8 548.12 Td (in) Tj ET
+BT /F1 9.5 Tf 389.83 548.12 Td (practice) Tj ET
+BT /F1 9.5 Tf 425.73 548.12 Td (this) Tj ET
+BT /F1 9.5 Tf 443.15 548.12 Td (item) Tj ET
+BT /F1 9.5 Tf 463.74 548.12 Td (is) Tj ET
+BT /F2 9.5 Tf 473.24 548.12 Td ("start) Tj ET
+BT /F2 9.5 Tf 500.97 548.12 Td (the) Tj ET
+0.137 0.122 0.125 rg
+BT /F2 9.5 Tf 52 535.12 Td (Remote) Tj ET
+BT /F2 9.5 Tf 89.48 535.12 Td (Registry) Tj ET
+BT /F2 9.5 Tf 130.13 535.12 Td (service") Tj ET
+BT /F1 9.5 Tf 170.02 535.12 Td (rather) Tj ET
+BT /F1 9.5 Tf 197.47 535.12 Td (than) Tj ET
+BT /F1 9.5 Tf 218.6 535.12 Td (an) Tj ET
+BT /F1 9.5 Tf 231.81 535.12 Td (ACL) Tj ET
+BT /F1 9.5 Tf 252.92 535.12 Td (change.) Tj ET
+BT /F1 9.5 Tf 289.37 535.12 Td (The) Tj ET
+BT /F1 9.5 Tf 308.38 535.12 Td (account) Tj ET
+BT /F1 9.5 Tf 344.29 535.12 Td (needs) Tj ET
+BT /F1 9.5 Tf 372.81 535.12 Td (no) Tj ET
+BT /F1 9.5 Tf 386.01 535.12 Td (other) Tj ET
+BT /F1 9.5 Tf 410.3 535.12 Td (registry) Tj ET
+BT /F1 9.5 Tf 444.08 535.12 Td (access) Tj ET
+BT /F1 9.5 Tf 476.29 535.12 Td (and) Tj ET
+BT /F1 9.5 Tf 494.78 535.12 Td (no) Tj ET
+BT /F1 9.5 Tf 507.98 535.12 Td (local) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 52 522.12 Td (administrator) Tj ET
+BT /F1 9.5 Tf 109.54 522.12 Td (rights.) Tj ET
+0.137 0.122 0.125 rg
+BT /F2 10.5 Tf 52 496.12 Td (If) Tj ET
+BT /F2 10.5 Tf 61.33 496.12 Td (Remote) Tj ET
+BT /F2 10.5 Tf 102.76 496.12 Td (Registry) Tj ET
+BT /F2 10.5 Tf 147.69 496.12 Td (is) Tj ET
+BT /F2 10.5 Tf 159.36 496.12 Td (not) Tj ET
+BT /F2 10.5 Tf 178.61 496.12 Td (allowed) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 52 475.95 Td (There) Tj ET
+BT /F1 9.5 Tf 79.46 475.95 Td (are) Tj ET
+BT /F1 9.5 Tf 95.82 475.95 Td (two) Tj ET
+BT /F1 9.5 Tf 113.25 475.95 Td (other) Tj ET
+BT /F1 9.5 Tf 137.54 475.95 Td (outcomes,) Tj ET
+BT /F1 9.5 Tf 184 475.95 Td (and) Tj ET
+BT /F1 9.5 Tf 202.49 475.95 Td (it) Tj ET
+BT /F1 9.5 Tf 209.88 475.95 Td (is) Tj ET
+BT /F1 9.5 Tf 219.38 475.95 Td (worth) Tj ET
+BT /F1 9.5 Tf 245.25 475.95 Td (being) Tj ET
+BT /F1 9.5 Tf 271.13 475.95 Td (explicit) Tj ET
+BT /F1 9.5 Tf 302.8 475.95 Td (about) Tj ET
+BT /F1 9.5 Tf 329.21 475.95 Td (the) Tj ET
+BT /F1 9.5 Tf 345.06 475.95 Td (trade:) Tj ET
+0.137 0.122 0.125 rg
+52 446.45 491 16 re f
+1 1 1 rg
+BT /F2 8.5 Tf 57 450.45 Td (Instead) Tj ET
+1 1 1 rg
+BT /F2 8.5 Tf 247.3 450.45 Td (What) Tj ET
+BT /F2 8.5 Tf 270.44 450.45 Td (it) Tj ET
+BT /F2 8.5 Tf 278 450.45 Td (costs) Tj ET
+0.957 0.953 0.945 rg
+124.88 432.75 42.8 9.77 re f
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 57 434.45 Td (Give) Tj ET
+BT /F1 8.5 Tf 76.84 434.45 Td (the) Tj ET
+BT /F1 8.5 Tf 91.02 434.45 Td (account) Tj ET
+BT /F3 8.5 Tf 125.88 434.45 Td (sysadmin) Tj ET
+BT /F1 8.5 Tf 169.05 434.45 Td (on) Tj ET
+BT /F1 8.5 Tf 180.86 434.45 Td (SQL) Tj ET
+BT /F1 8.5 Tf 200.23 434.45 Td (Server,) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 57 423.45 Td (so) Tj ET
+BT /F1 8.5 Tf 68.34 423.45 Td (the) Tj ET
+BT /F1 8.5 Tf 82.52 423.45 Td (report) Tj ET
+BT /F1 8.5 Tf 107.08 423.45 Td (can) Tj ET
+BT /F1 8.5 Tf 123.15 423.45 Td (read) Tj ET
+BT /F1 8.5 Tf 142.52 423.45 Td (the) Tj ET
+BT /F1 8.5 Tf 156.7 423.45 Td (key) Tj ET
+BT /F1 8.5 Tf 172.29 423.45 Td (through) Tj ET
+0.957 0.953 0.945 rg
+56 410.75 53 9.77 re f
+0.137 0.122 0.125 rg
+BT /F3 8.5 Tf 57 412.45 Td (xp_regread) Tj ET
+0.957 0.953 0.945 rg
+308.1 432.75 42.8 9.77 re f
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 247.3 434.45 Td (A) Tj ET
+BT /F1 8.5 Tf 255.34 434.45 Td (great) Tj ET
+BT /F1 8.5 Tf 277.07 434.45 Td (deal) Tj ET
+BT /F1 8.5 Tf 295.5 434.45 Td (Ч) Tj ET
+BT /F3 8.5 Tf 309.1 434.45 Td (sysadmin) Tj ET
+BT /F1 8.5 Tf 352.26 434.45 Td (is) Tj ET
+BT /F1 8.5 Tf 360.76 434.45 Td (total) Tj ET
+BT /F1 8.5 Tf 379.19 434.45 Td (control) Tj ET
+BT /F1 8.5 Tf 407.06 434.45 Td (of) Tj ET
+BT /F1 8.5 Tf 416.51 434.45 Td (the) Tj ET
+BT /F1 8.5 Tf 430.69 434.45 Td (instance.) Tj ET
+BT /F2 8.5 Tf 467.07 434.45 Td (Not) Tj ET
+0.137 0.122 0.125 rg
+BT /F2 8.5 Tf 247.3 423.45 Td (recommended.) Tj ET
+0.863 0.851 0.843 RG 0.5 w
+52 408.45 m 543 408.45 l S
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 57 396.45 Td (Allow) Tj ET
+BT /F1 8.5 Tf 79.67 396.45 Td (neither) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 247.3 396.45 Td (Nothing) Tj ET
+BT /F1 8.5 Tf 278.96 396.45 Td (breaks.) Tj ET
+BT /F1 8.5 Tf 309.19 396.45 Td (Every) Tj ET
+BT /F1 8.5 Tf 333.28 396.45 Td (SQL) Tj ET
+BT /F1 8.5 Tf 352.65 396.45 Td (Server) Tj ET
+BT /F1 8.5 Tf 380.05 396.45 Td (result) Tj ET
+BT /F1 8.5 Tf 403.19 396.45 Td (is) Tj ET
+BT /F1 8.5 Tf 411.69 396.45 Td (still) Tj ET
+BT /F1 8.5 Tf 426.33 396.45 Td (produced;) Tj ET
+BT /F1 8.5 Tf 466.49 396.45 Td (the) Tj ET
+BT /F1 8.5 Tf 480.67 396.45 Td (Windows) Tj ET
+BT /F1 8.5 Tf 517.51 396.45 Td (rows) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 247.3 385.45 Td (say) Tj ET
+BT /F1 8.5 Tf 262.89 385.45 Td (the) Tj ET
+BT /F1 8.5 Tf 277.07 385.45 Td (build) Tj ET
+BT /F1 8.5 Tf 297.39 385.45 Td (could) Tj ET
+BT /F1 8.5 Tf 320.06 385.45 Td (not) Tj ET
+BT /F1 8.5 Tf 334.24 385.45 Td (be) Tj ET
+BT /F1 8.5 Tf 346.06 385.45 Td (read) Tj ET
+BT /F1 8.5 Tf 365.43 385.45 Td (and) Tj ET
+BT /F1 8.5 Tf 381.97 385.45 Td (suggest) Tj ET
+BT /F1 8.5 Tf 414.1 385.45 Td (running) Tj ET
+BT /F1 8.5 Tf 444.81 385.45 Td (it) Tj ET
+BT /F1 8.5 Tf 451.42 385.45 Td (on) Tj ET
+BT /F1 8.5 Tf 463.24 385.45 Td (the) Tj ET
+BT /F1 8.5 Tf 477.42 385.45 Td (server) Tj ET
+BT /F1 8.5 Tf 503.39 385.45 Td (itself.) Tj ET
+0.863 0.851 0.843 RG 0.5 w
+52 381.45 m 543 381.45 l S
+0.957 0.953 0.945 rg
+370.89 363.05 47.6 10.92 re f
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 52 364.95 Td (The) Tj ET
+BT /F1 9.5 Tf 71.01 364.95 Td (report) Tj ET
+BT /F1 9.5 Tf 98.46 364.95 Td (is) Tj ET
+BT /F1 9.5 Tf 107.96 364.95 Td (designed) Tj ET
+BT /F1 9.5 Tf 149.16 364.95 Td (for) Tj ET
+BT /F1 9.5 Tf 162.88 364.95 Td (the) Tj ET
+BT /F1 9.5 Tf 178.73 364.95 Td (third) Tj ET
+BT /F1 9.5 Tf 199.85 364.95 Td (outcome) Tj ET
+BT /F1 9.5 Tf 238.92 364.95 Td (to) Tj ET
+BT /F1 9.5 Tf 249.49 364.95 Td (be) Tj ET
+BT /F1 9.5 Tf 262.69 364.95 Td (acceptable.) Tj ET
+BT /F1 9.5 Tf 313.92 364.95 Td (Do) Tj ET
+BT /F1 9.5 Tf 328.7 364.95 Td (not) Tj ET
+BT /F1 9.5 Tf 344.54 364.95 Td (grant) Tj ET
+BT /F3 9.5 Tf 371.89 364.95 Td (sysadmin) Tj ET
+BT /F1 9.5 Tf 420.13 364.95 Td (to) Tj ET
+BT /F1 9.5 Tf 430.7 364.95 Td (get) Tj ET
+BT /F1 9.5 Tf 446.54 364.95 Td (a) Tj ET
+BT /F1 9.5 Tf 454.47 364.95 Td (build) Tj ET
+BT /F1 9.5 Tf 477.17 364.95 Td (number.) Tj ET
+0.137 0.122 0.125 rg
+BT /F2 12.5 Tf 52 331.95 Td (Optional:) Tj ET
+BT /F2 12.5 Tf 110.34 331.95 Td (service) Tj ET
+BT /F2 12.5 Tf 156.9 331.95 Td (enumeration) Tj ET
+0.863 0.851 0.843 RG 0.7 w
+52 323.58 m 543 323.58 l S
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 52 305.08 Td (The) Tj ET
+BT /F1 9.5 Tf 71.01 305.08 Td (report) Tj ET
+BT /F1 9.5 Tf 98.46 305.08 Td (asks) Tj ET
+BT /F1 9.5 Tf 120.64 305.08 Td (the) Tj ET
+BT /F1 9.5 Tf 136.48 305.08 Td (SQL) Tj ET
+BT /F1 9.5 Tf 158.13 305.08 Td (Browser) Tj ET
+BT /F1 9.5 Tf 195.61 305.08 Td (\(UDP) Tj ET
+BT /F1 9.5 Tf 221.47 305.08 Td (1434\)) Tj ET
+BT /F1 9.5 Tf 248.4 305.08 Td (which) Tj ET
+BT /F1 9.5 Tf 275.33 305.08 Td (instances) Tj ET
+BT /F1 9.5 Tf 318.1 305.08 Td (exist,) Tj ET
+BT /F1 9.5 Tf 342.91 305.08 Td (and) Tj ET
+BT /F1 9.5 Tf 361.4 305.08 Td (also) Tj ET
+BT /F1 9.5 Tf 381.46 305.08 Td (reads) Tj ET
+BT /F1 9.5 Tf 407.86 305.08 Td (the) Tj ET
+BT /F1 9.5 Tf 423.71 305.08 Td (Windows) Tj ET
+BT /F1 9.5 Tf 464.88 305.08 Td (service) Tj ET
+BT /F1 9.5 Tf 497.61 305.08 Td (list) Tj ET
+BT /F1 9.5 Tf 511.86 305.08 Td (to) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 52 292.08 Td (catch) Tj ET
+BT /F1 9.5 Tf 77.35 292.08 Td (instances) Tj ET
+BT /F1 9.5 Tf 120.12 292.08 Td (whose) Tj ET
+BT /F1 9.5 Tf 150.21 292.08 Td (service) Tj ET
+BT /F1 9.5 Tf 182.94 292.08 Td (is) Tj ET
+BT /F2 9.5 Tf 192.44 292.08 Td (stopped) Tj ET
+BT /F1 9.5 Tf 229.38 292.08 Td (.) Tj ET
+BT /F1 9.5 Tf 234.67 292.08 Td (The) Tj ET
+BT /F1 9.5 Tf 253.68 292.08 Td (service) Tj ET
+BT /F1 9.5 Tf 286.4 292.08 Td (list) Tj ET
+BT /F1 9.5 Tf 300.65 292.08 Td (needs) Tj ET
+BT /F1 9.5 Tf 329.17 292.08 Td (read) Tj ET
+BT /F1 9.5 Tf 350.82 292.08 Td (access) Tj ET
+BT /F1 9.5 Tf 383.03 292.08 Td (to) Tj ET
+BT /F1 9.5 Tf 393.59 292.08 Td (the) Tj ET
+BT /F1 9.5 Tf 409.44 292.08 Td (Service) Tj ET
+BT /F1 9.5 Tf 443.75 292.08 Td (Control) Tj ET
+BT /F1 9.5 Tf 477.01 292.08 Td (Manager,) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 52 279.08 Td (which) Tj ET
+BT /F1 9.5 Tf 78.92 279.08 Td (authenticated) Tj ET
+BT /F1 9.5 Tf 138.6 279.08 Td (users) Tj ET
+BT /F1 9.5 Tf 164.47 279.08 Td (have) Tj ET
+BT /F1 9.5 Tf 187.71 279.08 Td (by) Tj ET
+BT /F1 9.5 Tf 200.38 279.08 Td (default;) Tj ET
+BT /F1 9.5 Tf 234.18 279.08 Td (some) Tj ET
+BT /F1 9.5 Tf 260.05 279.08 Td (hardening) Tj ET
+BT /F1 9.5 Tf 304.94 279.08 Td (baselines) Tj ET
+BT /F1 9.5 Tf 347.71 279.08 Td (remove) Tj ET
+BT /F1 9.5 Tf 382.02 279.08 Td (it.) Tj ET
+BT /F1 9.5 Tf 392.05 279.08 Td (If) Tj ET
+BT /F1 9.5 Tf 399.98 279.08 Td (it) Tj ET
+BT /F1 9.5 Tf 407.37 279.08 Td (is) Tj ET
+BT /F1 9.5 Tf 416.87 279.08 Td (unavailable,) Tj ET
+BT /F1 9.5 Tf 470.2 279.08 Td (discovery) Tj ET
+BT /F1 9.5 Tf 512.96 279.08 Td (still) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 52 266.08 Td (works) Tj ET
+BT /F1 9.5 Tf 79.45 266.08 Td (through) Tj ET
+BT /F1 9.5 Tf 114.3 266.08 Td (the) Tj ET
+BT /F1 9.5 Tf 130.15 266.08 Td (SQL) Tj ET
+BT /F1 9.5 Tf 151.8 266.08 Td (Browser) Tj ET
+BT /F1 9.5 Tf 189.28 266.08 Td (Ч) Tj ET
+BT /F1 9.5 Tf 201.42 266.08 Td (you) Tj ET
+BT /F1 9.5 Tf 219.37 266.08 Td (simply) Tj ET
+BT /F1 9.5 Tf 248.93 266.08 Td (will) Tj ET
+BT /F1 9.5 Tf 264.75 266.08 Td (not) Tj ET
+BT /F1 9.5 Tf 280.6 266.08 Td (see) Tj ET
+BT /F1 9.5 Tf 298.55 266.08 Td (instances) Tj ET
+BT /F1 9.5 Tf 341.32 266.08 Td (that) Tj ET
+BT /F1 9.5 Tf 359.81 266.08 Td (are) Tj ET
+BT /F1 9.5 Tf 376.18 266.08 Td (turned) Tj ET
+BT /F1 9.5 Tf 405.75 266.08 Td (off.) Tj ET
+0.137 0.122 0.125 rg
+BT /F2 12.5 Tf 52 233.08 Td (6.) Tj ET
+BT /F2 12.5 Tf 65.9 233.08 Td (The) Tj ET
+BT /F2 12.5 Tf 91.6 233.08 Td (two) Tj ET
+BT /F2 12.5 Tf 116.6 233.08 Td (Microsoft) Tj ET
+BT /F2 12.5 Tf 176.32 233.08 Td (hosts,) Tj ET
+BT /F2 12.5 Tf 216.61 233.08 Td (or) Tj ET
+BT /F2 12.5 Tf 232.59 233.08 Td (no) Tj ET
+BT /F2 12.5 Tf 251.34 233.08 Td (internet) Tj ET
+BT /F2 12.5 Tf 300.65 233.08 Td (at) Tj ET
+BT /F2 12.5 Tf 315.24 233.08 Td (all) Tj ET
+0.863 0.851 0.843 RG 0.7 w
+52 224.7 m 543 224.7 l S
+0.137 0.122 0.125 rg
+52 196.7 491 16 re f
+1 1 1 rg
+BT /F2 8.5 Tf 57 200.7 Td (Host) Tj ET
+1 1 1 rg
+BT /F2 8.5 Tf 257.28 200.7 Td (What) Tj ET
+BT /F2 8.5 Tf 280.42 200.7 Td (for) Tj ET
+0.957 0.953 0.945 rg
+56 183 139.7 9.77 re f
+0.137 0.122 0.125 rg
+BT /F3 8.5 Tf 57 184.7 Td (https://learn.microsoft.com) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 257.28 184.7 Td (the) Tj ET
+BT /F1 8.5 Tf 271.46 184.7 Td (published) Tj ET
+BT /F1 8.5 Tf 310.2 184.7 Td (SQL) Tj ET
+BT /F1 8.5 Tf 329.58 184.7 Td (Server) Tj ET
+BT /F1 8.5 Tf 356.97 184.7 Td (build) Tj ET
+BT /F1 8.5 Tf 377.29 184.7 Td (list) Tj ET
+0.863 0.851 0.843 RG 0.5 w
+52 180.7 m 543 180.7 l S
+0.957 0.953 0.945 rg
+56 167 155 9.77 re f
+0.137 0.122 0.125 rg
+BT /F3 8.5 Tf 57 168.7 Td (https://api.msrc.microsoft.com) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 257.28 168.7 Td (Microsoft's) Tj ET
+BT /F1 8.5 Tf 300 168.7 Td (security) Tj ET
+BT /F1 8.5 Tf 331.64 168.7 Td (update) Tj ET
+BT /F1 8.5 Tf 360 168.7 Td (data) Tj ET
+BT /F1 8.5 Tf 378.9 168.7 Td (for) Tj ET
+BT /F1 8.5 Tf 391.18 168.7 Td (Windows) Tj ET
+0.863 0.851 0.843 RG 0.5 w
+52 164.7 m 543 164.7 l S
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 52 148.2 Td (Only) Tj ET
+BT /F1 9.5 Tf 74.17 148.2 Td (the) Tj ET
+BT /F1 9.5 Tf 90.02 148.2 Td (machine) Tj ET
+BT /F1 9.5 Tf 128.56 148.2 Td (running) Tj ET
+BT /F1 9.5 Tf 162.88 148.2 Td (the) Tj ET
+BT /F1 9.5 Tf 178.73 148.2 Td (report) Tj ET
+BT /F1 9.5 Tf 206.18 148.2 Td (needs) Tj ET
+BT /F1 9.5 Tf 234.7 148.2 Td (these,) Tj ET
+BT /F1 9.5 Tf 263.22 148.2 Td (and) Tj ET
+BT /F1 9.5 Tf 281.71 148.2 Td (only) Tj ET
+BT /F1 9.5 Tf 301.77 148.2 Td (outbound.) Tj ET
+BT /F2 9.5 Tf 346.67 148.2 Td (If) Tj ET
+BT /F2 9.5 Tf 355.12 148.2 Td (that) Tj ET
+BT /F2 9.5 Tf 375.17 148.2 Td (is) Tj ET
+BT /F2 9.5 Tf 385.74 148.2 Td (not) Tj ET
+BT /F2 9.5 Tf 403.15 148.2 Td (acceptable,) Tj ET
+BT /F2 9.5 Tf 457.54 148.2 Td (it) Tj ET
+BT /F2 9.5 Tf 465.98 148.2 Td (can) Tj ET
+BT /F2 9.5 Tf 484.99 148.2 Td (run) Tj ET
+BT /F2 9.5 Tf 502.94 148.2 Td (with) Tj ET
+BT /F2 9.5 Tf 524.58 148.2 Td (no) Tj ET
+0.137 0.122 0.125 rg
+BT /F2 9.5 Tf 52 135.2 Td (internet) Tj ET
+BT /F2 9.5 Tf 89.48 135.2 Td (access) Tj ET
+BT /F2 9.5 Tf 123.81 135.2 Td (whatsoever:) Tj ET
+BT /F1 9.5 Tf 181.88 135.2 Td (on) Tj ET
+BT /F1 9.5 Tf 195.09 135.2 Td (any) Tj ET
+BT /F1 9.5 Tf 213.04 135.2 Td (connected) Tj ET
+BT /F1 9.5 Tf 259.52 135.2 Td (machine,) Tj ET
+BT /F1 9.5 Tf 300.7 135.2 Td (run) Tj ET
+0.957 0.953 0.945 rg
+52 99.2 491 23.5 re f
+0.863 0.851 0.843 RG 0.7 w
+52 99.2 491 23.5 re S
+0.180 0.165 0.157 rg
+BT /F3 8.5 Tf 62 108.2 Td (.\\Get-PatchStatus.ps1 -SaveReference patch-reference.json) Tj ET
+0.863 0.851 0.843 RG 0.5 w
+52 64 m 543 64 l S
+0.420 0.400 0.396 rg
+BT /F1 7.5 Tf 52 54 Td (Molehill Data Services) Tj ET
+BT /F1 7.5 Tf 504.64 54 Td (Page 2 of 3) Tj ET
+endstream
+endobj
+12 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R /F4 6 0 R >> >> /Contents 13 0 R >>
+endobj
+13 0 obj
+<< /Length 10824 >>
+stream
+0.957 0.953 0.945 rg
+76.76 778.6 116 10.92 re f
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 52 780.5 Td (copy) Tj ET
+BT /F3 9.5 Tf 77.76 780.5 Td (patch-reference.json) Tj ET
+BT /F1 9.5 Tf 194.4 780.5 Td (next) Tj ET
+BT /F1 9.5 Tf 215 780.5 Td (to) Tj ET
+BT /F1 9.5 Tf 225.56 780.5 Td (the) Tj ET
+BT /F1 9.5 Tf 241.41 780.5 Td (script) Tj ET
+BT /F1 9.5 Tf 266.75 780.5 Td (on) Tj ET
+BT /F1 9.5 Tf 279.95 780.5 Td (the) Tj ET
+BT /F1 9.5 Tf 295.8 780.5 Td (isolated) Tj ET
+BT /F1 9.5 Tf 331.18 780.5 Td (box,) Tj ET
+BT /F1 9.5 Tf 351.77 780.5 Td (and) Tj ET
+BT /F1 9.5 Tf 370.26 780.5 Td (it) Tj ET
+BT /F1 9.5 Tf 377.65 780.5 Td (will) Tj ET
+BT /F1 9.5 Tf 393.48 780.5 Td (use) Tj ET
+BT /F1 9.5 Tf 411.43 780.5 Td (that) Tj ET
+BT /F1 9.5 Tf 429.92 780.5 Td (instead.) Tj ET
+BT /F1 9.5 Tf 465.83 780.5 Td (The) Tj ET
+BT /F1 9.5 Tf 484.84 780.5 Td (report) Tj ET
+BT /F1 9.5 Tf 512.29 780.5 Td (warns) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 52 767.5 Td (if) Tj ET
+BT /F1 9.5 Tf 59.39 767.5 Td (the) Tj ET
+BT /F1 9.5 Tf 75.24 767.5 Td (file) Tj ET
+BT /F1 9.5 Tf 90.02 767.5 Td (is) Tj ET
+BT /F1 9.5 Tf 99.52 767.5 Td (more) Tj ET
+BT /F1 9.5 Tf 123.8 767.5 Td (than) Tj ET
+BT /F1 9.5 Tf 144.93 767.5 Td (40) Tj ET
+BT /F1 9.5 Tf 158.13 767.5 Td (days) Tj ET
+BT /F1 9.5 Tf 180.84 767.5 Td (old.) Tj ET
+0.137 0.122 0.125 rg
+BT /F2 12.5 Tf 52 734.5 Td (What) Tj ET
+BT /F2 12.5 Tf 86.02 734.5 Td (SQL) Tj ET
+BT /F2 12.5 Tf 115.2 734.5 Td (Server) Tj ET
+BT /F2 12.5 Tf 157.59 734.5 Td (will) Tj ET
+BT /F2 12.5 Tf 181.21 734.5 Td (show) Tj ET
+BT /F2 12.5 Tf 216.64 734.5 Td (the) Tj ET
+BT /F2 12.5 Tf 238.86 734.5 Td (account) Tj ET
+BT /F2 12.5 Tf 290.26 734.5 Td (anyway) Tj ET
+0.863 0.851 0.843 RG 0.7 w
+52 726.12 m 543 726.12 l S
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 52 707.62 Td (These) Tj ET
+BT /F1 9.5 Tf 81.04 707.62 Td (are) Tj ET
+BT /F1 9.5 Tf 97.41 707.62 Td (SQL) Tj ET
+BT /F1 9.5 Tf 119.06 707.62 Td (Server's) Tj ET
+BT /F1 9.5 Tf 156.24 707.62 Td (own) Tj ET
+BT /F1 9.5 Tf 176.31 707.62 Td (defaults) Tj ET
+BT /F1 9.5 Tf 212.22 707.62 Td (for) Tj ET
+BT /F1 9.5 Tf 225.94 707.62 Td (any) Tj ET
+BT /F1 9.5 Tf 243.9 707.62 Td (login,) Tj ET
+BT /F1 9.5 Tf 269.25 707.62 Td (not) Tj ET
+BT /F1 9.5 Tf 285.09 707.62 Td (permissions) Tj ET
+BT /F1 9.5 Tf 338.41 707.62 Td (being) Tj ET
+BT /F1 9.5 Tf 364.28 707.62 Td (requested,) Tj ET
+BT /F1 9.5 Tf 411.81 707.62 Td (and) Tj ET
+BT /F1 9.5 Tf 430.3 707.62 Td (the) Tj ET
+BT /F1 9.5 Tf 446.15 707.62 Td (report) Tj ET
+BT /F1 9.5 Tf 473.6 707.62 Td (does) Tj ET
+BT /F1 9.5 Tf 496.84 707.62 Td (not) Tj ET
+BT /F1 9.5 Tf 512.68 707.62 Td (use) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 52 694.62 Td (any) Tj ET
+BT /F1 9.5 Tf 69.96 694.62 Td (of) Tj ET
+BT /F1 9.5 Tf 80.52 694.62 Td (them.) Tj ET
+BT /F1 9.5 Tf 106.92 694.62 Td (Listed) Tj ET
+BT /F1 9.5 Tf 134.91 694.62 Td (so) Tj ET
+BT /F1 9.5 Tf 147.58 694.62 Td (that) Tj ET
+BT /F1 9.5 Tf 166.07 694.62 Td (nobody) Tj ET
+BT /F1 9.5 Tf 199.87 694.62 Td (discovers) Tj ET
+BT /F1 9.5 Tf 242.63 694.62 Td (them) Tj ET
+BT /F1 9.5 Tf 266.39 694.62 Td (later) Tj ET
+BT /F1 9.5 Tf 287.5 694.62 Td (and) Tj ET
+BT /F1 9.5 Tf 305.99 694.62 Td (assumes) Tj ET
+BT /F1 9.5 Tf 346.64 694.62 Td (the) Tj ET
+BT /F1 9.5 Tf 362.49 694.62 Td (report) Tj ET
+BT /F1 9.5 Tf 389.94 694.62 Td (asked) Tj ET
+BT /F1 9.5 Tf 417.93 694.62 Td (for) Tj ET
+BT /F1 9.5 Tf 431.66 694.62 Td (them:) Tj ET
+0.137 0.122 0.125 rg
+52 665.12 491 16 re f
+1 1 1 rg
+BT /F2 8.5 Tf 57 669.12 Td (Visible) Tj ET
+BT /F2 8.5 Tf 86.77 669.12 Td (by) Tj ET
+BT /F2 8.5 Tf 99.05 669.12 Td (default) Tj ET
+1 1 1 rg
+BT /F2 8.5 Tf 301.14 669.12 Td (Note) Tj ET
+0.957 0.953 0.945 rg
+159.46 651.42 73.4 9.77 re f
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 57 653.12 Td (The) Tj ET
+BT /F1 8.5 Tf 74.01 653.12 Td (names) Tj ET
+BT /F1 8.5 Tf 101.88 653.12 Td (of) Tj ET
+BT /F1 8.5 Tf 111.33 653.12 Td (other) Tj ET
+BT /F1 8.5 Tf 133.07 653.12 Td (logins) Tj ET
+BT /F1 8.5 Tf 157.63 653.12 Td (\() Tj ET
+BT /F3 8.5 Tf 160.46 653.12 Td (sys.sql_logins) Tj ET
+BT /F1 8.5 Tf 231.86 653.12 Td (\)) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 301.14 653.12 Td (server-level) Tj ET
+BT /F1 8.5 Tf 347.43 653.12 Td (metadata) Tj ET
+BT /F1 8.5 Tf 385.23 653.12 Td (is) Tj ET
+BT /F1 8.5 Tf 393.73 653.12 Td (visible) Tj ET
+BT /F1 8.5 Tf 419.7 653.12 Td (to) Tj ET
+BT /F1 8.5 Tf 429.15 653.12 Td (all) Tj ET
+BT /F1 8.5 Tf 440.02 653.12 Td (logins) Tj ET
+0.863 0.851 0.843 RG 0.5 w
+52 649.12 m 543 649.12 l S
+0.957 0.953 0.945 rg
+146.23 635.42 68.3 9.77 re f
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 57 637.12 Td (Which) Tj ET
+BT /F1 8.5 Tf 82.98 637.12 Td (databases) Tj ET
+BT /F1 8.5 Tf 124.56 637.12 Td (exist) Tj ET
+BT /F1 8.5 Tf 144.4 637.12 Td (\() Tj ET
+BT /F3 8.5 Tf 147.23 637.12 Td (sys.databases) Tj ET
+BT /F1 8.5 Tf 213.53 637.12 Td (\)) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 8.5 Tf 301.14 637.12 Td (names) Tj ET
+BT /F1 8.5 Tf 329.02 637.12 Td (only) Tj ET
+BT /F1 8.5 Tf 346.97 637.12 Td (Ч) Tj ET
+BT /F1 8.5 Tf 357.83 637.12 Td (it) Tj ET
+BT /F1 8.5 Tf 364.44 637.12 Td (cannot) Tj ET
+BT /F1 8.5 Tf 392.32 637.12 Td (connect) Tj ET
+BT /F1 8.5 Tf 424.45 637.12 Td (to) Tj ET
+BT /F1 8.5 Tf 433.91 637.12 Td (them) Tj ET
+0.863 0.851 0.843 RG 0.5 w
+52 633.12 m 543 633.12 l S
+0.957 0.953 0.945 rg
+56 619.42 93.8 9.77 re f
+0.137 0.122 0.125 rg
+BT /F3 8.5 Tf 57 621.12 Td (msdb.dbo.backupset) Tj ET
+BT /F1 8.5 Tf 151.16 621.12 Td (\(backup) Tj ET
+BT /F1 8.5 Tf 183.76 621.12 Td (history\)) Tj ET
+0.957 0.953 0.945 rg
+300.14 619.42 22.4 9.77 re f
+0.957 0.953 0.945 rg
+341.71 619.42 27.5 9.77 re f
+0.137 0.122 0.125 rg
+BT /F3 8.5 Tf 301.14 621.12 Td (msdb) Tj ET
+BT /F1 8.5 Tf 323.91 621.12 Td (has) Tj ET
+BT /F3 8.5 Tf 342.71 621.12 Td (guest) Tj ET
+BT /F1 8.5 Tf 370.57 621.12 Td (enabled) Tj ET
+BT /F1 8.5 Tf 403.18 621.12 Td (out) Tj ET
+BT /F1 8.5 Tf 417.36 621.12 Td (of) Tj ET
+BT /F1 8.5 Tf 426.81 621.12 Td (the) Tj ET
+BT /F1 8.5 Tf 440.99 621.12 Td (box) Tj ET
+0.863 0.851 0.843 RG 0.5 w
+52 617.12 m 543 617.12 l S
+0.957 0.953 0.945 rg
+179.21 598.72 24.8 10.92 re f
+0.957 0.953 0.945 rg
+202.01 598.72 36.2 10.92 re f
+0.957 0.953 0.945 rg
+236.21 598.72 41.9 10.92 re f
+0.957 0.953 0.945 rg
+276.11 598.72 47.6 10.92 re f
+0.957 0.953 0.945 rg
+321.71 598.72 30.5 10.92 re f
+0.957 0.953 0.945 rg
+350.21 598.72 36.2 10.92 re f
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 52 600.62 Td (If) Tj ET
+BT /F1 9.5 Tf 59.92 600.62 Td (the) Tj ET
+BT /F1 9.5 Tf 75.77 600.62 Td (last) Tj ET
+BT /F1 9.5 Tf 93.19 600.62 Td (one) Tj ET
+BT /F1 9.5 Tf 111.68 600.62 Td (matters) Tj ET
+BT /F1 9.5 Tf 145.99 600.62 Td (to) Tj ET
+BT /F1 9.5 Tf 156.56 600.62 Td (you,) Tj ET
+BT /F3 9.5 Tf 180.21 600.62 Td (USE ) Tj ET
+BT /F3 9.5 Tf 203.01 600.62 Td (msdb; ) Tj ET
+BT /F3 9.5 Tf 237.21 600.62 Td (REVOKE ) Tj ET
+BT /F3 9.5 Tf 277.11 600.62 Td (CONNECT ) Tj ET
+BT /F3 9.5 Tf 322.71 600.62 Td (FROM ) Tj ET
+BT /F3 9.5 Tf 351.21 600.62 Td (guest;) Tj ET
+BT /F1 9.5 Tf 388.05 600.62 Td (removes) Tj ET
+BT /F1 9.5 Tf 427.12 600.62 Td (it) Tj ET
+BT /F1 9.5 Tf 434.51 600.62 Td (Ч) Tj ET
+BT /F1 9.5 Tf 446.65 600.62 Td (check) Tj ET
+BT /F1 9.5 Tf 474.1 600.62 Td (nothing) Tj ET
+BT /F1 9.5 Tf 507.9 600.62 Td (else) Tj ET
+BT /F1 9.5 Tf 527.97 600.62 Td (on) Tj ET
+0.137 0.122 0.125 rg
+BT /F1 9.5 Tf 52 587.62 Td (the) Tj ET
+BT /F1 9.5 Tf 67.85 587.62 Td (instance) Tj ET
+BT /F1 9.5 Tf 105.86 587.62 Td (relies) Tj ET
+BT /F1 9.5 Tf 131.2 587.62 Td (on) Tj ET
+BT /F1 9.5 Tf 144.41 587.62 Td (it) Tj ET
+BT /F1 9.5 Tf 151.8 587.62 Td (first.) Tj ET
+0.137 0.122 0.125 rg
+BT /F2 12.5 Tf 52 554.62 Td (Summary) Tj ET
+BT /F2 12.5 Tf 112.44 554.62 Td (for) Tj ET
+BT /F2 12.5 Tf 132.57 554.62 Td (a) Tj ET
+BT /F2 12.5 Tf 143 554.62 Td (change) Tj ET
+BT /F2 12.5 Tf 190.24 554.62 Td (record) Tj ET
+0.863 0.851 0.843 RG 0.7 w
+52 546.25 m 543 546.25 l S
+0.137 0.122 0.125 rg
+52 474.25 3 60 re f
+0.420 0.400 0.396 rg
+BT /F4 9.5 Tf 68 520.75 Td (A) Tj ET
+BT /F4 9.5 Tf 76.98 520.75 Td (read-only) Tj ET
+BT /F4 9.5 Tf 119.21 520.75 Td (service) Tj ET
+BT /F4 9.5 Tf 151.94 520.75 Td (account) Tj ET
+BT /F4 9.5 Tf 187.85 520.75 Td (with) Tj ET
+BT /F4 9.5 Tf 207.38 520.75 Td (a) Tj ET
+BT /F4 9.5 Tf 215.31 520.75 Td (SQL) Tj ET
+BT /F4 9.5 Tf 236.96 520.75 Td (Server) Tj ET
+BT /F4 9.5 Tf 267.58 520.75 Td (login) Tj ET
+BT /F4 9.5 Tf 290.28 520.75 Td (\(no) Tj ET
+BT /F4 9.5 Tf 306.65 520.75 Td (roles,) Tj ET
+BT /F4 9.5 Tf 332.52 520.75 Td (no) Tj ET
+BT /F4 9.5 Tf 345.72 520.75 Td (database) Tj ET
+BT /F4 9.5 Tf 387.45 520.75 Td (access\),) Tj ET
+BT /F4 9.5 Tf 425.46 520.75 Td (the) Tj ET
+BT /F4 9.5 Tf 441.3 520.75 Td ("Access) Tj ET
+BT /F4 9.5 Tf 477.93 520.75 Td (this) Tj ET
+BT /F4 9.5 Tf 495.36 520.75 Td (computer) Tj ET
+0.420 0.400 0.396 rg
+BT /F4 9.5 Tf 68 507.75 Td (from) Tj ET
+BT /F4 9.5 Tf 89.64 507.75 Td (the) Tj ET
+BT /F4 9.5 Tf 105.49 507.75 Td (network") Tj ET
+BT /F4 9.5 Tf 144.76 507.75 Td (right,) Tj ET
+BT /F4 9.5 Tf 168.52 507.75 Td (and) Tj ET
+BT /F4 9.5 Tf 187.01 507.75 Td (read) Tj ET
+BT /F4 9.5 Tf 208.66 507.75 Td (access) Tj ET
+BT /F4 9.5 Tf 240.86 507.75 Td (to) Tj ET
+BT /F4 9.5 Tf 251.43 507.75 Td (one) Tj ET
+BT /F4 9.5 Tf 269.91 507.75 Td (Windows) Tj ET
+BT /F4 9.5 Tf 311.09 507.75 Td (registry) Tj ET
+BT /F4 9.5 Tf 344.87 507.75 Td (key) Tj ET
+BT /F4 9.5 Tf 362.29 507.75 Td (via) Tj ET
+BT /F4 9.5 Tf 377.07 507.75 Td (the) Tj ET
+BT /F4 9.5 Tf 392.92 507.75 Td (Remote) Tj ET
+BT /F4 9.5 Tf 428.82 507.75 Td (Registry) Tj ET
+BT /F4 9.5 Tf 466.3 507.75 Td (service.) Tj ET
+0.420 0.400 0.396 rg
+BT /F4 9.5 Tf 68 494.75 Td (Outbound) Tj ET
+BT /F4 9.5 Tf 112.36 494.75 Td (HTTPS) Tj ET
+BT /F4 9.5 Tf 146.15 494.75 Td (to) Tj ET
+BT /F4 9.5 Tf 156.71 494.75 Td (two) Tj ET
+BT /F4 9.5 Tf 174.13 494.75 Td (Microsoft) Tj ET
+BT /F4 9.5 Tf 215.31 494.75 Td (hosts,) Tj ET
+BT /F4 9.5 Tf 243.29 494.75 Td (or) Tj ET
+BT /F4 9.5 Tf 254.38 494.75 Td (an) Tj ET
+BT /F4 9.5 Tf 267.59 494.75 Td (offline) Tj ET
+BT /F4 9.5 Tf 295.57 494.75 Td (reference) Tj ET
+BT /F4 9.5 Tf 338.34 494.75 Td (file) Tj ET
+BT /F4 9.5 Tf 353.12 494.75 Td (instead.) Tj ET
+BT /F4 9.5 Tf 389.03 494.75 Td (The) Tj ET
+BT /F4 9.5 Tf 408.04 494.75 Td (account) Tj ET
+BT /F4 9.5 Tf 443.95 494.75 Td (cannot) Tj ET
+BT /F4 9.5 Tf 475.11 494.75 Td (read) Tj ET
+0.420 0.400 0.396 rg
+BT /F4 9.5 Tf 68 481.75 Td (application) Tj ET
+BT /F4 9.5 Tf 116.05 481.75 Td (data,) Tj ET
+BT /F4 9.5 Tf 139.82 481.75 Td (cannot) Tj ET
+BT /F4 9.5 Tf 170.98 481.75 Td (connect) Tj ET
+BT /F4 9.5 Tf 206.89 481.75 Td (to) Tj ET
+BT /F4 9.5 Tf 217.45 481.75 Td (any) Tj ET
+BT /F4 9.5 Tf 235.41 481.75 Td (user) Tj ET
+BT /F4 9.5 Tf 256.53 481.75 Td (database,) Tj ET
+BT /F4 9.5 Tf 300.89 481.75 Td (and) Tj ET
+BT /F4 9.5 Tf 319.38 481.75 Td (cannot) Tj ET
+BT /F4 9.5 Tf 350.54 481.75 Td (change) Tj ET
+BT /F4 9.5 Tf 384.34 481.75 Td (anything.) Tj ET
+0.863 0.851 0.843 RG 0.5 w
+52 64 m 543 64 l S
+0.420 0.400 0.396 rg
+BT /F1 7.5 Tf 52 54 Td (Molehill Data Services) Tj ET
+BT /F1 7.5 Tf 504.64 54 Td (Page 3 of 3) Tj ET
+endstream
+endobj
+xref
+0 14
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000135 00000 n 
+0000000232 00000 n 
+0000000334 00000 n 
+0000000429 00000 n 
+0000000534 00000 n 
+0000000727 00000 n 
+0000000883 00000 n 
+0000019310 00000 n 
+0000019468 00000 n 
+0000037529 00000 n 
+0000037687 00000 n 
+trailer
+<< /Size 14 /Root 1 0 R /Info 7 0 R >>
+startxref
+48565
+%%EOF

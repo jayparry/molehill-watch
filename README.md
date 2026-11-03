@@ -223,7 +223,9 @@ A single script, separate from Molehill Watch, for a quick "how out of date is t
 * **What the account needs is written down**: [Get-PatchStatus-Permissions.md](Docs/Get-PatchStatus-Permissions.md)
   is a one-page handout for whoever approves it. The short version is a SQL login that can connect
   and nothing else, plus read access to one Windows registry key. Verified by creating a login with
-  nothing granted and running the report's own query as it.
+  nothing granted and running the report's own query as it. There is a
+  [PDF of it](Docs/Get-PatchStatus-Permissions.pdf) beside it to send on, because Windows opens a
+  `.md` file with nothing at all - rebuild it with `Tools\Convert-MarkdownToPdf.ps1` after any edit.
 
 ## Database status check (`Tools\Test-DatabaseStatus.ps1`)
 
@@ -722,6 +724,38 @@ Saved connections live in a JSON file (`--file` for one per client); passwords a
 dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o publish
 ```
 
+## Documents as PDF (`Tools\Convert-MarkdownToPdf.ps1`)
+
+Every document in `Docs\` is Markdown, which is right for the repository and wrong for the moment
+you have to send one to somebody. Windows ships with nothing that opens a `.md` file: it lands in
+Notepad as a page of pipes and asterisks, or does not open at all. This writes the same document as
+a PDF, which opens in the browser they already have, prints, and attaches to a change record.
+
+```powershell
+.\Convert-MarkdownToPdf.ps1 ..\Docs\Get-PatchStatus-Permissions.md
+.\Convert-MarkdownToPdf.ps1 ..\Docs\Admin-Guide.md -Title 'Molehill Watch: admin guide' -Open
+```
+
+* **Nothing is installed and nothing is called out to.** The PDF is laid out and assembled here,
+  using the base-14 fonts every reader already has, so a locked-down server produces byte for byte
+  what a laptop does. It is the same writer the patch report's attachment uses, which is why both
+  now sit on one set of font metrics rather than two.
+* **It is not a Markdown engine**, and is not trying to be: headings, paragraphs, tables, fenced
+  code, lists, block quotes, bold, italic, inline code and links - what these documents actually
+  use. Anything else is drawn as the text it is, which is the right failure.
+* **Tables are measured before they are drawn**: every column asks how wide it would like to be and
+  they are then scaled to the page, so a `#` column does not get the same inch of paper as a `Why`
+  column, and a table too wide for the page is squeezed onto it rather than off it. A table running
+  over a page gets its header again at the top of the next one.
+* **Whitespace inside a fence is content**, so two columns of registry values lined up with spaces
+  stay lined up, and a command too long for the page is broken rather than run off the edge of it.
+* **The first heading becomes the title** - on the first page and in the file's properties, so a
+  reader does not show whatever the attachment was called on the way through a mail server.
+* The self test parses, measures and assembles without touching a disk, then checks the finished
+  file the way a reader does: every cross-reference offset has to land on the object it claims, and
+  every string that was written has to land inside the margins. That last one is the check that
+  earns its keep, because a PDF will happily place text off the paper and never complain.
+
 ## How the contract maps to the toolkit
 
 | Contract clause | Implemented by |
