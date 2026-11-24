@@ -14,6 +14,8 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        ConsoleHost.Prepare(args);         // before anything prints, and before the encoding is set
+
         string? configArg = null, connectionOverride = null;
         bool forceSetup = false, installOnly = false, selfTest = false, selfTestWrite = false,
              selfTestConfig = false, allowWrites = false, tui = false;
@@ -219,13 +221,20 @@ only saved if you tick "Remember it", and then encrypted for your Windows accoun
   MolehillManager --install             create / install / upgrade the configured database without
                                         the screen (the app also offers this itself when needed)
 
-  MolehillManager --selftest            build every screen and form against the configured
+This .exe is a windowed program, so that double-clicking it leaves no empty console window behind
+the screen. Most shells do not wait for one of those, and do not report its exit code. Anything
+scripted - a self-test, --install, a scheduled task - should run MolehillManager.cmd beside it,
+which takes the same switches and behaves as a console program always did.
+
+  MolehillManager.cmd --selftest        build every screen and form against the configured
                                         database (read-only) and report
-  MolehillManager --selftest-write --allow-writes
+  MolehillManager.cmd --selftest-write --allow-writes
                                         scripted run of every form against a TEST copy
-  MolehillManager --selftest-config     check the config file handling (no database needed)
-  MolehillManager --selftest-install S  create / install / upgrade scratch databases on server S, then drop them
-  MolehillManager --selftest-setup S    drive the first-run settings screen against server S
+  MolehillManager.cmd --selftest-config check the config file handling (no database needed)
+  MolehillManager.cmd --selftest-install S
+                                        create / install / upgrade scratch databases on server S, then drop them
+  MolehillManager.cmd --selftest-setup S
+                                        drive the first-run settings screen against server S
   (-c "connection string" points a self-test somewhere other than the config file)
 
 Keys: F2 new, F3/Enter open or actions, F5 refresh, F6 run billing, Ctrl+Q quit.

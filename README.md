@@ -31,11 +31,13 @@ Then open `Admin\Example-NewClient.sql` in SSMS and press F5. It's a full worked
 
 For everyday use, **Molehill Manager** is a terminal front end for clients, agreements, instances, onboarding, tickets, time and invoices. It calls the same stored procedures, so the rules are identical. See its [README](Admin/MolehillManager/README.md).
 
-```powershell
-cd Admin\MolehillManager
-dotnet publish -c Release -r win-x64 -o publish    # one self-contained MolehillManager.exe
-.\publish\MolehillManager.exe                      # first run asks for the server and sign-in, saves them to MolehillManager.config.json
-```
+```powershell
+cd Admin\MolehillManager
+dotnet publish -c Release -r win-x64 -o publish    # MolehillManager.exe, self-contained, plus a .cmd for scripts
+.\publish\MolehillManager.exe                      # first run asks for the server and sign-in, saves them to MolehillManager.config.json
+```
+
+`MolehillManager.exe` is the app: double-click it, or run it. `MolehillManager.cmd`, published beside it, is for anything that reads the output or the exit code - the self-tests, `--install`, a scheduled task - because shells don't wait for a windowed program. Same switches.
 
 Passwords are only saved if you ask, and then encrypted for your Windows account (DPAPI). If the database isn't there, Molehill Manager offers to create it and install MolehillAdmin itself, and it offers to upgrade an older one. You only need `Install-MolehillAdmin.ps1` to schedule the daily billing run.
 
@@ -793,7 +795,7 @@ a PDF, which opens in the browser they already have, prints, and attaches to a c
 * **Client side:** SQL Server 2012 or later on Windows. SQL Server Agent is used where available. **Express edition** has no Agent, so run the installer on the server with `-UseTaskScheduler`; this grants `NT AUTHORITY\SYSTEM` sysadmin so the scheduled tasks can collect, so agree that with the client first. The installer needs Windows PowerShell 5.1 or PowerShell 7 and no extra modules.
 * **Azure SQL Managed Instance:** the same installer, from a machine that can reach the instance. SQL Agent is always available.
 * **Azure SQL Database:** Windows PowerShell 5.1 or PowerShell 7 on the jump box. Sign in with the Azure CLI (`az login`), Az PowerShell, or `-SqlCredential`. The account needs VIEW DATABASE STATE in each database and access to master. `-AzurePlatformChecks` also needs the Azure CLI with Reader on the resource group.
-* **Admin side:** SQL Server 2017 or later (Express/Developer fine) on a Windows machine you control. Molehill Manager needs the .NET 8 SDK to run from source, or nothing at all as a published single `.exe`.
+* **Admin side:** SQL Server 2017 or later (Express/Developer fine) on a Windows machine you control. Molehill Manager needs the .NET 8 SDK to run from source, or nothing at all as a published single `.exe` (about 71 MB; it unpacks ~9.5 MB of libraries into `%TEMP%\.net` the first time it runs, so a machine whose `%TEMP%` is redirected or non-executable will need that allowing).
 
 ## Decisions and assumptions to review
 

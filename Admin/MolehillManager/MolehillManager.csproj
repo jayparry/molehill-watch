@@ -1,7 +1,13 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <!--
+      WinExe, so double-clicking does not put an empty console window behind the screen. The cost is
+      that cmd.exe does not wait for a windowed child and does not report its exit code, so anything
+      scripted goes through MolehillManager.cmd beside the exe. ConsoleHost borrows the launching
+      terminal so printing still works either way.
+    -->
+    <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -49,6 +55,11 @@
   <ItemGroup>
     <!-- the app installs / upgrades MolehillAdmin itself when the configured database is missing or out of date -->
     <EmbeddedResource Include="..\MolehillAdmin_Install.sql" LogicalName="MolehillAdmin_Install.sql" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- travels with the exe: scripted runs need something cmd.exe will wait for. See the .cmd itself. -->
+    <None Include="MolehillManager.cmd" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

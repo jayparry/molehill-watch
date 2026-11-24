@@ -10,7 +10,10 @@ public static class SelfTest
 
     static SelfTest()
     {
-        Console.OutputEncoding = System.Text.Encoding.UTF8;
+        // the output encoding is ConsoleHost's job now. Setting it here threw when the app became
+        // windowed and there was no console yet - and in a static constructor that arrives as a
+        // TypeInitializationException, at whatever moment something first touched SelfTest.
+
         // errors come back as FAIL lines, not as a dialog nothing can dismiss. Named in full
         // because SelfTest.Ui(AdminDb) is the read-only suite, and would win the lookup here.
         MolehillManager.Ui.Headless = true;

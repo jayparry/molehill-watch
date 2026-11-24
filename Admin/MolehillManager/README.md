@@ -6,12 +6,20 @@ Every change goes through the MolehillAdmin stored procedures, so the rules are 
 
 ## Running it
 
-Run `MolehillManager.exe`. That's all. It's a single self-contained file (about 38 MB) with nothing to install. Build it with:
+Run `MolehillManager.exe`. That's all. It's a single self-contained file (about 71 MB) with nothing to install. Build it with:
 
 ```powershell
 cd Admin\MolehillManager
-dotnet publish -c Release -r win-x64 -o publish     # -> publish\MolehillManager.exe
+dotnet publish -c Release -r win-x64 -o publish     # -> publish\MolehillManager.exe and .cmd
 ```
+
+**`MolehillManager.cmd` is published beside it, and is what scripts should run.** The app is a windowed
+program, so double-clicking it doesn't leave an empty console window behind the screen - but most
+shells don't wait for a windowed child, so `.\MolehillManager.exe --selftest > out.txt` hands
+your prompt straight back, with `$LASTEXITCODE` unset and the file still empty. Run the
+`.cmd` instead and it waits, reports the exit code and fills the file, exactly as a console
+program would. It takes the same switches. Nothing inside the `.exe` can fix this, which is
+why there are two files in the folder; using the app needs only the `.exe`.
 
 **No MolehillAdmin yet? It sets it up for you.** The install script is built into the exe, so you get the version the app was built for. Depending on what it finds on the configured server:
 
@@ -83,6 +91,7 @@ Editing the file by hand is fine:
 ```powershell
 MolehillManager.exe --setup                  # open the settings screen first
 MolehillManager.exe --config D:\test.json    # a separate file, e.g. for a test copy of MolehillAdmin
+MolehillManager.exe --tui                    # the terminal front end, whatever the default becomes
 ```
 
 Running from source (`dotnet run`) needs the .NET 8 SDK and keeps its config next to the build output.
@@ -167,10 +176,13 @@ Covered from:
 
 They use the database in the config file, or pass `-c "connection string"` to point one somewhere else.
 
+Run them through **`MolehillManager.cmd`**, not the `.exe`: a self-test's answer is its exit
+code, and your shell won't wait for the `.exe` long enough to read one.
+
 ```powershell
-MolehillManager.exe --selftest                      # read-only: every screen, agreement window and form
-MolehillManager.exe --selftest-write --allow-writes # submits every form: a TEST copy of MolehillAdmin only
-MolehillManager.exe --selftest-config               # config file handling and encryption (no database)
-MolehillManager.exe --selftest-setup SQL01          # the first-run settings screen, driven headlessly
-MolehillManager.exe --selftest-install SQL01        # create / install / upgrade scratch MolehillAdmin_selftest_* databases, then drops them
+.\MolehillManager.cmd --selftest                      # read-only: every screen, agreement window and form
+.\MolehillManager.cmd --selftest-write --allow-writes # submits every form: a TEST copy of MolehillAdmin only
+.\MolehillManager.cmd --selftest-config               # config file handling and encryption (no database)
+.\MolehillManager.cmd --selftest-setup SQL01          # the first-run settings screen, driven headlessly
+.\MolehillManager.cmd --selftest-install SQL01        # create / install / upgrade scratch MolehillAdmin_selftest_* databases, then drops them
 ```
