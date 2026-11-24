@@ -310,8 +310,11 @@ public static class Picker
     }
 }
 
-/// <summary>Shows what a procedure said: PRINT messages first, then any result sets as text tables.</summary>
-public static class Output
+/// <summary>
+///   Shows what a procedure said: PRINT messages first, then any result sets as text tables.
+///   This half is the terminal presentation; the formatting the other half does is shared.
+/// </summary>
+public static partial class Output
 {
     public static void Show(string title, ProcResult result)
     {
@@ -336,57 +339,4 @@ public static class Output
         dialog.Add(view);
         Application.Run(dialog);
     }
-
-    /// <summary>
-    ///   The columns worth showing. A leading underscore marks one a query carries for the code to
-    ///   branch on - a raw status, an id - rather than for anyone to read, so no screen prints it.
-    /// </summary>
-    public static IReadOnlyList<DataColumn> Shown(DataTable table) =>
-        table.Columns.Cast<DataColumn>().Where(c => !c.ColumnName.StartsWith('_')).ToList();
-
-    public static string TextTable(DataTable table, bool vertical = false)
-    {
-        var sb = new StringBuilder();
-        if (table.Rows.Count == 0) { sb.AppendLine("(no rows)"); return sb.ToString(); }
-        var shown = Shown(table);
-
-        // one row with many columns reads better as "Name : value" lines
-        if (vertical || (table.Rows.Count == 1 && shown.Count > 4))
-        {
-            var w = shown.Max(c => c.ColumnName.Length);
-            foreach (DataRow row in table.Rows)
-            {
-                foreach (var c in shown) sb.AppendLine($"{c.ColumnName.PadRight(w)} : {Format(c.ColumnName, row[c])}");
-                sb.AppendLine();
-            }
-            return sb.ToString();
-        }
-
-        var widths = shown
-            .Select(c => Math.Min(40, Math.Max(c.ColumnName.Length, table.Rows.Cast<DataRow>().Select(r => Format(c.ColumnName, r[c]).Length).DefaultIfEmpty(0).Max())))
-            .ToArray();
-        string Cell(string s, int w) => (s.Length > w ? s[..(w - 1)] + "…" : s).PadRight(w);
-        sb.AppendLine(string.Join("  ", shown.Select((c, i) => Cell(c.ColumnName, widths[i]))).TrimEnd());
-        sb.AppendLine(string.Join("  ", widths.Select(w => new string('-', w))));
-        foreach (DataRow row in table.Rows)
-            sb.AppendLine(string.Join("  ", shown.Select((c, i) => Cell(Format(c.ColumnName, row[c]), widths[i]))).TrimEnd());
-        return sb.ToString();
-    }
-
-    private static readonly HashSet<string> MoneyColumns = new(StringComparer.OrdinalIgnoreCase)
-        { "Fee", "MonthlyFee", "Total", "SubTotal", "VatAmount", "Amount", "Price", "UnitPrice", "TotalMonthlyFee" };
-
-    /// <summary>Formats a cell; money columns always show pence.</summary>
-    public static string Format(string column, object? value) =>
-        value is decimal m && MoneyColumns.Contains(column) ? m.ToString("N2", CultureInfo.InvariantCulture) : Format(value);
-
-    public static string Format(object? value) => value switch
-    {
-        null or DBNull => "",
-        DateTime d when d.TimeOfDay == TimeSpan.Zero => d.ToString("dd MMM yyyy", CultureInfo.InvariantCulture),
-        DateTime d => d.ToString("dd MMM yyyy HH:mm", CultureInfo.InvariantCulture),
-        decimal m => m.ToString("0.##", CultureInfo.InvariantCulture),
-        bool b => b ? "Yes" : "No",
-        _ => value.ToString()?.Replace("\r", " ").Replace("\n", " ") ?? ""
-    };
 }
