@@ -2,11 +2,11 @@ using Terminal.Gui;
 
 namespace MolehillManager;
 
-public enum SetupResult { Cancelled, Saved }
-
 /// <summary>
 /// The settings screen. Shown on first run, whenever the config file is missing something, when the
-/// connection fails, and from File > Settings. Everything it asks for is written to the config file.
+/// connection fails, and from File &gt; Settings. Everything it asks for is written to the config file.
+/// This is the layout and nothing else: what makes a setting acceptable, and what saving does, is in
+/// <see cref="Setup"/>, where the WPF screen and the self-test reach the same rules.
 /// </summary>
 public static class SetupDialog
 {
@@ -41,9 +41,9 @@ public static class SetupDialog
         var password = new TextField(config.Secret ?? "") { X = 20, Y = 16, Width = 34, Secret = true };
         var savePassword = new CheckBox("Remember it (encrypted for this Windows user)", c.SavePassword) { X = 20, Y = 17 };
 
-        var encrypt = new RadioGroup(new NStack.ustring[] { "Mandatory", "Optional", "Strict" })
+        var encrypt = new RadioGroup(Setup.EncryptOptions.Select(o => (NStack.ustring)o).ToArray())
         {
-            X = 58, Y = 4, SelectedItem = Math.Max(0, Array.IndexOf(new[] { "Mandatory", "Optional", "Strict" }, c.Encrypt))
+            X = 58, Y = 4, SelectedItem = Math.Max(0, Array.IndexOf(Setup.EncryptOptions, c.Encrypt))
         };
         var trust = new CheckBox("Trust server certificate", c.TrustServerCertificate) { X = 58, Y = 8 };
         var timeout = new TextField(c.ConnectTimeoutSeconds.ToString()) { X = 76, Y = 10, Width = 5 };
@@ -69,85 +69,56 @@ public static class SetupDialog
             var m = Method();
             user.Enabled = AppConfig.AllowsUser(m);
             password.Enabled = savePassword.Enabled = AppConfig.NeedsSecret(m);
-            hint.Text = m switch
-            {
-                "Windows" => "Signs in as the Windows account running Molehill Manager.",
-                "SqlLogin" => "SQL Server authentication: login name and password.",
-                "EntraInteractive" => "Opens a browser sign-in (MFA supported). User name is optional (pre-fills the prompt).",
-                "EntraPassword" => "Entra user name and password. Deprecated by Microsoft; does not work with MFA.",
-                "EntraServicePrincipal" => "App registration: its application (client) id and a client secret.",
-                "EntraManagedIdentity" => "Azure VMs only. Client id for a user-assigned identity; blank for system-assigned.",
-                _ => "Tries environment variables, managed identity, Azure CLI (az login), then a browser."
-            };
+            hint.Text = Setup.AuthHint(m);
         }
         auth.SelectedItemChanged += _ => Sync();
         Sync();
 
-        // read the screen into a copy, so Cancel leaves the config untouched
-        AppConfig? Read(out string? problem)
+        // what is on the screen, as typed. Setup.Examine decides what it is worth, on a copy, so
+        // Cancel - and Test - leave the config untouched.
+        SettingsDraft Draft() => new()
         {
-            problem = null;
-            var copy = new AppConfig
-            {
-                Connection = c.Clone(),
-                OutputFolder = output.Text.ToString()?.Trim() ?? "",
-                AutoRefreshMinutes = config.AutoRefreshMinutes,
-                Secret = password.Text.ToString()
-            };
-            var cc = copy.Connection;
-            cc.Server = server.Text.ToString()?.Trim() ?? "";
-            cc.Database = database.Text.ToString()?.Trim() ?? "";
-            cc.Authentication = Method();
-            cc.User = AppConfig.AllowsUser(cc.Authentication) ? user.Text.ToString()?.Trim() ?? "" : "";
-            cc.SavePassword = savePassword.Checked;
-            cc.Encrypt = encrypt.SelectedItem switch { 1 => "Optional", 2 => "Strict", _ => "Mandatory" };
-            cc.TrustServerCertificate = trust.Checked;
-            if (!int.TryParse(timeout.Text.ToString(), out var t) || t < 1 || t > 600) { problem = "Timeout must be 1 - 600 seconds."; return null; }
-            cc.ConnectTimeoutSeconds = t;
-            if (!int.TryParse(refresh.Text.ToString(), out var r) || r < 0 || r > 1440) { problem = "Auto refresh must be 0 - 1440 minutes."; return null; }
-            copy.AutoRefreshMinutes = r;
-            if (!AppConfig.NeedsSecret(cc.Authentication)) copy.Secret = null;
-
-            var missing = copy.Missing();
-            if (AppConfig.NeedsSecret(cc.Authentication) && string.IsNullOrEmpty(copy.Secret))
-                missing.Add(cc.Authentication == "EntraServicePrincipal" ? "client secret" : "password");
-            if (missing.Count > 0) { problem = "Still needed: " + string.Join(", ", missing) + "."; return null; }
-            return copy;
-        }
+            Server = server.Text.ToString() ?? "",
+            Database = database.Text.ToString() ?? "",
+            Authentication = Method(),
+            User = user.Text.ToString() ?? "",
+            Secret = password.Text.ToString() ?? "",
+            SavePassword = savePassword.Checked,
+            Encrypt = Setup.EncryptOptions[encrypt.SelectedItem],
+            TrustServerCertificate = trust.Checked,
+            Timeout = timeout.Text.ToString() ?? "",
+            OutputFolder = output.Text.ToString() ?? "",
+            AutoRefresh = refresh.Text.ToString() ?? ""
+        };
 
         test.Clicked += () =>
         {
-            var copy = Read(out var problem);
-            if (copy == null) { MessageBox.ErrorQuery("Settings", problem!, "Ok"); return; }
-            var check = AdminInstaller.Inspect(copy);
-            if (check.State == DbState.Ready) MessageBox.Query("Settings", $"Connected to {copy.Describe()}.", "Ok");
-            else if (check.CanInstall) MessageBox.Query("Settings", $"The server is reachable.\n\n{check.Message}\n\nPress Save and Molehill Manager will offer to do it.", "Ok");
-            else MessageBox.ErrorQuery("Could not connect", check.Message, "Ok");
+            var examined = Setup.Examine(Draft(), config);
+            switch (examined.Verdict)
+            {
+                case SaveVerdict.Invalid:
+                    MessageBox.ErrorQuery("Settings", examined.Problem!, "Ok");
+                    break;
+                case SaveVerdict.Ready:
+                    MessageBox.Query("Settings", $"Connected to {examined.Candidate!.Describe()}.", "Ok");
+                    break;
+                case SaveVerdict.CanInstall:
+                    MessageBox.Query("Settings", $"The server is reachable.\n\n{examined.Database!.Message}\n\nPress Save and Molehill Manager will offer to do it.", "Ok");
+                    break;
+                default:
+                    MessageBox.ErrorQuery("Could not connect", examined.Database!.Message, "Ok");
+                    break;
+            }
         };
 
         save.Clicked += () =>
         {
-            var copy = Read(out var problem);
-            if (copy == null) { MessageBox.ErrorQuery("Settings", problem!, "Ok"); return; }
-            var check = AdminInstaller.Inspect(copy);
-            if (check.State != DbState.Ready && !check.CanInstall
-                && MessageBox.ErrorQuery("Could not connect", check.Message + "\n\nSave these settings anyway?", "Keep editing", "Save anyway") != 1) return;
-            try
-            {
-                Directory.CreateDirectory(copy.OutputFolder);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.ErrorQuery("Output folder", $"Could not create {copy.OutputFolder}:\n{ex.Message}", "Ok");
-                return;
-            }
-            config.Connection = copy.Connection;
-            config.OutputFolder = copy.OutputFolder;
-            config.AutoRefreshMinutes = copy.AutoRefreshMinutes;
-            config.Secret = copy.Secret;
-            config.SecretUnreadable = false;
-            try { ConfigStore.Save(path, config); }
-            catch (Exception ex) { MessageBox.ErrorQuery("Settings", $"Could not write {path}:\n{ex.Message}", "Ok"); return; }
+            var examined = Setup.Examine(Draft(), config);
+            if (examined.Verdict == SaveVerdict.Invalid) { MessageBox.ErrorQuery("Settings", examined.Problem!, "Ok"); return; }
+            if (examined.Verdict == SaveVerdict.Unreachable
+                && MessageBox.ErrorQuery("Could not connect", examined.Database!.Message + "\n\nSave these settings anyway?", "Keep editing", "Save anyway") != 1) return;
+            var error = Setup.Commit(config, path, examined.Candidate!);
+            if (error != null) { MessageBox.ErrorQuery("Settings", error, "Ok"); return; }
             outcome = SetupResult.Saved;
             Application.RequestStop();
         };
@@ -175,11 +146,9 @@ public static class SetupDialog
         {
             var value = field.Text.ToString() ?? "";
             if (value == "") { MessageBox.ErrorQuery("Sign in", $"Type the {what.ToLowerInvariant()}.", "Ok"); return; }
-            config.Secret = value;
-            var check = AdminInstaller.Inspect(config);
-            if (check.State == DbState.Error) { config.Secret = null; MessageBox.ErrorQuery("Could not connect", check.Message, "Ok"); return; }
-            c.SavePassword = remember.Checked;
-            try { ConfigStore.Save(path, config); } catch (Exception ex) { MessageBox.ErrorQuery("Settings", $"Could not write {path}:\n{ex.Message}", "Ok"); }
+            var tried = Setup.TrySecret(config, path, value, remember.Checked);
+            if (!tried.Worked) { MessageBox.ErrorQuery("Could not connect", tried.Problem!, "Ok"); return; }
+            if (tried.WriteProblem != null) MessageBox.ErrorQuery("Settings", tried.WriteProblem, "Ok");
             secret = value;
             Application.RequestStop();
         };
@@ -187,5 +156,43 @@ public static class SetupDialog
         cancel.Clicked += () => Application.RequestStop();
         Application.Run(dialog);
         return secret;
+    }
+}
+
+/// <summary>
+///   Start-up's questions, asked in the terminal. This is the whole of what the Terminal.Gui front
+///   end contributes to starting up; <see cref="Startup.Connect"/> holds the decisions.
+/// </summary>
+public sealed class TerminalPrompts : IStartupPrompts
+{
+    public SetupResult AskSettings(AppConfig config, string path, string why) => SetupDialog.Show(config, path, why);
+
+    public string? AskSecret(AppConfig config, string path, string prompt) => SetupDialog.AskSecret(config, path, prompt);
+
+    public int Choose(string title, string message, params string[] buttons) =>
+        MessageBox.Query(title, message, buttons.Select(b => (NStack.ustring)b).ToArray());
+
+    public void ShowText(string title, string text) => Output.Text(title, text);
+
+    public void RunForm(FormSpec spec) => Ui.Try(spec.Title, () => Ui.Form(spec, null));
+
+    /// <summary>Runs the install with a progress window. Returns null on success, or the full error.</summary>
+    public string? RunInstall(AppConfig config, out List<string> messages)
+    {
+        var collected = new List<string>();
+        string? error = null;
+        var label = new Label("Starting...") { X = 1, Y = 1, Width = Dim.Fill(1) };
+        var dialog = new Dialog($"Installing MolehillAdmin into [{config.Connection.Database}]", 72, 7);
+        dialog.Add(label, new Label("This takes a few seconds.") { X = 1, Y = 3, ColorScheme = Colors.Menu });
+        var worker = Task.Run(() =>
+        {
+            try { collected = AdminInstaller.Install(config, s => Application.MainLoop?.Invoke(() => label.Text = s)); }
+            catch (Exception ex) { error = ex is InvalidOperationException ? ex.Message : AdminDb.Describe(ex); }
+            finally { Application.MainLoop?.Invoke(() => Application.RequestStop(dialog)); }
+        });
+        Application.Run(dialog);
+        worker.Wait();
+        messages = collected;
+        return error;
     }
 }

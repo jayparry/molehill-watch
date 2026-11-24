@@ -1,4 +1,4 @@
-using System.Data;
+﻿using System.Data;
 using Terminal.Gui;
 
 namespace MolehillManager;
@@ -167,66 +167,220 @@ public static class SelfTest
         Directory.CreateDirectory(folder);
         var path = Path.Combine(folder, ConfigStore.FileName);
         File.WriteAllText(path, "{ \"Connection\": { \"Database\": \"MolehillAdmin\", \"Authentication\": \"Windows\" } }");
-        var shownReason = "";
-        var others = new List<string>();
-        Application.Init(new FakeDriver(), null);
+        var outFolder = Path.Combine(folder, "out");
         try
         {
             var config = ConfigStore.Load(path, out var existed);
             Check("config without a server is incomplete", config.Missing().SequenceEqual(new[] { "server", "output folder" }), string.Join(", ", config.Missing()));
 
-            View? handled = null;
-            Application.Iteration += () =>
+            // no Application, no driver: start-up asks through IStartupPrompts and nothing else
+            var prompts = new ScriptedPrompts
             {
-                var current = Application.Current;
-                if (current == null || current == handled) return;
-                handled = current;
-                if (current is Dialog d && d.Title.ToString() == "Molehill Manager settings")
-                {
-                    var labels = All<Label>(d).ToList();
-                    shownReason = labels.First().Text.ToString() ?? "";
-                    var fields = All<TextField>(d).ToList();          // server, database, user, password, timeout, output, refresh
-                    fields[0].Text = server;
-                    fields[5].Text = Path.Combine(folder, "out");
-                    All<Button>(d).First(b => b.Text.ToString()!.Contains("Save")).OnClicked();
-                }
-                else
-                {
-                    others.Add(All<Label>(current).Select(l => l.Text.ToString()).FirstOrDefault(t => !string.IsNullOrWhiteSpace(t)) ?? "(dialog)");
-                    Application.RequestStop(current);
-                }
+                // the server and folder are what is missing; the refresh is typed over to prove that
+                // a setting the file already had a value for is written back as changed
+                Fill = draft => { draft.Server = server; draft.OutputFolder = outFolder; draft.AutoRefresh = "7"; return draft; }
             };
 
-            var cs = Step("start-up asks, saves and connects", () => Startup.Connect(config, path, existed, forceSetup: false, loadFailed: false),
-                r => r != null ? null : "gave up: " + string.Join(" | ", others));
-            Check("settings screen said what was missing", shownReason.Contains("server"), shownReason);
-            Check("no other prompts on the way", others.Count == 0, string.Join(" | ", others));
+            var cs = Step("start-up asks, saves and connects (with no console of any kind)",
+                () => Startup.Connect(prompts, config, path, existed, forceSetup: false, loadFailed: false),
+                r => r != null ? null : "gave up: " + (prompts.Refused ?? prompts.Trail));
+            Check("settings screen said what was missing", prompts.Why?.Contains("server") == true, prompts.Why ?? "(never asked)");
+            Check("settings screen was handed what the file already said",
+                prompts.Offered?.Database == "MolehillAdmin" && prompts.Offered?.Server == "" && prompts.Offered?.Authentication == "Windows",
+                $"{prompts.Offered?.Server}/{prompts.Offered?.Database}/{prompts.Offered?.Authentication}");
+            Check("asked once, and nothing else", prompts.Seen.SequenceEqual(new[] { "settings" }), prompts.Trail);
             var saved = ConfigStore.Load(path, out _);
             Check("server written to the config file", saved.Connection.Server == server, saved.Connection.Server);
-            Check("output folder written and created", saved.OutputFolder == Path.Combine(folder, "out") && Directory.Exists(saved.OutputFolder), saved.OutputFolder);
+            Check("output folder written and created", saved.OutputFolder == outFolder && Directory.Exists(saved.OutputFolder), saved.OutputFolder);
+            Check("auto refresh written as typed", saved.AutoRefreshMinutes == 7, saved.AutoRefreshMinutes.ToString());
             Check("saved config is complete", saved.Missing().Count == 0 && !saved.NeedsSecretPrompt, string.Join(", ", saved.Missing()));
             Check("the file connects", ConfigStore.Check(saved.BuildConnectionString()) == null);
-            // exactly what Program does next, after the start-up dialogs have run: build the main screen and run it
-            Step("main window builds after the start-up dialogs (as the app does)", () =>
+
+            // the rules the screen no longer owns, now that a test can reach them
+            SettingsDraft Good() => new()
             {
-                var top = new MainWindow(new AdminDb(cs!), path, () => null, () => 0).CreateTop();
-                Check("main screen has the menu, tabs and status bar", top.Subviews.Count >= 3, top.Subviews.Count.ToString());
-                Application.Run(top);                          // the test's handler closes it again
-                return 0;
-            });
+                Server = server, Database = "MolehillAdmin", Authentication = "Windows",
+                Encrypt = "Mandatory", Timeout = "15", OutputFolder = outFolder, AutoRefresh = "0"
+            };
+            // named in full: SelfTest.Setup(string) is this suite, and would win the lookup here
+            SaveCheck Examine(SettingsDraft draft) => MolehillManager.Setup.Examine(draft, saved);
+            var good = Examine(Good());
+            Check("a good draft is accepted and reaches the server", good.Verdict == SaveVerdict.Ready, good.Database?.Message ?? good.Problem ?? "");
+
+            SaveCheck Bad(Action<SettingsDraft> spoil) { var d = Good(); spoil(d); return Examine(d); }
+            void Rejected(string what, Action<SettingsDraft> spoil, string reasonHas)
+            {
+                var r = Bad(spoil);
+                Check($"rejected: {what}", r.Verdict == SaveVerdict.Invalid && r.Problem!.Contains(reasonHas), $"{r.Verdict} {r.Problem}");
+            }
+            Rejected("no server", d => d.Server = "   ", "server");
+            Rejected("no database", d => d.Database = "", "database");
+            Rejected("no output folder", d => d.OutputFolder = " ", "output folder");
+            Rejected("a sign-in method that does not exist", d => d.Authentication = "Telepathy", "sign-in method");
+            Rejected("an encryption setting that does not exist", d => d.Encrypt = "Sometimes", "encryption");
+            Rejected("a timeout that is not a number", d => d.Timeout = "soon", "1 - 600");
+            Rejected("a timeout of nothing", d => d.Timeout = "0", "1 - 600");
+            Rejected("a timeout of a lifetime", d => d.Timeout = "601", "1 - 600");
+            Rejected("auto refresh that is not a number", d => d.AutoRefresh = "often", "0 - 1440");
+            Rejected("auto refresh beyond a day", d => d.AutoRefresh = "1441", "0 - 1440");
+            Rejected("auto refresh going backwards", d => d.AutoRefresh = "-1", "0 - 1440");
+            Rejected("a SQL login with no user name", d => { d.Authentication = "SqlLogin"; d.Secret = "x"; }, "user name");
+            Rejected("a SQL login with no password", d => { d.Authentication = "SqlLogin"; d.User = "sa"; }, "password");
+            Rejected("a service principal with no client id", d => { d.Authentication = "EntraServicePrincipal"; d.Secret = "x"; }, "client id");
+            Rejected("a service principal with no secret", d => { d.Authentication = "EntraServicePrincipal"; d.User = "app"; }, "client secret");
+
+            var trimmed = Bad(d => { d.Server = $"  {server}  "; d.Database = " MolehillAdmin "; d.OutputFolder = $" {outFolder} "; });
+            Check("spaces either side of a server, database or folder are ignored",
+                trimmed.Candidate?.Connection.Server == server && trimmed.Candidate?.Connection.Database == "MolehillAdmin"
+                && trimmed.Candidate?.OutputFolder == outFolder,
+                $"'{trimmed.Candidate?.Connection.Server}' '{trimmed.Candidate?.Connection.Database}' '{trimmed.Candidate?.OutputFolder}'");
+
+            var unreachable = Bad(d => { d.Server = "no-such-server-molehill-test"; d.Timeout = "3"; });
+            Check("a server that is not there can be saved, but only on purpose",
+                unreachable.Verdict == SaveVerdict.Unreachable, unreachable.Verdict.ToString());
+
+            var windows = Bad(d => { d.Authentication = "Windows"; d.User = "ignored"; d.Secret = "ignored"; });
+            Check("Windows sign-in keeps no user name and no password",
+                windows.Candidate!.Connection.User == "" && windows.Candidate.Secret == null,
+                $"'{windows.Candidate.Connection.User}' / {windows.Candidate.Secret ?? "(none)"}");
+
+            var untouched = saved.Connection.Server;
+            Bad(d => { d.Server = "somewhere-else"; d.Database = ""; });     // invalid, so nothing is dialled
+            Check("examining a draft changes nothing", saved.Connection.Server == untouched, saved.Connection.Server);
+
+            // the hints are prose, so there is nothing to assert about their wording - but a hint
+            // that promises a password where none is asked for, or stays silent where one is, is wrong
+            foreach (var method in AppConfig.AuthMethods)
+            {
+                var hint = MolehillManager.Setup.AuthHint(method);
+                var promises = hint.Contains("password", StringComparison.OrdinalIgnoreCase) || hint.Contains("secret", StringComparison.OrdinalIgnoreCase);
+                Check($"sign-in hint: {method}", hint.Length > 20 && promises == AppConfig.NeedsSecret(method), hint);
+            }
+            Check("every sign-in method has its own hint",
+                AppConfig.AuthMethods.Select(MolehillManager.Setup.AuthHint).Distinct().Count() == AppConfig.AuthMethods.Length);
+
+            // the three ways out of start-up that no test has ever taken, now that a script can take them.
+            // A database name nothing could have created, so "Create MolehillAdmin" is what comes up.
+            AppConfig Fresh(string db) => new()
+            {
+                OutputFolder = outFolder,
+                Connection = { Server = server, Database = db, Authentication = "Windows", ConnectTimeoutSeconds = 15 }
+            };
+            var absent = Fresh("MolehillAdmin_selftest_never_created");
+            var missing = AdminInstaller.Inspect(absent);
+            Check("that database really is not there", missing.State == DbState.DatabaseMissing, missing.Message);
+            var installable = Bad(d => d.Database = absent.Connection.Database);
+            Check("settings for a database that could be created are not treated as a failure to connect",
+                installable.Verdict == SaveVerdict.CanInstall, $"{installable.Verdict} {installable.Database?.Message}");
+
+            var quit = new ScriptedPrompts { Answer = (_, _) => 2 };          // "Quit"
+            Check("Quit at the install offer creates nothing",
+                Startup.Connect(quit, absent, path, existed: true, forceSetup: false, loadFailed: false) == null
+                && quit.Seen.SequenceEqual(new[] { "Create MolehillAdmin" })
+                && AdminInstaller.Inspect(absent).State == DbState.DatabaseMissing, quit.Trail);
+
+            var settings = new ScriptedPrompts { Answer = (_, _) => 1 };      // "Settings..." - and then closed
+            Check("Settings at the install offer opens the settings screen, not the installer",
+                Startup.Connect(settings, absent, path, existed: true, forceSetup: false, loadFailed: false) == null
+                && settings.Seen.SequenceEqual(new[] { "Create MolehillAdmin", "settings" })
+                && AdminInstaller.Inspect(absent).State == DbState.DatabaseMissing, settings.Trail);
+
+            // a config that needs a password it has not got: the two ways that can end
+            var needsPassword = Fresh("MolehillAdmin");
+            needsPassword.Connection.Authentication = "SqlLogin";
+            needsPassword.Connection.User = "selftest-no-such-login";
+            Check("a SQL login with nothing saved asks for the password", needsPassword.NeedsSecretPrompt);
+
+            var gaveUp = new ScriptedPrompts { Secret = _ => null };
+            Check("giving up at the password prompt stops there",
+                Startup.Connect(gaveUp, needsPassword, path, existed: true, forceSetup: false, loadFailed: false) == null
+                && gaveUp.Seen.SequenceEqual(new[] { "password" }), gaveUp.Trail);
+
+            var wantsSettings = new ScriptedPrompts { Secret = _ => "" };     // the "Settings..." button
+            Check("Settings at the password prompt opens the full settings screen",
+                Startup.Connect(wantsSettings, needsPassword, path, existed: true, forceSetup: false, loadFailed: false) == null
+                && wantsSettings.Seen.SequenceEqual(new[] { "password", "settings" }), wantsSettings.Trail);
+            Check("and asks for settings, rather than complaining about a password nobody gave",
+                wantsSettings.Why?.Contains("Change the settings") == true, wantsSettings.Why ?? "(never asked)");
+
+            var refused = new ScriptedPrompts { Secret = _ => "not the password" };
+            Check("a password the server refuses is not saved and not kept",
+                Startup.Connect(refused, needsPassword, path, existed: true, forceSetup: false, loadFailed: false) == null
+                && needsPassword.Secret == null && refused.Refused != null, refused.Refused ?? refused.Trail);
+
+            // "Save anyway" on a server that never answers: the file is written, and start-up comes
+            // straight back for more rather than pretending it connected. Typed once, then closed.
+            var typed = 0;
+            var anyway = new ScriptedPrompts { SaveUnreachable = true };
+            anyway.Fill = d =>
+            {
+                if (typed++ > 0) return null;
+                d.Server = "no-such-server-molehill-test";
+                d.Timeout = "3";
+                d.OutputFolder = outFolder;
+                return d;
+            };
+            var anywayPath = Path.Combine(folder, "anyway.json");
+            var anywayConfig = new AppConfig { OutputFolder = "" };            // incomplete, so the screen opens
+            var anywayResult = Startup.Connect(anyway, anywayConfig, anywayPath, existed: false, forceSetup: false, loadFailed: false);
+            Check("settings for a server that is not there are written, and asked about again",
+                anywayResult == null && anyway.Seen.SequenceEqual(new[] { "settings", "settings" })
+                && File.Exists(anywayPath)
+                && ConfigStore.Load(anywayPath, out _).Connection.Server == "no-such-server-molehill-test",
+                anyway.Trail + " / " + (File.Exists(anywayPath) ? "written" : "not written"));
+            Check("and the second time it says it could not connect", anyway.Why?.Contains("Could not connect") == true, anyway.Why ?? "(never asked twice)");
+
+            // a password saved by another Windows user: once new settings are saved, the app must stop
+            // asking. Nothing cleared the flag before this was shared, and nothing would have noticed.
+            var strangePath = Path.Combine(folder, "strange.json");
+            var strange = new AppConfig
+            {
+                OutputFolder = outFolder,
+                Connection = { Server = server, Database = "MolehillAdmin", Authentication = "SqlLogin", User = "someone" }
+            };
+            ConfigStore.Save(strangePath, strange);
+            File.WriteAllText(strangePath, File.ReadAllText(strangePath)
+                .Replace("\"User\": \"someone\"", "\"User\": \"someone\",\n    \"PasswordEncrypted\": \"" + Convert.ToBase64String(new byte[64]) + "\""));
+            var unreadable = ConfigStore.Load(strangePath, out _);
+            Check("a password encrypted by someone else is noticed", unreadable.SecretUnreadable && unreadable.NeedsSecretPrompt);
+            var over = new ScriptedPrompts
+            {
+                Fill = d => { d.Authentication = "Windows"; d.Server = server; d.OutputFolder = outFolder; return d; }
+            };
+            Check("saving new settings over it stops the app asking for that password",
+                Startup.Connect(over, unreadable, strangePath, existed: true, forceSetup: true, loadFailed: false) != null
+                && !unreadable.SecretUnreadable && !unreadable.NeedsSecretPrompt
+                && !ConfigStore.Load(strangePath, out _).NeedsSecretPrompt,
+                over.Refused ?? over.Trail);
+
+            // exactly what Program does next, after the start-up questions: build the main screen and draw it
+            Application.Init(new FakeDriver(), null);
+            try
+            {
+                Step("main window builds and draws after start-up (as the app does)", () =>
+                {
+                    var top = new MainWindow(new AdminDb(cs!), path, () => null, () => 0).CreateTop();
+                    Check("main screen has the menu, tabs and status bar", top.Subviews.Count >= 3, top.Subviews.Count.ToString());
+                    top.Frame = new Rect(0, 0, 120, 40);
+                    Application.Driver.Clip = new Rect(0, 0, 120, 40);
+                    Render(top);                                   // draws it, with no main loop to get back out of
+                    return 0;
+                });
+            }
+            finally { Application.Shutdown(); }
+
             Console.WriteLine();
             Console.WriteLine(File.ReadAllText(path));
         }
         finally
         {
-            Application.Shutdown();
             try { Directory.Delete(folder, true); } catch { }
         }
         return Finish();
     }
 
     /// <summary>
-    /// Create / install / upgrade on a real server, through the start-up screens on a fake console. Uses (and then
+    /// Create / install / upgrade on a real server, driven through start-up by a script. Uses (and then
     /// drops) databases called MolehillAdmin_selftest_*; nothing else on the server is touched.
     /// </summary>
     public static int Install(string server)
@@ -237,33 +391,22 @@ public static class SelfTest
         var folder = Path.Combine(Path.GetTempPath(), "MolehillManager-installtest-" + stamp);
         Directory.CreateDirectory(folder);
         var path = Path.Combine(folder, ConfigStore.FileName);
-        var seen = new List<string>();
 
         AppConfig Config(string db) => new() { OutputFolder = folder, Connection = { Server = server, Database = db, Authentication = "Windows" } };
         var master = new AdminDb(new AppConfig { Connection = { Server = server, Database = "master" } }.BuildConnectionString());
 
-        Application.Init(new FakeDriver(), null);
-        View? handled = null;
-        Application.Iteration += () =>
+        // a person who says yes to installing and fills the business name in. No console, no driver:
+        // Fill is left null, so the settings screen opening at all would end the run and fail the step.
+        var prompts = new ScriptedPrompts
         {
-            var current = Application.Current;
-            if (current == null || current == handled || current is not Dialog d) return;
-            var title = d.Title.ToString() ?? "";
-            if (title.StartsWith("Installing")) return;                       // progress window: closes itself
-            handled = current;
-            seen.Add(title);
-            var buttons = All<Button>(d).ToList();
-            Button Press(params string[] names) => buttons.First(b => names.Any(n => b.Text.ToString()!.Contains(n)));
-            if (title is "Create MolehillAdmin" or "Install MolehillAdmin" or "Upgrade MolehillAdmin")
-                Press("Create and install", "Install", "Upgrade").OnClicked();
-            else if (title == "Business and invoice details" && All<TextField>(d).Any())
+            FillForm = spec =>
             {
-                All<TextField>(d).First().Text = "Selftest Services Ltd";
-                Press("Save").OnClicked();
+                var v = spec.NewValues();
+                v["BusinessName"] = "Selftest Services Ltd";
+                return v;
             }
-            else if (title == "Molehill Manager settings") Press("Cancel").OnClicked();   // unexpected: fail the step
-            else Press("Close", "Ok").OnClicked();
         };
+        var seen = prompts.Seen;
 
         try
         {
@@ -272,7 +415,7 @@ public static class SelfTest
             created.Add(a.Connection.Database);
             Check("missing database detected", AdminInstaller.Inspect(a).State == DbState.DatabaseMissing, AdminInstaller.Inspect(a).Message);
             ConfigStore.Save(path, a);
-            var cs = Step("start-up creates and installs it", () => Startup.Connect(a, path, existed: true, forceSetup: false, loadFailed: false),
+            var cs = Step("start-up creates and installs it", () => Startup.Connect(prompts, a, path, existed: true, forceSetup: false, loadFailed: false),
                 r => r != null ? null : "gave up; saw: " + string.Join(" | ", seen));
             Check("asked first, then showed the result and business details",
                 seen.Take(3).SequenceEqual(new[] { "Create MolehillAdmin", "MolehillAdmin installed", "Business and invoice details" }), string.Join(" | ", seen));
@@ -281,7 +424,10 @@ public static class SelfTest
             Check("business details saved", (adb.Scalar("SELECT Value FROM dbo.Setting WHERE Name = 'BusinessName'") as string) == "Selftest Services Ltd");
             Check("install recorded", Convert.ToInt32(adb.Scalar("SELECT COUNT(*) FROM dbo.InstallHistory")) >= 1);
             Check("standard price list seeded", Convert.ToInt32(adb.Scalar("SELECT COUNT(*) FROM dbo.PriceList")) >= 1);
-            Step("the app's screens work on it (after the install dialogs, as the app does)", () => { new MainWindow(adb, path, () => null, () => 0).CreateTop(); return 0; });
+            // the only part of this suite that needs a console at all, now that start-up does not
+            Application.Init(new FakeDriver(), null);
+            try { Step("the app's screens work on it (after the install, as the app does)", () => { new MainWindow(adb, path, () => null, () => 0).CreateTop(); return 0; }); }
+            finally { Application.Shutdown(); }
 
             // 2. an older MolehillAdmin (before the Azure SQL columns): upgrade keeps the data
             adb.Proc("dbo.usp_Client_Add", ("@ClientName", "Kept Ltd"));
@@ -293,7 +439,7 @@ public static class SelfTest
                 """);
             Check("older version detected", AdminInstaller.Inspect(a).State == DbState.NeedsUpgrade, AdminInstaller.Inspect(a).Message);
             seen.Clear();
-            Step("start-up upgrades it", () => Startup.Connect(a, path, existed: true, forceSetup: false, loadFailed: false),
+            Step("start-up upgrades it", () => Startup.Connect(prompts, a, path, existed: true, forceSetup: false, loadFailed: false),
                 r => r != null ? null : "gave up; saw: " + string.Join(" | ", seen));
             Check("upgrade asked for, no business details form", seen.FirstOrDefault() == "Upgrade MolehillAdmin" && !seen.Contains("Business and invoice details"), string.Join(" | ", seen));
             Check("upgraded and ready", AdminInstaller.Inspect(a).State == DbState.Ready);
@@ -319,7 +465,7 @@ public static class SelfTest
             master.Execute("CREATE DATABASE [" + b.Connection.Database.Replace("]", "]]") + "];");
             Check("empty database detected", AdminInstaller.Inspect(b).State == DbState.NotInstalled && AdminInstaller.Inspect(b).Message.Contains("empty"), AdminInstaller.Inspect(b).Message);
             seen.Clear();
-            Step("start-up installs into it", () => Startup.Connect(b, path, existed: true, forceSetup: false, loadFailed: false),
+            Step("start-up installs into it", () => Startup.Connect(prompts, b, path, existed: true, forceSetup: false, loadFailed: false),
                 r => r != null ? null : "gave up; saw: " + string.Join(" | ", seen));
             Check("installed and ready", AdminInstaller.Inspect(b).State == DbState.Ready);
 
@@ -338,7 +484,6 @@ public static class SelfTest
         }
         finally
         {
-            Application.Shutdown();
             SqlConnectionPools.Clear();
             foreach (var db in created)
             {
@@ -354,16 +499,7 @@ public static class SelfTest
     {
         public static void Clear() => Microsoft.Data.SqlClient.SqlConnection.ClearAllPools();
     }
-
-    private static IEnumerable<T> All<T>(View root) where T : View
-    {
-        foreach (var v in root.Subviews)
-        {
-            if (v is T t) yield return t;
-            foreach (var x in All<T>(v)) yield return x;
-        }
-    }
-
+
     /// <summary>Builds the main window, every agreement window and every form. Read-only.</summary>
     public static int Ui(AdminDb db)
     {
@@ -1219,5 +1355,93 @@ public static class SelfTest
         Console.WriteLine();
         Console.WriteLine(AgreementWindow.Summary(db, reference, includeInstances: true));
         return Finish();
+    }
+}
+
+/// <summary>
+///   Start-up's questions, answered by a script. The third implementation of
+///   <see cref="IStartupPrompts"/>, and the one that shows the other two are only presentation: it
+///   needs no console, no driver and no window, so the whole first-run path - missing settings, a
+///   password, create, install, upgrade - can be walked and then asked what it was asked, in order.
+/// </summary>
+internal sealed class ScriptedPrompts : IStartupPrompts
+{
+    /// <summary>Everything asked or shown, in the order it happened. This is what the tests assert on.</summary>
+    public readonly List<string> Seen = new();
+
+    /// <summary>The settings screen as it was handed over, before the script typed into it.</summary>
+    public SettingsDraft? Offered { get; private set; }
+
+    /// <summary>The sentence the settings screen was given, saying what brought it up.</summary>
+    public string? Why { get; private set; }
+
+    /// <summary>Why a save or a sign-in did not go through, when one did not.</summary>
+    public string? Refused { get; private set; }
+
+    /// <summary>Types into the settings screen. Returns null - or is left null - to close it instead.</summary>
+    public Func<SettingsDraft, SettingsDraft?>? Fill;
+
+    /// <summary>Answers the password prompt: a password, "" for "Settings...", or null to give up (the default).</summary>
+    public Func<string, string?>? Secret;
+
+    /// <summary>Picks a button, by title and message. Left null, the first one.</summary>
+    public Func<string, string, int>? Answer;
+
+    /// <summary>Fills a form in. Left null, the form is closed without submitting.</summary>
+    public Func<FormSpec, FormValues>? FillForm;
+
+    /// <summary>Whether to save settings the server would not answer for, as "Save anyway" does. Off by default.</summary>
+    public bool SaveUnreachable;
+
+    public string Trail => Seen.Count == 0 ? "(nothing asked)" : string.Join(" | ", Seen);
+
+    public SetupResult AskSettings(AppConfig config, string path, string why)
+    {
+        Seen.Add("settings");
+        Why = why;
+        Offered = SettingsDraft.From(config);           // a record of what was offered: a second draft,
+        if (Fill == null) return SetupResult.Cancelled;  // so a Fill that edits in place cannot rewrite it
+        var filled = Fill(SettingsDraft.From(config));
+        if (filled == null) return SetupResult.Cancelled;
+        var examined = Setup.Examine(filled, config);
+        if (examined.Verdict == SaveVerdict.Invalid) { Refused = examined.Problem; return SetupResult.Cancelled; }
+        if (examined.Verdict == SaveVerdict.Unreachable && !SaveUnreachable)
+        {
+            Refused = examined.Database!.Message;      // the screen's "Keep editing"
+            return SetupResult.Cancelled;
+        }
+        Refused = Setup.Commit(config, path, examined.Candidate!);
+        return Refused == null ? SetupResult.Saved : SetupResult.Cancelled;
+    }
+
+    public string? AskSecret(AppConfig config, string path, string prompt)
+    {
+        Seen.Add("password");
+        var value = Secret?.Invoke(prompt);
+        if (string.IsNullOrEmpty(value)) return value;            // null gave up, "" asked for the settings
+        var tried = Setup.TrySecret(config, path, value, remember: true);
+        Refused = tried.Problem ?? tried.WriteProblem;
+        return tried.Worked ? value : null;
+    }
+
+    public int Choose(string title, string message, params string[] buttons)
+    {
+        Seen.Add(title);
+        return Answer?.Invoke(title, message) ?? 0;
+    }
+
+    public void ShowText(string title, string text) => Seen.Add(title);
+
+    public string? RunInstall(AppConfig config, out List<string> messages)
+    {
+        messages = new List<string>();
+        try { messages = AdminInstaller.Install(config); return null; }
+        catch (Exception ex) { return ex is InvalidOperationException ? ex.Message : AdminDb.Describe(ex); }
+    }
+
+    public void RunForm(FormSpec spec)
+    {
+        Seen.Add(spec.Title);
+        if (FillForm != null) spec.Execute(FillForm(spec));
     }
 }

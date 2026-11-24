@@ -145,14 +145,15 @@ try
         try { File.Copy(path, backup, overwrite: true); } catch { /* unreadable or locked: nothing to keep */ }
     }
 
-    var connectionString = Startup.Connect(config, path, existed, forceSetup, loadProblem != null);
+    var prompts = new TerminalPrompts();
+    var connectionString = Startup.Connect(prompts, config, path, existed, forceSetup, loadProblem != null);
     if (connectionString == null) return 0;
     AdminForms.OutputFolder = config.OutputFolder;
 
     var main = new MainWindow(new AdminDb(connectionString), path, () =>
     {
         // File > Settings: edit, save, reconnect
-        var cs = Startup.Connect(config, path, existed: true, forceSetup: true, loadFailed: false);
+        var cs = Startup.Connect(prompts, config, path, existed: true, forceSetup: true, loadFailed: false);
         if (cs == null) return null;
         AdminForms.OutputFolder = config.OutputFolder;
         return new AdminDb(cs);
