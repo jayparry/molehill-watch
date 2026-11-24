@@ -206,20 +206,17 @@ public sealed class MainWindow
 
     private void RefreshDashboard()
     {
-        var r = _db.Proc("dbo.usp_Dashboard");
-        if (r.Tables.Count > 0) Grid.Bind(_alerts, r.Tables[0]);
+        var d = Queries.Dashboard(_db);
+        Grid.Bind(_alerts, d.Alerts);
         var sb = new StringBuilder();
-        // the last result set is the money summary, whatever else the dashboard returns
-        var money = r.Tables.LastOrDefault(t => t.Columns.Contains("MonthlyRecurringRevenue"));
-        if (money is { Rows.Count: > 0 })
+        if (d.Money != null)
         {
-            var m = money.Rows[0];
-            sb.AppendLine($" Monthly recurring revenue £{m["MonthlyRecurringRevenue"]:N2}     Draft invoices £{m["DraftInvoicesTotal"]:N2}");
-            sb.AppendLine($" Sent, unpaid £{m["UnpaidSentTotal"]:N2}     Overdue £{m["OverdueTotal"]:N2}     Paid this year £{m["PaidThisYear"]:N2}");
-            if (m.Table.Columns.Contains("UnbilledConsultancy"))
-                sb.AppendLine($" Consultancy logged but not yet invoiced £{m["UnbilledConsultancy"]:N2}");
+            sb.AppendLine($" Monthly recurring revenue £{d.Amount("MonthlyRecurringRevenue"):N2}     Draft invoices £{d.Amount("DraftInvoicesTotal"):N2}");
+            sb.AppendLine($" Sent, unpaid £{d.Amount("UnpaidSentTotal"):N2}     Overdue £{d.Amount("OverdueTotal"):N2}     Paid this year £{d.Amount("PaidThisYear"):N2}");
+            if (d.Amount("UnbilledConsultancy") is { } unbilled)
+                sb.AppendLine($" Consultancy logged but not yet invoiced £{unbilled:N2}");
         }
-        if (r.Tables.Count > 1) sb.AppendLine($" Open tickets: {r.Tables[1].Rows.Count}");
+        sb.AppendLine($" Open tickets: {d.OpenTicketCount}");
         _money.Text = sb.ToString();
     }
 
@@ -396,8 +393,7 @@ public sealed class MainWindow
         var result = FormDialog.Show(spec);
         if (result == null) return;
         RefreshAll();
-        var created = result.Tables.SelectMany(t => t.Rows.Cast<DataRow>())
-            .Select(r => r.Table.Columns.Contains("AgreementRef") ? r["AgreementRef"] as string : null).LastOrDefault(r => r != null);
+        var created = AdminForms.CreatedAgreementRef(result);
         if (created != null && MessageBox.Query("New client", $"Agreement {created} created. Open it now to add the instances?", "Open", "Later") == 0)
             new AgreementWindow(_db, created).Run();
         RefreshAll();

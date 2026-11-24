@@ -39,6 +39,45 @@ public static class Queries
             WHERE c.ClientName = @Client ORDER BY CASE WHEN a.EndDate IS NULL THEN 0 ELSE 1 END, a.StartDate DESC;
             """, ("@Client", clientName)) as string;
 
+    /// <summary>
+    ///   What the agreement's covered instances come to a month, as the database works it out for
+    ///   the Clients tab and for the dashboard. The summary used to add the Fee column up itself,
+    ///   which was a second implementation of a figure that goes on invoices.
+    /// </summary>
+    public static decimal AgreementMonthlyFee(AdminDb db, string agreementRef) =>
+        db.Scalar("""
+            DECLARE @Today date = CAST(dbo.fn_UkNow() AS date);
+            SELECT ISNULL((SELECT SUM(f.MonthlyFee) FROM dbo.fn_AgreementFees(a.AgreementId,
+                               CASE WHEN a.StartDate > @Today THEN a.StartDate ELSE @Today END) f), 0)
+            FROM dbo.Agreement a WHERE a.AgreementRef = @Ref;
+            """, ("@Ref", agreementRef)) as decimal? ?? 0m;
+
+    /// <summary>Included hours used this cycle. The screens ask through here, not by name.</summary>
+    public static ProcResult AgreementUsage(AdminDb db, string agreementRef) =>
+        db.Proc("dbo.usp_Agreement_Usage", ("@Client", agreementRef));
+
+    /// <summary>The onboarding checklist and version status.</summary>
+    public static ProcResult OnboardingShow(AdminDb db, string agreementRef) =>
+        db.Proc("dbo.usp_Onboarding_Show", ("@Client", agreementRef));
+
+    /// <summary>
+    ///   The dashboard's five result sets, each by name. The screen used to take the alerts from
+    ///   the first, the open-ticket count from the second's row count and the money from whichever
+    ///   set happened to carry a MonthlyRecurringRevenue column - three assumptions about the order
+    ///   a procedure returns things in, none of them written down.
+    /// </summary>
+    public static DashboardView Dashboard(AdminDb db)
+    {
+        var r = db.Proc("dbo.usp_Dashboard");
+        if (r.Tables.Count < 5)
+            throw new InvalidOperationException(
+                $"dbo.usp_Dashboard returned {r.Tables.Count} result sets, not the five expected "
+                + "(alerts, open tickets, agreements, engagements, money). The database may need upgrading.");
+        var money = r.Tables[4];
+        return new DashboardView(r.Tables[0], r.Tables[1], r.Tables[2], r.Tables[3],
+            money.Rows.Count > 0 ? money.Rows[0] : null);
+    }
+
     public static List<string> ClientNames(AdminDb db) =>
         db.Query("SELECT ClientName FROM dbo.Client ORDER BY ClientName;").Rows.Cast<DataRow>().Select(r => (string)r[0]).ToList();
 
@@ -349,4 +388,18 @@ public static class Queries
               AND (e.Status IN ('Active', 'OnHold') OR e.CompletedOn >= DATEADD(day, -90, CAST(dbo.fn_UkNow() AS date)))
             ORDER BY c.ClientName, CASE e.EngagementType WHEN 'Monitoring' THEN 0 ELSE 1 END, e.EngagementRef;
             """, ("@ConsultancyOnly", consultancyOnly)).Rows.Cast<DataRow>().Select(r => (string)r[0]).ToList();
+}
+
+/// <summary>
+///   What <c>dbo.usp_Dashboard</c> returns, named rather than numbered. Money is the one row of the
+///   last set, or null when the database has nothing to report yet.
+/// </summary>
+public sealed record DashboardView(
+    DataTable Alerts, DataTable OpenTickets, DataTable Agreements, DataTable Engagements, DataRow? Money)
+{
+    public int OpenTicketCount => OpenTickets.Rows.Count;
+
+    /// <summary>A money figure by name, or null when the database does not report it.</summary>
+    public decimal? Amount(string column) =>
+        Money is not null && Money.Table.Columns.Contains(column) && Money[column] is decimal d ? d : null;
 }

@@ -58,8 +58,16 @@ public static class Ui
         if (FormDialog.Show(spec) != null) refresh?.Invoke();
     }
 
+    /// <summary>
+    ///   Set by the self-test. A MessageBox under the fake driver waits for a keystroke that never
+    ///   arrives, so an error raised while a window was building its panes would hang the run
+    ///   instead of failing it - which it did, for forty minutes, before anyone noticed.
+    /// </summary>
+    internal static bool Headless;
+
     public static void Try(string title, Action action)
     {
+        if (Headless) { action(); return; }   // let it out, so the harness reports it
         try { action(); }
         catch (Exception ex) { MessageBox.ErrorQuery(title, ex is FormatException ? ex.Message : AdminDb.Describe(ex), "Ok"); }
     }

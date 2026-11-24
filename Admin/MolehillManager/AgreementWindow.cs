@@ -169,7 +169,7 @@ public sealed class AgreementWindow
         sb.AppendLine($"Invoices to: {(a["InvoicesTo"] is DBNull ? "NO ONE - add a contact that receives invoices (Contacts tab)" : F("InvoicesTo"))}" +
                       (a["Address"] is DBNull ? "" : $"   {F("Address")}"));
 
-        var usage = db.Proc("dbo.usp_Agreement_Usage", ("@Client", agreementRef));
+        var usage = Queries.AgreementUsage(db, agreementRef);
         if (usage.First is { Rows.Count: > 0 } u)
         {
             var r = u.Rows[0];
@@ -185,8 +185,8 @@ public sealed class AgreementWindow
         if (includeInstances)
         {
             var inst = Queries.Instances(db, agreementRef);
-            var fee = inst.Rows.Cast<DataRow>().Where(r => r["Fee"] is decimal).Sum(r => (decimal)r["Fee"]);
-            sb.AppendLine().AppendLine($"Instances (monthly fee £{fee:N2}):");
+            // the database works the monthly fee out for the Clients tab and the dashboard; one figure, one place
+            sb.AppendLine().AppendLine($"Instances (monthly fee £{Queries.AgreementMonthlyFee(db, agreementRef):N2}):");
             sb.Append(inst.Rows.Count == 0 ? "(none yet - open the agreement and press F2)\n" : Output.TextTable(inst));
             var contacts = Queries.Contacts(db, agreementRef).DefaultView.ToTable(false, "Name", "Email", "Phone", "Tickets", "Invoices", "From");
             sb.AppendLine().AppendLine("Contacts:");
@@ -356,7 +356,7 @@ public sealed class AgreementWindow
     }
 
     private void ShowOnboarding() =>
-        Ui.Try("Onboarding", () => Output.Show("Onboarding", _db.Proc("dbo.usp_Onboarding_Show", ("@Client", _ref))));
+        Ui.Try("Onboarding", () => Output.Show("Onboarding", Queries.OnboardingShow(_db, _ref)));
 
     private void AgreementActions()
     {
@@ -364,7 +364,7 @@ public sealed class AgreementWindow
         Picker.Actions(ActionRules.AgreementWide(_ref, paused), new Dictionary<string, Action>
         {
             ["agreement-review"] = () => Ui.Form(AdminForms.RecordReview(_db, _ref), Refresh),
-            ["agreement-usage"] = () => Ui.Try("Usage", () => Output.Show("Usage", _db.Proc("dbo.usp_Agreement_Usage", ("@Client", _ref)))),
+            ["agreement-usage"] = () => Ui.Try("Usage", () => Output.Show("Usage", Queries.AgreementUsage(_db, _ref))),
             ["onboarding-show"] = ShowOnboarding,
             ["ticket-new"] = () => Ui.Form(AdminForms.OpenTicket(_db, _ref), Refresh),
             ["agreement-quote"] = () => Ui.Form(AdminForms.AddQuote(_db, _ref), Refresh),

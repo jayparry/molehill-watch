@@ -8,7 +8,13 @@ public static class SelfTest
 {
     private static int _pass, _fail;
 
-    static SelfTest() => Console.OutputEncoding = System.Text.Encoding.UTF8;
+    static SelfTest()
+    {
+        Console.OutputEncoding = System.Text.Encoding.UTF8;
+        // errors come back as FAIL lines, not as a dialog nothing can dismiss. Named in full
+        // because SelfTest.Ui(AdminDb) is the read-only suite, and would win the lookup here.
+        MolehillManager.Ui.Headless = true;
+    }
 
     private static void Check(string name, bool ok, string detail = "")
     {
@@ -510,7 +516,19 @@ public static class SelfTest
     {
         RunRules();
         Step("main window builds and loads every tab", () => { new MainWindow(db).CreateTop(); return 0; });
-        Step("dashboard returns its 5 result sets", () => db.Proc("dbo.usp_Dashboard"), r => r.Tables.Count == 5 ? null : $"{r.Tables.Count} sets");
+        // the dashboard's five result sets, each holding what its name says. The screen used to
+        // take them by position, so a sixth set or a reordering would have gone unremarked.
+        var dash = Step("dashboard returns its five result sets, named", () => Queries.Dashboard(db), d =>
+            !d.Alerts.Columns.Contains("Priority") ? "alerts are not the alerts"
+            : !d.OpenTickets.Columns.Contains("TicketRef") ? "open tickets are not the tickets"
+            : !d.Agreements.Columns.Contains("AgreementRef") ? "agreements are not the agreements"
+            : !d.Engagements.Columns.Contains("EngagementRef") ? "engagements are not the engagements"
+            : d.Money != null && d.Amount("MonthlyRecurringRevenue") == null ? "money has no recurring revenue in it"
+            : null);
+        if (dash != null)
+            Check("the dashboard's open-ticket count agrees with the Tickets tab",
+                dash.OpenTicketCount == Queries.Tickets(db, openOnly: true).Rows.Count,
+                $"dashboard {dash.OpenTicketCount}, tab {Queries.Tickets(db, openOnly: true).Rows.Count}");
 
         var engagements = Queries.Engagements(db, includeEnded: true);
         Check("engagements query", true, $"{engagements.Rows.Count} engagement(s)");
@@ -731,6 +749,10 @@ public static class SelfTest
                 ("ContactEmail", "pat@selftest.example"), ("ContactReceivesInvoices", "0"), ("StartDate", D(start)),
                 ("SignedDate", D(start.AddDays(-7))), ("AgreementRef", reference)),
             r => r.Tables.Any(t => t.Columns.Contains("AgreementRef") && t.Rows.Count == 1 && (string)t.Rows[0]["AgreementRef"] == reference) ? null : "agreement not returned");
+        // what the main window reads back to offer "open it now and add the instances"
+        Step("the agreement it created can be picked out of what it said", () => Submit(AdminForms.NewClient(db),
+                ("ClientName", name + " II"), ("StartDate", D(start)), ("AgreementRef", reference + "-II")),
+            r => AdminForms.CreatedAgreementRef(r) == reference + "-II" ? null : AdminForms.CreatedAgreementRef(r) ?? "(nothing)");
 
         ExpectError("duplicate client is refused before touching the database",
             () => Submit(AdminForms.NewClient(db), ("ClientName", name), ("StartDate", D(start))), "already exists");
@@ -1133,6 +1155,16 @@ public static class SelfTest
             static bool Off(MhActionSet s, string id, string reasonHas) =>
                 s.ById(id) is { Enabled: false, DisabledReason: { } why } && why.Contains(reasonHas, StringComparison.OrdinalIgnoreCase);
             static string Ids(MhActionSet s) => string.Join(" ", s.Actions.Select(a => a.Enabled ? a.Id : $"({a.Id})"));
+
+            // the monthly fee, three ways: the figure the summary prints, the instances it lists,
+            // and what the dashboard reports for the same agreement. The summary used to add the
+            // Fee column up in the screen, which was a second implementation of invoiced money.
+            var fee = Queries.AgreementMonthlyFee(db, reference);
+            var listed = Queries.Instances(db, reference).Rows.Cast<DataRow>().Where(r => r["Fee"] is decimal).Sum(r => (decimal)r["Fee"]);
+            var reported = Queries.Dashboard(db).Agreements.Rows.Cast<DataRow>()
+                .Where(r => (string)r["AgreementRef"] == reference).Select(r => r["MonthlyFee"] as decimal?).FirstOrDefault();
+            Check("the monthly fee is the instances' fees added up", fee > 0m && fee == listed, $"fee £{fee}, instances £{listed}");
+            Check("and it is the figure the dashboard reports", fee == reported, $"fee £{fee}, dashboard £{reported}");
 
             Check("a draft invoice is known to be one", Queries.IsDraftInvoice(db, typedNo));
             Check("an invoice that has been sent and paid is not", !Queries.IsDraftInvoice(db, invoice));

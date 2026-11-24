@@ -124,6 +124,16 @@ public static class AdminForms
 
     // ------------------------------------------------------------------ clients and agreements
 
+    /// <summary>
+    ///   The agreement a submission created, if it said so. The procedures make up the reference
+    ///   when the form leaves it blank, and report it back in a result set; which set that is
+    ///   depends on what else the procedure had to say, so take the last one that names it.
+    /// </summary>
+    public static string? CreatedAgreementRef(ProcResult result) =>
+        result.Tables.SelectMany(t => t.Rows.Cast<DataRow>())
+            .Select(r => r.Table.Columns.Contains("AgreementRef") ? r["AgreementRef"] as string : null)
+            .LastOrDefault(r => r != null);
+
     public static FormSpec NewClient(AdminDb db)
     {
         var priceLists = new[] { LatestStandard }.Concat(Queries.PriceLists(db)).ToArray();
