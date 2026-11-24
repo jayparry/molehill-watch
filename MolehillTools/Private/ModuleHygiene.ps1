@@ -61,6 +61,15 @@ function Get-MhNameClaim([string] $Kind) {
     return $claims
 }
 
+function Get-MhFileUrl([string] $Path) {
+    $ast = Get-MhFileAst $Path
+    @($ast.FindAll({
+                $args[0] -is [System.Management.Automation.Language.StringConstantExpressionAst] -or
+                $args[0] -is [System.Management.Automation.Language.ExpandableStringExpressionAst] }, $true) |
+        ForEach-Object { $_.Extent.Text.Trim("'`"") } |
+        Where-Object { $_ -match '^https?://' } | Sort-Object -Unique)
+}
+
 function Get-MhFormatMistake([object[]] $File) {
     # $list.Add('{0} {1}' -f $a, $b) hands $b to Add rather than to -f, because inside a method call
     # a comma separates arguments: the format string is left with one value and writes the first of
@@ -188,6 +197,29 @@ Register-MhSelfTest -Name 'The module itself' -Test {
 
     $sorted = @($exported | Sort-Object)
     Test-MhCheck 'the export list is in order, so additions do not land anywhere' (-not (Compare-Object $exported $sorted -SyncWindow 0))
+
+    <#
+      Get-MhPatchStatus and Client\Update-PatchReference read the same two Microsoft sources. The
+      client script is standalone on purpose - it is copied to a client's jump box on its own and
+      cannot call into the module - so there are two copies of that downloading, and nothing noticed
+      when one was fixed and the other was not: the SQL Server build list moved out of a public
+      GitHub repository into the rendered article, the module was changed to read the article, and
+      the client script went on asking GitHub, so -UpdatePatchReference answered 404 until someone
+      ran it. Comparing the addresses catches that, and the addresses are the whole of what drifted.
+    #>
+    $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+    $client = Join-Path $repo 'Client\Update-PatchReference.ps1'
+    if (-not (Test-Path -LiteralPath $client)) {
+        Test-MhSkip 'the client copy of the patch sources' 'no Client folder beside the module'
+    }
+    else {
+        Test-MhSection 'the two copies of the patch reference download'
+        $ours = @(Get-MhFileUrl (Join-Path $repo 'MolehillTools\Public\Get-MhPatchStatus.ps1'))
+        $theirs = @(Get-MhFileUrl $client)
+        $gone = @($theirs | Where-Object { $ours -notcontains $_ })
+        Test-MhCheck 'the module still asks Microsoft for the build data' ($ours.Count -ge 2) "$($ours.Count) addresses"
+        Test-MhCheck 'and the client script asks for nothing the module has stopped asking for' (-not $gone.Count) ($gone -join ', ')
+    }
 
     # the shims in Tools\ are the other half of this: the module never loads them, so nothing else
     # would notice one that stopped parsing or went back to re-importing the module underneath its

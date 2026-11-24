@@ -6,7 +6,7 @@
 .DESCRIPTION
     Sources (both published by Microsoft):
       * SQL Server: every CU and GDR build, KB and release date, from the "Latest updates and version
-        history for SQL Server" article (MicrosoftDocs/SupportArticles-docs on GitHub).
+        history for SQL Server" article on Microsoft Learn.
       * Windows Server 2016/2019/2022/2025: the OS build that contains each month's security update,
         from the Microsoft Security Response Center (MSRC) CVRF API.
 
@@ -58,37 +58,62 @@ function ConvertFrom-BigJson([string]$Text) {
     return ,$ser.DeserializeObject($Text)
 }
 
-function Get-SqlServerBuilds {
-    $url = 'https://raw.githubusercontent.com/MicrosoftDocs/SupportArticles-docs/main/support/sql/releases/download-and-install-latest-updates.md'
-    Write-Host "Downloading SQL Server build list from Microsoft..."
-    $lines = (Get-Text $url) -split "`r?`n"
+<#
+  Pulls the build rows out of the rendered article: one section per product, five cells per row.
+
+  Separate from the downloading so that it can be checked against a saved copy of the page with no
+  network, which is the only part of this that is ours to get wrong.
+#>
+function Get-SqlBuildsFromHtml([string] $Html) {
     $culture = [Globalization.CultureInfo]::InvariantCulture
-    $product = $null
     $rows = New-Object System.Collections.Generic.List[object]
-    foreach ($line in $lines) {
-        if ($line -match '^###\s+SQL Server (\d{4})(\s+R2)?\s*$') {
-            $product = if ($Matches[2] -or [int]$Matches[1] -lt 2012) { $null } else { "SQL Server $($Matches[1])" }
-            continue
+
+    # one section per product, from its heading to the next heading of any kind
+    $headings = [regex]::Matches($Html, '<h([23])[^>]*id="sql-server-(\d{4})(-r2)?"[^>]*>')
+    for ($h = 0; $h -lt $headings.Count; $h++) {
+        $year = [int]$headings[$h].Groups[2].Value
+        if ($headings[$h].Groups[3].Value -or $year -lt 2012) { continue }
+        $product = "SQL Server $year"
+
+        $from = $headings[$h].Index + $headings[$h].Length
+        $next = [regex]::Match($Html.Substring($from), '<h[23][^>]*>')
+        $section = if ($next.Success) { $Html.Substring($from, $next.Index) } else { $Html.Substring($from) }
+
+        foreach ($row in [regex]::Matches($section, '<tr>\s*<td.*?</tr>', 'Singleline')) {
+            $cells = @([regex]::Matches($row.Value, '<td[^>]*>(.*?)</td>', 'Singleline') | ForEach-Object {
+                ($_.Groups[1].Value -replace '<br\s*/?>', ' ' -replace '<[^>]+>', '' -replace '&amp;', '&' -replace '&nbsp;', ' ' -replace '\s+', ' ').Trim()
+            })
+            if ($cells.Count -lt 5 -or $cells[0] -notmatch '^\d+\.\d+\.\d+\.\d+$') { continue }
+
+            $v = $cells[0].Split('.')
+            $update = $cells[2] -replace '\[([^\]]*)\]\([^)]*\)', '$1'
+            $kb = if ($cells[3] -match 'KB\s*(\d+)') { $Matches[1] } elseif ($cells[3] -match '(\d{6,7})') { $Matches[1] } else { $null }
+            $date = $null
+            $parsed = [datetime]::MinValue
+            if ([datetime]::TryParseExact(($cells[4] -replace '\s+', ' '), [string[]]@('MMMM dd, yyyy', 'MMMM d, yyyy'), $culture, 'None', [ref]$parsed)) { $date = $parsed.ToString('yyyy-MM-dd') }
+            $cu = if ($update -match '\bCU\s*(\d+)') { [int]$Matches[1] } else { $null }
+            $rows.Add([pscustomobject]@{
+                Product = 'SQL Server'; ProductName = $product; Major = [int]$v[0]; Minor = [int]$v[1]; BuildNumber = [int]$v[2]; Revision = [int]$v[3]
+                ServicePack = $cells[1]; UpdateName = $update; CuNumber = $cu; KB = $kb; ReleaseDate = $date; Source = 'Microsoft SQL Server build list'
+            })
         }
-        if ($line -match '^##\s' ) { $product = $null; continue }
-        if (-not $product -or $line -notmatch '^\|\s*(\d+)\.(\d+)\.(\d+)\.(\d+)\s*\|') { continue }
-        $cells = $line.Trim().Trim('|') -split '\|' | ForEach-Object { $_.Trim() }
-        if ($cells.Count -lt 5) { continue }
-        $v = $cells[0].Split('.')
-        $update = $cells[2] -replace '\[([^\]]*)\]\([^)]*\)', '$1'
-        $kb = if ($cells[3] -match 'KB\s*(\d+)') { $Matches[1] } elseif ($cells[3] -match '(\d{6,7})') { $Matches[1] } else { $null }
-        $date = $null
-        $parsed = [datetime]::MinValue
-        if ([datetime]::TryParseExact(($cells[4] -replace '\s+', ' '), [string[]]@('MMMM dd, yyyy', 'MMMM d, yyyy'), $culture, 'None', [ref]$parsed)) { $date = $parsed.ToString('yyyy-MM-dd') }
-        $cu = if ($update -match '\bCU\s*(\d+)') { [int]$Matches[1] } else { $null }
-        $rows.Add([pscustomobject]@{
-            Product = 'SQL Server'; ProductName = $product; Major = [int]$v[0]; Minor = [int]$v[1]; BuildNumber = [int]$v[2]; Revision = [int]$v[3]
-            ServicePack = $cells[1]; UpdateName = $update; CuNumber = $cu; KB = $kb; ReleaseDate = $date; Source = 'Microsoft SQL Server build list'
-        })
     }
+    return $rows.ToArray()
+}
+
+function Get-SqlServerBuilds {
+    Write-Host 'Downloading SQL Server build list from Microsoft...'
+    <#
+      The markdown this used to read is gone: the article's source moved into a private authoring
+      repository, so raw.githubusercontent.com returns 404 for it. The rendered article is the only
+      public copy of the complete version list now, and its tables have the same five columns in
+      the same order - build, service pack, update, KB, release date - so only the reading of them
+      changed, not what is made of them.
+    #>
+    $rows = @(Get-SqlBuildsFromHtml (Get-Text 'https://learn.microsoft.com/en-us/troubleshoot/sql/releases/download-and-install-latest-updates'))
     if ($rows.Count -lt 100) { throw "Only $($rows.Count) SQL Server builds were read - the Microsoft article format may have changed." }
     Write-Host "  $($rows.Count) SQL Server builds (2012 onwards)"
-    return $rows.ToArray()
+    return $rows
 }
 
 function Get-WindowsSecurityBuilds([int]$MonthCount) {
