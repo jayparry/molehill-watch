@@ -2,14 +2,24 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <Version>1.1.0</Version>
     <Product>Molehill Manager</Product>
     <Company>Molehill Data Services</Company>
-    <Description>Terminal front end for the MolehillAdmin database</Description>
+    <Description>Front end for the MolehillAdmin database</Description>
   </PropertyGroup>
+
+  <!--
+    The app has always been Windows-only in practice: the config file's password is encrypted with
+    DPAPI (Config.cs, CanProtect => OperatingSystem.IsWindows()). net8.0-windows says so, and is
+    what UseWPF needs. Terminal.Gui and Microsoft.Data.SqlClient are both fine on it.
+
+    InvariantGlobalization must never be turned on here to claw back size. FormValues parses dates
+    under en-GB (Forms.cs), so every one of the 41 forms would quietly change what it accepts.
+  -->
 
   <!-- dotnet publish -c Release -r win-x64 : one self-contained MolehillManager.exe, nothing to install -->
   <PropertyGroup Condition="'$(RuntimeIdentifier)' != ''">
@@ -17,8 +27,24 @@
     <PublishSingleFile>true</PublishSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
-    <DebugType>none</DebugType>
+    <!--
+      embedded, not none: a XAML failure arrives as a XamlParseException whose stack says nothing
+      useful without a PDB, and there is nowhere to go and fetch one from for a single file.
+      PublishTrimmed is not an option (WPF is not trim-safe) and ReadyToRun only adds.
+    -->
+    <DebugType>embedded</DebugType>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      A WPF project gets a different set of implicit usings from a plain console one: the SDK leaves
+      System.IO out, because System.Windows.Shapes.Path would then be ambiguous with System.IO.Path.
+      This app reads and writes files all over its non-UI code (the config file, the output folder,
+      invoice HTML), so it is put back. Any file that goes on to import the WPF shape or media
+      namespaces has to say which Path it means.
+    -->
+    <Using Include="System.IO" />
+  </ItemGroup>
 
   <ItemGroup>
     <!-- the app installs / upgrades MolehillAdmin itself when the configured database is missing or out of date -->
