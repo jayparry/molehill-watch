@@ -126,8 +126,10 @@ public static class AdminForms
 
     /// <summary>
     ///   The agreement a submission created, if it said so. The procedures make up the reference
-    ///   when the form leaves it blank, and report it back in a result set; which set that is
-    ///   depends on what else the procedure had to say, so take the last one that names it.
+    ///   when the form leaves it blank and report it back in a result set. Only one of the three
+    ///   that NewClient runs names it today - usp_Agreement_Create - and the self-test holds them
+    ///   to that, so there is nothing here to choose between. Should one ever report it twice, the
+    ///   later one is the one made last.
     /// </summary>
     public static string? CreatedAgreementRef(ProcResult result) =>
         result.Tables.SelectMany(t => t.Rows.Cast<DataRow>())

@@ -752,7 +752,11 @@ public static class SelfTest
         // what the main window reads back to offer "open it now and add the instances"
         Step("the agreement it created can be picked out of what it said", () => Submit(AdminForms.NewClient(db),
                 ("ClientName", name + " II"), ("StartDate", D(start)), ("AgreementRef", reference + "-II")),
-            r => AdminForms.CreatedAgreementRef(r) == reference + "-II" ? null : AdminForms.CreatedAgreementRef(r) ?? "(nothing)");
+            r => AdminForms.CreatedAgreementRef(r) != reference + "-II" ? AdminForms.CreatedAgreementRef(r) ?? "(nothing)"
+                 // one set names it, so which one is picked cannot matter. Say so here: if a
+                 // procedure ever reports the reference twice, this is where someone decides.
+                 : r.Tables.Count(t => t.Columns.Contains("AgreementRef")) is var named && named != 1
+                   ? $"{named} result sets name an agreement, so which one is read now matters" : null);
 
         ExpectError("duplicate client is refused before touching the database",
             () => Submit(AdminForms.NewClient(db), ("ClientName", name), ("StartDate", D(start))), "already exists");
