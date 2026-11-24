@@ -42,6 +42,8 @@ internal static class Program
                 case "--selftest": selfTest = true; break;
                 case "--selftest-write": selfTestWrite = true; break;
                 case "--selftest-config": selfTestConfig = true; break;
+                case "--selftest-gui":                          // build and lay out every view, no database
+                    return SelfTest.Gui();
                 case "--selftest-install":                      // create / install / upgrade test databases on this server, then drop them
                     if (++i < args.Length) return SelfTest.Install(args[i]);
                     break;

@@ -86,6 +86,18 @@ public sealed class AdminDb
         return result;
     }
 
+    /// <summary>
+    ///   What to put in front of a person when something failed. A FormatException is the app's own
+    ///   careful sentence about what they typed - "Covered from: 'soon' is not a date (use
+    ///   yyyy-mm-dd)" - so it is shown as it stands; anything else came from the database or the
+    ///   framework and goes through <see cref="Describe"/>.
+    ///
+    ///   One rule, in one place. It was written out separately in the terminal's Ui.Try and in its
+    ///   form dialog, and the window would have made a third copy.
+    /// </summary>
+    public static string Explain(Exception exception) =>
+        exception is FormatException ? exception.Message : Describe(exception);
+
     /// <summary>The complete error text, including every SQL error and inner exception.</summary>
     public static string Describe(Exception exception)
     {

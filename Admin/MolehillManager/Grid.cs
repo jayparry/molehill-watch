@@ -1,4 +1,4 @@
-using System.Data;
+﻿using System.Data;
 using System.Text;
 using Terminal.Gui;
 
@@ -69,7 +69,7 @@ public static class Ui
     {
         if (Headless) { action(); return; }   // let it out, so the harness reports it
         try { action(); }
-        catch (Exception ex) { MessageBox.ErrorQuery(title, ex is FormatException ? ex.Message : AdminDb.Describe(ex), "Ok"); }
+        catch (Exception ex) { MessageBox.ErrorQuery(title, AdminDb.Explain(ex), "Ok"); }
     }
 
     /// <summary>

@@ -1,4 +1,4 @@
-using System.Data;
+﻿using System.Data;
 using System.Globalization;
 using System.Text;
 using Terminal.Gui;
@@ -254,7 +254,7 @@ public static class FormDialog
             }
             catch (Exception ex)
             {
-                MessageBox.ErrorQuery(spec.Title, ex is FormatException ? ex.Message : AdminDb.Describe(ex), "Ok");
+                MessageBox.ErrorQuery(spec.Title, AdminDb.Explain(ex), "Ok");
             }
         };
         cancel.Clicked += () => Application.RequestStop();

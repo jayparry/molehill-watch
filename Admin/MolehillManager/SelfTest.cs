@@ -4,7 +4,7 @@ using Terminal.Gui;
 namespace MolehillManager;
 
 /// <summary>Headless checks: every screen and form against a real MolehillAdmin, with a fake console.</summary>
-public static class SelfTest
+public static partial class SelfTest
 {
     private static int _pass, _fail;
 
@@ -36,7 +36,7 @@ public static class SelfTest
         }
         catch (Exception ex)
         {
-            Check(name, false, (ex is FormatException ? ex.Message : AdminDb.Describe(ex)).Replace("\n", " | "));
+            Check(name, false, AdminDb.Explain(ex).Replace("\n", " | "));
             if (Environment.GetEnvironmentVariable("MM_TRACE") == "1") Console.WriteLine(ex);
             return default;
         }
@@ -148,6 +148,36 @@ public static class SelfTest
             // that --help, README.md and Admin/MolehillManager/README.md all still say otherwise
             Check("the default is still the terminal, as everything written down says",
                 Startup.Default == FrontEnd.Terminal, Startup.Default.ToString());
+
+            // which row a screen comes back to after a refresh. The terminal UI remembers the row
+            // number, so anything inserted above moves you to a different row without saying so;
+            // the window remembers the row.
+            static DataTable Rows(string column, params string[] values)
+            {
+                var t = new DataTable();
+                t.Columns.Add(column, typeof(string));
+                foreach (var v in values) t.Rows.Add(v);
+                return t;
+            }
+            var refs = Rows("Ref", "MW-0001", "MW-0002", "MW-0003");
+            Check("a Ref column identifies a row", RowKey.KeyColumn(refs) == "Ref", RowKey.KeyColumn(refs) ?? "(none)");
+            Check("and a row is remembered by it", RowKey.Of(refs, 1) == "MW-0002", RowKey.Of(refs, 1) ?? "(none)");
+            Check("a row inserted above does not move the selection",
+                RowKey.Reselect(Rows("Ref", "MW-0000", "MW-0001", "MW-0002", "MW-0003"), "MW-0002", 1) == 2,
+                RowKey.Reselect(Rows("Ref", "MW-0000", "MW-0001", "MW-0002", "MW-0003"), "MW-0002", 1).ToString());
+            Check("the row that was selected having gone, the number is used",
+                RowKey.Reselect(Rows("Ref", "MW-0001", "MW-0003"), "MW-0002", 1) == 1);
+            Check("an empty table selects nothing", RowKey.Reselect(Rows("Ref"), "MW-0002", 1) == -1);
+            Check("a column that repeats does not identify a row", RowKey.KeyColumn(Rows("Ref", "A", "A", "B")) == null);
+            Check("nor does one with a blank in it", RowKey.KeyColumn(Rows("Ref", "A", "", "B")) == null);
+            Check("a table with nothing identifying falls back to the row number",
+                RowKey.Reselect(Rows("Client", "x", "y", "z"), "x", 2) == 2);
+            Check("and a row number past the end is brought back in range",
+                RowKey.Reselect(Rows("Ref", "A", "B"), null, 9) == 1);
+            var both = Rows("Ticket", "MW-00001", "MW-00002");
+            both.Columns.Add("Ref", typeof(string));
+            both.Rows[0]["Ref"] = "A-1"; both.Rows[1]["Ref"] = "A-2";
+            Check("Ref is preferred to Ticket when a table has both", RowKey.KeyColumn(both) == "Ref", RowKey.KeyColumn(both) ?? "(none)");
 
             Application.Init(new FakeDriver(), null);
             try
