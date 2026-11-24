@@ -16,14 +16,21 @@ public static partial class Output
     public static IReadOnlyList<DataColumn> Shown(DataTable table) =>
         table.Columns.Cast<DataColumn>().Where(c => !c.ColumnName.StartsWith('_')).ToList();
 
+    /// <summary>
+    ///   Whether a table reads better as "Name : value" lines than as columns - one row with more
+    ///   columns than fit comfortably across. Shared so the window lays a result out the same way
+    ///   the terminal prints it, rather than deciding it again in WPF.
+    /// </summary>
+    public static bool ReadsBetterVertical(DataTable table) =>
+        table.Rows.Count == 1 && Shown(table).Count > 4;
+
     public static string TextTable(DataTable table, bool vertical = false)
     {
         var sb = new StringBuilder();
         if (table.Rows.Count == 0) { sb.AppendLine("(no rows)"); return sb.ToString(); }
         var shown = Shown(table);
 
-        // one row with many columns reads better as "Name : value" lines
-        if (vertical || (table.Rows.Count == 1 && shown.Count > 4))
+        if (vertical || ReadsBetterVertical(table))
         {
             var w = shown.Max(c => c.ColumnName.Length);
             foreach (DataRow row in table.Rows)

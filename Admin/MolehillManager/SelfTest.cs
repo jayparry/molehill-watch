@@ -179,27 +179,121 @@ public static partial class SelfTest
             both.Rows[0]["Ref"] = "A-1"; both.Rows[1]["Ref"] = "A-2";
             Check("Ref is preferred to Ticket when a table has both", RowKey.KeyColumn(both) == "Ref", RowKey.KeyColumn(both) ?? "(none)");
 
-            // The app's error policy, which both front ends share through AdminDb.Explain. Worth
-            // being exact about what the special case is for, because a mutation pass showed it
-            // changes nothing today: Describe of a FormatException with nothing inside it returns
-            // precisely the message, and every FormatException the app throws is bare. So the rule
-            // only bites when one carries an inner exception - which is what the third check below
-            // is, and without it, replacing Explain with Describe breaks no test at all.
-            var bare = new FormatException("Minutes: 'half an hour' is not a whole number.");
-            Check("what someone typed is shown as the app wrote it",
-                AdminDb.Explain(bare) == bare.Message, AdminDb.Explain(bare));
-            Check("and for a bare one that is the same as the full description",
-                AdminDb.Describe(bare) == bare.Message, AdminDb.Describe(bare));
-            var wrapped = new FormatException("Covered from: 'soon' is not a date (use yyyy-mm-dd).",
-                new InvalidOperationException("Sequence contains no elements"));
-            Check("a sentence about what was typed is not padded out with the detail underneath it",
-                AdminDb.Explain(wrapped) == wrapped.Message, AdminDb.Explain(wrapped));
-            Check("while the full description keeps that detail, for the places that want it",
-                AdminDb.Describe(wrapped).Contains("Sequence contains no elements"), AdminDb.Describe(wrapped));
-            var failed = new InvalidOperationException("The database is not there.", new IOException("the disk went away"));
-            Check("anything not about typing is described in full, inner exceptions and all",
-                AdminDb.Explain(failed) == AdminDb.Describe(failed) && AdminDb.Explain(failed).Contains("the disk went away"),
-                AdminDb.Explain(failed));
+            // In a Section for the same reason the GUI suite's parts are: a throw in here used
+            // to take the whole run down without printing a summary, so a mutation pass could
+            // not tell a failing check from a broken harness.
+            Section("the shared rules, the tree and the Today page", () =>
+            {
+                // The app's error policy, which both front ends share through AdminDb.Explain. Worth
+                // being exact about what the special case is for, because a mutation pass showed it
+                // changes nothing today: Describe of a FormatException with nothing inside it returns
+                // precisely the message, and every FormatException the app throws is bare. So the rule
+                // only bites when one carries an inner exception - which is what the third check below
+                // is, and without it, replacing Explain with Describe breaks no test at all.
+                var bare = new FormatException("Minutes: 'half an hour' is not a whole number.");
+                Check("what someone typed is shown as the app wrote it",
+                    AdminDb.Explain(bare) == bare.Message, AdminDb.Explain(bare));
+                Check("and for a bare one that is the same as the full description",
+                    AdminDb.Describe(bare) == bare.Message, AdminDb.Describe(bare));
+                var wrapped = new FormatException("Covered from: 'soon' is not a date (use yyyy-mm-dd).",
+                    new InvalidOperationException("Sequence contains no elements"));
+                Check("a sentence about what was typed is not padded out with the detail underneath it",
+                    AdminDb.Explain(wrapped) == wrapped.Message, AdminDb.Explain(wrapped));
+                Check("while the full description keeps that detail, for the places that want it",
+                    AdminDb.Describe(wrapped).Contains("Sequence contains no elements"), AdminDb.Describe(wrapped));
+                var failed = new InvalidOperationException("The database is not there.", new IOException("the disk went away"));
+                Check("anything not about typing is described in full, inner exceptions and all",
+                    AdminDb.Explain(failed) == AdminDb.Describe(failed) && AdminDb.Explain(failed).Contains("the disk went away"),
+                    AdminDb.Explain(failed));
+
+                // ---- the left-hand tree, with no window. What the app offers, and where you are in it.
+                static DataTable Work(params (string Client, string Ref, string Type, string What, string Raw)[] rows)
+                {
+                    var t = new DataTable();
+                    foreach (var c in new[] { "Ref", "Client", "Type", "What", "_EngagementType" }) t.Columns.Add(c, typeof(string));
+                    foreach (var r in rows) t.Rows.Add(r.Ref, r.Client, r.Type, r.What, r.Raw);
+                    return t;
+                }
+                var tree = Nav.Build(Work(
+                    ("Zeta Ltd", "MW-A-0007", "Molehill Watch", "2 instance(s) monitored", "Monitoring"),
+                    ("Acme Ltd", "MW-A-0003", "Molehill Watch", "4 instance(s) monitored", "Monitoring"),
+                    ("Acme Ltd", "C-0012", "Consultancy", "Upgrade to SQL Server 2022", "Consultancy")));
+                Check("the tree offers the same five places every time",
+                    tree.Select(n => n.Kind).SequenceEqual(new[]
+                        { NavKind.Today, NavKind.Clients, NavKind.Tickets, NavKind.Billing, NavKind.Settings }),
+                    string.Join(", ", tree.Select(n => n.Label)));
+                var clients = tree[1].Children;
+                Check("a client is one line however much work they have", clients.Count == 2,
+                    string.Join(", ", clients.Select(c => $"{c.Label} ({c.Children.Count})")));
+                Check("and they are in the order someone would look a name up in",
+                    clients.Select(c => c.Label).SequenceEqual(new[] { "Acme Ltd", "Zeta Ltd" }),
+                    string.Join(", ", clients.Select(c => c.Label)));
+                var acme = clients.First(c => c.Label == "Acme Ltd").Children;
+                Check("a support agreement is called what it is, not how many instances it has",
+                    acme.Any(n => n.Label == "Molehill Watch"), string.Join(", ", acme.Select(n => n.Label)));
+                Check("and a consultancy engagement is called by its project name",
+                    acme.Any(n => n.Label == "Upgrade to SQL Server 2022"), string.Join(", ", acme.Select(n => n.Label)));
+                Check("each one carries the raw type, so the page is picked from data and not from a label",
+                    acme.FirstOrDefault(n => n.Key == "C-0012")?.EngagementType == "Consultancy",
+                    acme.FirstOrDefault(n => n.Key == "C-0012")?.EngagementType ?? "(none)");
+                Check("the breadcrumb says where you are",
+                    Nav.Breadcrumb(tree, NavKind.Engagement, "C-0012") == "Clients › Acme Ltd › Upgrade to SQL Server 2022",
+                    Nav.Breadcrumb(tree, NavKind.Engagement, "C-0012"));
+                Check("for one of the fixed places it is just that place",
+                    Nav.Breadcrumb(tree, NavKind.Today) == "Today", Nav.Breadcrumb(tree, NavKind.Today));
+                Check("and something no longer in the tree has no breadcrumb rather than a made-up one",
+                    Nav.Breadcrumb(tree, NavKind.Engagement, "C-9999") == "",
+                    Nav.Breadcrumb(tree, NavKind.Engagement, "C-9999"));
+                Check("an engagement is found by its reference", Nav.Find(tree, NavKind.Engagement, "MW-A-0003") != null);
+                Check("the tree is there and navigable before any data is",
+                    Nav.Build(null).Count == 5 && Nav.Build(null)[1].Children.Count == 0);
+                Check("and a table without the columns it needs is treated as no data, not as a crash",
+                    Nav.Build(new DataTable()).Count == 5);
+                var wrongTable = new DataTable();
+                wrongTable.Columns.Add("Something", typeof(string));
+                wrongTable.Rows.Add("else");
+                Check("a table with rows but not the columns gives no clients, rather than one with no name",
+                    Nav.Build(wrongTable)[1].Children.Count == 0,
+                    string.Join(", ", Nav.Build(wrongTable)[1].Children.Select(c => $"'{c.Label}'")));
+
+                // ---- the Today page's figures
+                static DashboardView Dash(int openTickets, params (string Column, decimal Value)[] money)
+                {
+                    var tickets = new DataTable();
+                    tickets.Columns.Add("Ticket", typeof(string));
+                    for (var i = 1; i <= openTickets; i++) tickets.Rows.Add($"MW-{i:00000}");
+                    var m = new DataTable();
+                    foreach (var (column, _) in money) m.Columns.Add(column, typeof(decimal));
+                    if (money.Length > 0) m.Rows.Add(money.Select(x => (object)x.Value).ToArray());
+                    return new DashboardView(new DataTable(), tickets, new DataTable(), new DataTable(),
+                        m.Rows.Count > 0 ? m.Rows[0] : null);
+                }
+                var tiles = Today.Tiles(Dash(3,
+                    ("MonthlyRecurringRevenue", 4250m), ("DraftInvoicesTotal", 0m), ("UnpaidSentTotal", 1200.5m),
+                    ("OverdueTotal", 0m), ("PaidThisYear", 18400m), ("UnbilledConsultancy", 640m)));
+                Check("every figure the database reports is shown", tiles.Count == 7,
+                    string.Join(", ", tiles.Select(t => t.Label)));
+                Check("money shows the pence", tiles[0].Value == "£4,250.00", tiles[0].Value);
+                Check("and halves are not lost", tiles[2].Value == "£1,200.50", tiles[2].Value);
+                Check("the open tickets are counted, after the money",
+                    tiles[^1].Label == "Open tickets" && tiles[^1].Value == "3", tiles[^1].Value);
+                var some = Today.Tiles(Dash(0, ("MonthlyRecurringRevenue", 1m)));
+                Check("a figure the database does not report is left out, not shown as a bare pound sign",
+                    some.Count == 2 && some.All(t => t.Value != "£"), string.Join(", ", some.Select(t => $"{t.Label}={t.Value}")));
+                var quiet = Today.Tiles(Dash(2));
+                Check("with no money reported at all, the ticket count is still shown",
+                    quiet.Count == 1 && quiet[0].Value == "2", string.Join(", ", quiet.Select(t => t.Label)));
+
+                // the colours an alert gets, as palette keys. That these are the same colours the
+                // dashboard e-mail uses is checked against the install script itself, in --selftest-gui.
+                Check("a high alert is coloured as the dashboard the clients receive colours it",
+                    Today.AlertColour("High") == ("StatusRed", "StatusRedInk", true));
+                Check("and normal and low the same way",
+                    Today.AlertColour("Normal") == ("StatusAmber", "Ink", true)
+                    && Today.AlertColour("Low") == ("StatusInfo", "Ink", false));
+                Check("a priority nobody has heard of is left uncoloured rather than guessed at",
+                    Today.AlertColour("Critical") == null && Today.AlertColour(null) == null);
+            });
 
             Application.Init(new FakeDriver(), null);
             try

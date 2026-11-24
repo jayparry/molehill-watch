@@ -1,5 +1,6 @@
-using System.Data;
+﻿using System.Data;
 using System.Diagnostics;
+using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
@@ -137,6 +138,8 @@ public static partial class SelfTest
         Section("the grid", () => CheckGrid(watcher));
         Section("the toolbar", () => CheckToolbar(watcher));
         Section("the forms", () => CheckForms(watcher));
+        Section("what a procedure said", () => CheckResultView(watcher));
+        Section("the alert colours", CheckAlertColours);
         return Finish();
     }
 
@@ -317,6 +320,114 @@ public static partial class SelfTest
         boxes[0].Text = "   ";
         Check("a required field left blank is refused", form.Submit() == null);
         Check("and says which one", form.Problem?.Contains("Client name") == true, form.Problem ?? "");
+    }
+
+    /// <summary>
+    ///   The result view: the PRINT messages a procedure wrote, then its result sets. The messages
+    ///   are half of what the app does - every procedure in MolehillAdmin reports what it did with
+    ///   PRINT - so a screen that shows only rows is a screen that has thrown that away.
+    /// </summary>
+    private static void CheckResultView(BindingWatcher watcher)
+    {
+        var wide = new DataTable();
+        wide.Columns.Add("Ref", typeof(string));
+        wide.Columns.Add("Client", typeof(string));
+        wide.Columns.Add("Fee", typeof(decimal));
+        wide.Rows.Add("MW-A-0003", "Acme Ltd", 350m);
+        wide.Rows.Add("MW-A-0007", "Zeta Ltd", 180m);
+
+        var result = new ProcResult();
+        result.Messages.Add("Invoice MDS-INV-2026-0009 created, 3 lines.");
+        result.Messages.Add("Nothing else to bill.");
+        result.Tables.Add(wide);
+
+        watcher.Clear();
+        var view = new ResultView();
+        var host = new UserControl { Content = view };
+        Step("a result lays out with no window", () => { view.Show(result); Layout(host, 1000); return 0; });
+        Check("no binding warnings from the result view", watcher.Lines.Count == 0, string.Join(" | ", watcher.Lines.Take(2)));
+        Check("what the procedure said is shown, in the order it said it",
+            view.Messages.SequenceEqual(result.Messages), string.Join(" | ", view.Messages));
+        Check("and it is on the screen, not only in a list",
+            Texts(host).Contains("Invoice MDS-INV-2026-0009 created, 3 lines."), string.Join(" | ", Texts(host).Take(3)));
+        Check("the result set is a grid", view.Grids.Count == 1 && view.Grids[0].Table == wide);
+
+        // the same rule the terminal prints by, not a second opinion written in WPF
+        var one = new DataTable();
+        foreach (var c in new[] { "Priority", "Area", "Client", "Item", "Detail", "DueBy" }) one.Columns.Add(c, typeof(string));
+        one.Rows.Add("High", "Onboarding", "Acme Ltd", "Monitoring not set up", "No agent on SQL01", "31 Dec 2026");
+        var single = new ProcResult();
+        single.Tables.Add(one);
+        var narrow = new ResultView();
+        var narrowHost = new UserControl { Content = narrow };
+        Step("one row of many columns lays out", () => { narrow.Show(single); Layout(narrowHost, 1000); return 0; });
+        Check("one row with more columns than fit across is shown as lines, not as a grid",
+            narrow.Grids.Count == 0 && Output.ReadsBetterVertical(one));
+        Check("and every column of it is on the screen, named",
+            new[] { "Priority", "Detail", "No agent on SQL01" }.All(t => Texts(narrowHost).Contains(t)),
+            string.Join(" | ", Texts(narrowHost)));
+
+        var empty = new ProcResult();
+        empty.Tables.Add(new DataTable("nothing"));
+        var emptyView = new ResultView();
+        var emptyHost = new UserControl { Content = emptyView };
+        Step("an empty result set lays out", () => { emptyView.Show(empty); Layout(emptyHost, 800); return 0; });
+        Check("a result set with no rows says so rather than showing an empty box",
+            Texts(emptyHost).Contains("(no rows)"), string.Join(" | ", Texts(emptyHost)));
+
+        var silent = new ResultView();
+        var silentHost = new UserControl { Content = silent };
+        Step("a procedure that said nothing at all lays out", () => { silent.Show(new ProcResult()); Layout(silentHost, 800); return 0; });
+        Check("and a procedure that said nothing is reported as done, not as a blank screen",
+            Texts(silentHost).Any(t => t.StartsWith("Done.")), string.Join(" | ", Texts(silentHost)));
+
+        var alert = ResultView.Of(one.Rows[0]);
+        var alertHost = new UserControl { Content = alert };
+        Step("a single row opens on its own", () => { Layout(alertHost, 800); return 0; });
+        Check("an alert opened on its own shows its own columns",
+            Texts(alertHost).Contains("No agent on SQL01"), string.Join(" | ", Texts(alertHost)));
+    }
+
+    /// <summary>
+    ///   The alert colours, held to the dashboard HTML the clients actually receive. The mapping
+    ///   itself is checked without a screen in --selftest-config; what is checked here is that the
+    ///   keys resolve to real brushes, and that they are still the same colours - and the same
+    ///   boldness - as td.high / td.normal / td.low in the install script.
+    /// </summary>
+    private static void CheckAlertColours()
+    {
+        foreach (var priority in new[] { "High", "Normal", "Low" })
+        {
+            var colour = Today.AlertColour(priority);
+            Check($"an alert priority has a colour: {priority}", colour != null);
+            if (colour == null) continue;
+            Step($"and it resolves to brushes: {priority}", () =>
+                (AppResources.Resource<SolidColorBrush>(colour.Value.Background),
+                 AppResources.Resource<SolidColorBrush>(colour.Value.Ink)));
+        }
+
+        var root = RepositoryRoot();
+        if (root == null)
+        {
+            Console.WriteLine("SKIP  alert colours match the dashboard e-mail (not running from the repository)");
+            return;
+        }
+        var sql = File.ReadAllText(Path.Combine(root, "Admin", "MolehillAdmin_Install.sql"));
+        foreach (var (priority, cssClass) in new[] { ("High", "high"), ("Normal", "normal"), ("Low", "low") })
+        {
+            var rule = Regex.Match(sql, @"td\." + cssClass + @"\{([^}]*)\}");
+            Check($"the dashboard HTML still has a td.{cssClass} rule", rule.Success);
+            var colour = Today.AlertColour(priority);
+            if (!rule.Success || colour == null) continue;
+            var hex = Palette.Colours.First(c => c.Key == colour.Value.Background).Hex;
+            Check($"a {cssClass} alert is still the {hex} the dashboard e-mail uses",
+                rule.Groups[1].Value.Contains(hex, StringComparison.OrdinalIgnoreCase), rule.Groups[1].Value);
+            Check($"and a {cssClass} alert is {(colour.Value.Bold ? "bold in both" : "bold in neither")}",
+                rule.Groups[1].Value.Contains("font-weight:600") == colour.Value.Bold, rule.Groups[1].Value);
+        }
+        Check("the white on a high alert is the white the dashboard puts on it",
+            Regex.Match(sql, @"td\.high\{([^}]*)\}").Groups[1].Value.Contains("color:#fff")
+            && Palette.StatusRedInk.Equals("#FFFFFF", StringComparison.OrdinalIgnoreCase));
     }
 
     private static void CheckPalette()
