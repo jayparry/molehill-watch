@@ -137,6 +137,15 @@ public static class SelfTest
                     return c.BuildConnectionString();
                 });
 
+            Check("--tui asks for the terminal, whatever the default is",
+                Startup.ChooseFrontEnd(tuiAsked: true) == FrontEnd.Terminal);
+            Check("saying nothing gets the default",
+                Startup.ChooseFrontEnd(tuiAsked: false) == Startup.Default);
+            // when the default moves to the window, this is the check that fails, and the reminder
+            // that --help, README.md and Admin/MolehillManager/README.md all still say otherwise
+            Check("the default is still the terminal, as everything written down says",
+                Startup.Default == FrontEnd.Terminal, Startup.Default.ToString());
+
             Application.Init(new FakeDriver(), null);
             try
             {
@@ -499,7 +508,7 @@ public static class SelfTest
     {
         public static void Clear() => Microsoft.Data.SqlClient.SqlConnection.ClearAllPools();
     }
-
+
     /// <summary>Builds the main window, every agreement window and every form. Read-only.</summary>
     public static int Ui(AdminDb db)
     {

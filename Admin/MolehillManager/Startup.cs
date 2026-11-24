@@ -1,5 +1,14 @@
 namespace MolehillManager;
 
+/// <summary>Which front end to put up.</summary>
+public enum FrontEnd
+{
+    /// <summary>Terminal.Gui, in the console it was started from.</summary>
+    Terminal,
+    /// <summary>The window.</summary>
+    Window
+}
+
 /// <summary>
 ///   Start-up: asks for whatever the config file is missing, saves it, and connects. Every question
 ///   goes through <see cref="IStartupPrompts"/>, so the retry loop - missing settings, an unreadable
@@ -8,6 +17,16 @@ namespace MolehillManager;
 /// </summary>
 public static class Startup
 {
+    /// <summary>
+    ///   What you get by saying nothing. It is the terminal until the window can do everything the
+    ///   terminal can; moving it is the one line that makes the window the double-click default, and
+    ///   the self-test says so when it changes, so the help text and both READMEs are not left behind.
+    /// </summary>
+    public const FrontEnd Default = FrontEnd.Terminal;
+
+    /// <summary>Which front end to start: --tui always means the terminal, silence means the default.</summary>
+    public static FrontEnd ChooseFrontEnd(bool tuiAsked) => tuiAsked ? FrontEnd.Terminal : Default;
+
     private static string Shorten(string text)
     {
         var first = text.Split('\n')[0];
