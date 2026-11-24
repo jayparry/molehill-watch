@@ -149,6 +149,39 @@ public static partial class SelfTest
             Check("the default is still the terminal, as everything written down says",
                 Startup.Default == FrontEnd.Terminal, Startup.Default.ToString());
 
+            // column names are written for SQL; the window has room to say them properly
+            Check("a run-together column name is given its spaces back",
+                Output.Heading("OpenTickets") == "Open tickets" && Output.Heading("DueBy") == "Due by",
+                Output.Heading("OpenTickets") + " / " + Output.Heading("DueBy"));
+            Check("a one-word name is left alone", Output.Heading("Ref") == "Ref" && Output.Heading("Client") == "Client");
+            Check("and initials are not taken apart",
+                Output.Heading("PO") == "PO" && Output.Heading("SLADue") == "SLADue", Output.Heading("SLADue"));
+            Check("nothing at all comes back as nothing", Output.Heading("") == "");
+
+            Check("--gui asks for the window, whatever the default is",
+                Startup.ChooseFrontEnd(tuiAsked: false, guiAsked: true) == FrontEnd.Window);
+            // the terminal is the one that can do everything, so it wins the argument
+            Check("asking for both gets the terminal",
+                Startup.ChooseFrontEnd(tuiAsked: true, guiAsked: true) == FrontEnd.Terminal);
+
+            // what a part-built window offers: everything on show, the parts not built yet greyed
+            // and saying where to go meanwhile. Hiding them would be the very thing being fixed.
+            var part = ActionRules.Prepaid("PP-14", "Open", invoice: "MDS-INV-2026-0009", used: 4m)
+                .Only(new[] { "prepaid-sell" }, "Not in the window yet.");
+            Check("an action the window can do is still offered",
+                part.ById("prepaid-sell")?.Enabled == true);
+            Check("one it cannot is greyed, not dropped",
+                part.ById("prepaid-usage") != null && part.ById("prepaid-usage")?.Enabled == false,
+                part.ById("prepaid-usage")?.DisabledReason ?? "(enabled)");
+            Check("and says so",
+                part.ById("prepaid-usage")?.DisabledReason == "Not in the window yet.",
+                part.ById("prepaid-usage")?.DisabledReason ?? "(enabled)");
+            Check("an action that did not apply anyway keeps its own reason, which says more",
+                part.ById("prepaid-invoice")?.DisabledReason?.Contains("MDS-INV-2026-0009") == true,
+                part.ById("prepaid-invoice")?.DisabledReason ?? "(enabled)");
+            Check("and nothing is lost on the way",
+                part.Actions.Count == ActionRules.Prepaid("PP-14", "Open", "MDS-INV-2026-0009", 4m).Actions.Count);
+
             // which row a screen comes back to after a refresh. The terminal UI remembers the row
             // number, so anything inserted above moves you to a different row without saying so;
             // the window remembers the row.

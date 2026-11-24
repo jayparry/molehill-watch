@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using MolehillManager;
 using Terminal.Gui;
 
@@ -18,7 +18,8 @@ internal static class Program
 
         string? configArg = null, connectionOverride = null;
         bool forceSetup = false, installOnly = false, selfTest = false, selfTestWrite = false,
-             selfTestConfig = false, allowWrites = false, tui = false;
+             selfTestConfig = false, allowWrites = false, tui = false, gui = false, selfTestGui = false;
+        string? shotFolder = null;
 
         for (var i = 0; i < args.Length; i++)
         {
@@ -33,6 +34,12 @@ internal static class Program
                 case "--tui":                                   // the terminal front end, whatever the default is
                     tui = true;
                     break;
+                case "--gui":                                   // the window, whatever the default is
+                    gui = true;
+                    break;
+                case "--shot":                                  // with --selftest-gui: save a picture of each view
+                    shotFolder = i + 1 < args.Length ? args[++i] : null;
+                    break;
                 case "--install":                               // create / install / upgrade the configured database, no screen
                     installOnly = true;
                     break;
@@ -43,7 +50,8 @@ internal static class Program
                 case "--selftest-write": selfTestWrite = true; break;
                 case "--selftest-config": selfTestConfig = true; break;
                 case "--selftest-gui":                          // build and lay out every view, no database
-                    return SelfTest.Gui();
+                    selfTestGui = true;                         // dispatched below, so that --shot is read first
+                    break;
                 case "--selftest-install":                      // create / install / upgrade test databases on this server, then drop them
                     if (++i < args.Length) return SelfTest.Install(args[i]);
                     break;
@@ -60,6 +68,9 @@ internal static class Program
             }
         }
 
+        SelfTest.ShotFolder = shotFolder;
+
+        if (selfTestGui) return SelfTest.Gui();
         if (selfTestConfig) return SelfTest.Config();
 
         var path = ConfigStore.Resolve(configArg);
@@ -92,10 +103,10 @@ internal static class Program
             return RunSelfTest(config, path, loadProblem, connectionOverride, selfTestWrite, allowWrites);
 
         // ---------------------------------------------------------------- the app
-        return Startup.ChooseFrontEnd(tui) switch
+        return Startup.ChooseFrontEnd(tui, gui) switch
         {
             FrontEnd.Terminal => RunTerminal(config, path, existed, forceSetup, loadProblem),
-            _ => RunWindow()
+            _ => RunWindow(config, path, existed, forceSetup, loadProblem)
         };
     }
 
@@ -201,11 +212,12 @@ internal static class Program
     }
 
     /// <summary>The window. Nothing to run yet: the shell is the next step, and until then nothing asks for it.</summary>
-    private static int RunWindow()
-    {
-        Console.Error.WriteLine("The window is not built yet. Run with --tui for the terminal front end.");
-        return 69;
-    }
+    /// <summary>
+    ///   The window. Everything worth asserting is in Shell and the pages, which the GUI suite
+    ///   builds without one; this gets a connection, puts the window up and runs the message loop.
+    /// </summary>
+    private static int RunWindow(AppConfig config, string path, bool existed, bool forceSetup, string? loadProblem) =>
+        MolehillManager.Gui.WindowApp.Run(config, path, existed, forceSetup, loadProblem != null);
 
     private static void Help() => Console.WriteLine($"""
 Molehill Manager - Molehill Data Services
@@ -222,6 +234,8 @@ only saved if you tick "Remember it", and then encrypted for your Windows accoun
 
   MolehillManager                       start (first run asks for the settings)
   MolehillManager --tui                 start the terminal front end, whatever the default is
+  MolehillManager --gui                 start the window (Today and the client list so far;
+                                        the first run and the rest are still --tui)
   MolehillManager --setup               open the settings screen first
   MolehillManager --config D:\x.json    use a different config file (one per environment)
   MolehillManager --install             create / install / upgrade the configured database without

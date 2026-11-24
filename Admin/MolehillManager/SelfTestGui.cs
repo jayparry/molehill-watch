@@ -1,10 +1,12 @@
 ﻿using System.Data;
 using System.Diagnostics;
+using System.Globalization;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using MolehillManager.Gui;
 
 namespace MolehillManager;
@@ -96,6 +98,41 @@ public static partial class SelfTest
     ///   reporting what was wrong - which in CI reads as "the harness is broken", and gets the
     ///   wrong thing investigated.
     /// </summary>
+    /// <summary>
+    ///   Where to write a picture of each view, or null. Set by <c>--selftest-gui --shot FOLDER</c>.
+    ///
+    ///   The suite cannot assert on pixels - that was never the plan - but the views are already
+    ///   built and arranged at a known size, so putting them on disk costs a dozen lines and is the
+    ///   only way to look at the window without a machine to run it on. It is also how a layout that
+    ///   is technically correct and visually wrong gets noticed, which no amount of reading
+    ///   TextBlocks out of a visual tree will do.
+    /// </summary>
+    public static string? ShotFolder;
+
+    private static void Shot(FrameworkElement element, string name)
+    {
+        if (ShotFolder == null) return;
+        try
+        {
+            Directory.CreateDirectory(ShotFolder);
+            var width = (int)Math.Ceiling(element.ActualWidth);
+            var height = (int)Math.Ceiling(element.ActualHeight);
+            if (width <= 0 || height <= 0) { Console.WriteLine($"SKIP  picture of {name} (it arranged to nothing)"); return; }
+            var bitmap = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
+            bitmap.Render(element);
+            var encoder = new PngBitmapEncoder();
+            encoder.Frames.Add(BitmapFrame.Create(bitmap));
+            var path = Path.Combine(ShotFolder, name + ".png");
+            using var file = File.Create(path);
+            encoder.Save(file);
+            Console.WriteLine($"      picture: {path} ({width} x {height})");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"SKIP  picture of {name}: {AdminDb.Explain(ex)}");
+        }
+    }
+
     private static void Section(string name, Action body)
     {
         try { body(); }
@@ -140,6 +177,9 @@ public static partial class SelfTest
         Section("the forms", () => CheckForms(watcher));
         Section("what a procedure said", () => CheckResultView(watcher));
         Section("the alert colours", CheckAlertColours);
+        Section("the shell", () => CheckShell(watcher));
+        Section("the Today page", () => CheckToday(watcher));
+        Section("the client list", () => CheckClients(watcher));
         return Finish();
     }
 
@@ -187,6 +227,7 @@ public static partial class SelfTest
         var cancel = buttons.First(b => (b.Tag as string) == "prepaid-cancel");
         Check("and the one about used hours says how many",
             (cancel.ToolTip as string)?.Contains("4") == true, cancel.ToolTip as string ?? "");
+        Shot(host, "4-toolbar");
 
         var usage = buttons.First(b => (b.Tag as string) == "prepaid-usage");
         usage.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
@@ -428,6 +469,306 @@ public static partial class SelfTest
         Check("the white on a high alert is the white the dashboard puts on it",
             Regex.Match(sql, @"td\.high\{([^}]*)\}").Groups[1].Value.Contains("color:#fff")
             && Palette.StatusRedInk.Equals("#FFFFFF", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>A tree like the one a database gives, for the shell and the client list.</summary>
+    private static DataTable SomeWork()
+    {
+        var t = new DataTable();
+        foreach (var c in new[] { "Ref", "Client", "Type", "What", "Status", "Rate", "Unbilled", "_EngagementType" })
+            t.Columns.Add(c, typeof(string));
+        t.Columns.Add("OpenTickets", typeof(int));
+        t.Columns.Add("OnboardingLeft", typeof(int));
+        t.Rows.Add("MW-A-0003", "Acme Ltd", "Molehill Watch", "4 instance(s) monitored", "Current",
+            "£350/month", null, "Monitoring", 2, 0);
+        t.Rows.Add("C-0012", "Acme Ltd", "Consultancy", "Upgrade to SQL Server 2022", "Active",
+            "£900/day", "£1,800 (2.00 d)", "Consultancy", 0, 0);
+        t.Rows.Add("MW-A-0007", "Zeta Ltd", "Molehill Watch", "2 instance(s) monitored", "Current",
+            "£180/month", null, "Monitoring", 0, 3);
+        // Type is a display string from a CASE; _EngagementType is the value itself. They agree
+        // today, so a row where they do not is the only way to check which one is being read.
+        t.Rows.Add("C-0033", "Zeta Ltd", "Molehill Watch", "Health check", "Active",
+            "£700/day", null, "Consultancy", 0, 0);
+        return t;
+    }
+
+    /// <summary>
+    ///   The shell, driven with no database at all: pages arrive through a factory, so what can be
+    ///   checked here is everything that is not a page - the tree, the breadcrumb, which page was
+    ///   asked for, and that the toolbar is offered again when a page says its selection moved.
+    /// </summary>
+    private static void CheckShell(BindingWatcher watcher)
+    {
+        var asked = new List<NavKind>();
+        var pages = new Dictionary<NavKind, PlainPage>();
+        IShellPage Open(NavNode node)
+        {
+            asked.Add(node.Kind);
+            var page = new PlainPage(node.Label, new TextBlock { Text = $"page: {node.Label}" });
+            pages[node.Kind] = page;
+            return page;
+        }
+
+        watcher.Clear();
+        var shell = new Shell(Open);
+        var tree = Nav.Build(SomeWork());
+        Step("the shell lays out with no window", () => { shell.Load(tree); Layout(shell, 1200, 800); return 0; });
+        Check("no binding warnings from the shell", watcher.Lines.Count == 0, string.Join(" | ", watcher.Lines.Take(2)));
+
+        Check("it opens on Today rather than on nothing",
+            shell.Here?.Kind == NavKind.Today && asked.Contains(NavKind.Today), shell.Here?.Label ?? "(nowhere)");
+        Check("and the breadcrumb says so", shell.Breadcrumb == "Today", shell.Breadcrumb);
+        Check("every place in the tree is on the screen",
+            new[] { "Today", "Clients", "Tickets", "Billing", "Settings" }.All(t => Texts(shell).Contains(t)),
+            string.Join(" | ", Texts(shell).Take(8)));
+        Check("the clients are in the tree too, under Clients",
+            Texts(shell).Contains("Acme Ltd") && Texts(shell).Contains("Zeta Ltd"),
+            string.Join(" | ", Texts(shell)));
+        Shot(shell, "1-shell");
+
+        shell.Go(NavKind.Engagement, "C-0012");
+        Check("the tree points at what was opened, rather than at where you were",
+            (shell.Highlighted as NavNode)?.Key == "C-0012",
+            (shell.Highlighted as NavNode)?.Label ?? "(nothing)");
+        Check("opening an engagement puts the way to it in the breadcrumb",
+            shell.Breadcrumb == "Clients › Acme Ltd › Upgrade to SQL Server 2022", shell.Breadcrumb);
+        Check("and its page is in the content pane",
+            shell.Page is TextBlock { Text: "page: Upgrade to SQL Server 2022" },
+            (shell.Page as TextBlock)?.Text ?? shell.Page?.GetType().Name ?? "(nothing)");
+
+        // a refresh must not move you, which is the same rule the grid follows for its rows
+        var sameAgain = Nav.Build(SomeWork());
+        shell.Load(sameAgain);
+        Check("a refresh leaves you where you were",
+            shell.Here?.Key == "C-0012", shell.Here?.Label ?? "(nowhere)");
+
+        var gone = SomeWork();
+        gone.Rows.RemoveAt(1);                       // the engagement that was open is no longer there
+        shell.Load(Nav.Build(gone));
+        Check("and when what you were looking at has gone, it falls back to Today",
+            shell.Here?.Kind == NavKind.Today, shell.Here?.Label ?? "(nowhere)");
+
+        // the point of the exercise: the toolbar follows the page's selection
+        var offers = 0;
+        var moving = new MovingPage();
+        var following = new Shell(_ => moving);
+        following.Load(Nav.Build(null));
+        moving.Offer(ActionRules.Ticket("MW-00001"), id => offers++);
+        Check("a page saying its selection moved gets its actions offered again",
+            following.Actions.Buttons.Count == ActionRules.Ticket("MW-00001").Actions.Count,
+            $"{following.Actions.Buttons.Count} buttons");
+        moving.Offer(ActionRules.Ticket(null), id => offers++);
+        Check("and offered the new ones, not the ones from before",
+            following.Actions.Buttons.Count == ActionRules.Ticket(null).Actions.Count,
+            $"{following.Actions.Buttons.Count} buttons");
+    }
+
+    /// <summary>A page that changes its mind, to prove the shell asks again when it does.</summary>
+    private sealed class MovingPage : IShellPage
+    {
+        private MhActionSet _set = new("Nothing", Array.Empty<MhAction>());
+        private Action<string> _run = _ => { };
+
+        public UIElement Content { get; } = new TextBlock { Text = "moving" };
+        public MhActionSet Actions => _set;
+        public IReadOnlyDictionary<string, Action> Handlers =>
+            _set.Actions.ToDictionary(a => a.Id, a => (Action)(() => _run(a.Id)));
+        public event Action? Changed;
+
+        public void Offer(MhActionSet set, Action<string> run)
+        {
+            _set = set;
+            _run = run;
+            Changed?.Invoke();
+        }
+    }
+
+    private static void CheckToday(BindingWatcher watcher)
+    {
+        var alerts = new DataTable();
+        foreach (var c in new[] { "Priority", "Area", "Client", "Item", "Detail", "DueBy" }) alerts.Columns.Add(c, typeof(string));
+        alerts.Rows.Add("High", "Onboarding", "Acme Ltd", "Monitoring not set up", "No agent on SQL01", "31 Dec 2026");
+        alerts.Rows.Add("Low", "Billing", "Zeta Ltd", "Draft invoice waiting", "MDS-INV-2026-0009", "");
+        var tickets = new DataTable();
+        tickets.Columns.Add("Ticket", typeof(string));
+        tickets.Rows.Add("MW-00001");
+        var money = new DataTable();
+        money.Columns.Add("MonthlyRecurringRevenue", typeof(decimal));
+        money.Rows.Add(4250m);
+        var dashboard = new DashboardView(alerts, tickets, new DataTable(), new DataTable(), money.Rows[0]);
+
+        var shown = new List<string>();
+        var went = new List<string>();
+        var saved = 0;
+
+        watcher.Clear();
+        TodayPage? page = null;
+        Step("the Today page lays out with no window", () =>
+        {
+            page = new TodayPage(dashboard, client => client == "Acme Ltd" ? "MW-A-0003" : null,
+                (title, _) => shown.Add(title), (kind, key) => went.Add($"{kind}:{key}"), () => saved++);
+            Layout(page, 1200, 800);
+            return 0;
+        });
+        if (page == null) return;
+        Check("no binding warnings from the Today page", watcher.Lines.Count == 0, string.Join(" | ", watcher.Lines.Take(2)));
+
+        Check("the alerts are on it", page.Alerts.Table == alerts);
+        Check("and so is what the alert says",
+            Texts(page).Contains("No agent on SQL01"), string.Join(" | ", Texts(page).Take(6)));
+        Check("the money is shown as figures with their words",
+            page.Tiles.Any(t => t.Label == "Monthly recurring revenue" && t.Value == "£4,250.00"),
+            string.Join(", ", page.Tiles.Select(t => $"{t.Label}={t.Value}")));
+        Check("and the open-ticket count with them",
+            Texts(page).Contains("Open tickets") && Texts(page).Contains("1"),
+            string.Join(" | ", Texts(page)));
+
+        // the priority column is coloured by the rule, not by a style written out in the view
+        var priority = page.Alerts.Columns.FirstOrDefault(c => (c.Header as string) == "Priority");
+        Check("the priority column is given a look of its own", priority?.CellStyle != null);
+        // what the style actually sets, rather than only what the converter would answer: a style
+        // missing its Foreground setter leaves a high alert as dark ink on that red, unreadable,
+        // and the converter goes on giving the right answer to nobody.
+        var parts = priority?.CellStyle?.Setters.OfType<Setter>()
+            .Select(s => $"{s.Property.Name}:{(s.Value as Binding)?.ConverterParameter}").ToList() ?? new List<string>();
+        foreach (var wanted in new[] { "Background:Background", "Foreground:Ink", "FontWeight:Bold" })
+            Check($"and that look sets its {wanted.Split(':')[0].ToLowerInvariant()} from the rule",
+                parts.Contains(wanted), string.Join(" | ", parts));
+        Check("a high priority comes out as the dashboard's red",
+            ReferenceEquals(AlertLook.Instance.Convert("High", typeof(Brush), "Background", CultureInfo.InvariantCulture),
+                AppResources.Resource<Brush>("StatusRed")));
+        Check("and its text white, so it can be read at all",
+            ReferenceEquals(AlertLook.Instance.Convert("High", typeof(Brush), "Ink", CultureInfo.InvariantCulture),
+                AppResources.Resource<Brush>("StatusRedInk")));
+        Check("a priority nobody has heard of leaves the cell alone",
+            AlertLook.Instance.Convert("Critical", typeof(Brush), "Background", CultureInfo.InvariantCulture) is SolidColorBrush { Color.A: 0 });
+
+        // binding a list puts you on its first row - RowKey.Reselect clamps into range - which is
+        // what a to-do list wants: the first alert's actions are offered without a click.
+        Check("the first alert is picked, so there is something to do straight away",
+            page.Alerts.SelectedIndex == 0 && page.Actions.ById("alert-show")?.Enabled == true,
+            page.Actions.ById("alert-show")?.DisabledReason ?? "(enabled)");
+        Check("saving the dashboard does not need a selection at all",
+            page.Actions.ById("dashboard-html")?.Enabled == true);
+
+        var noAlerts = new DashboardView(alerts.Clone(), tickets, new DataTable(), new DataTable(), money.Rows[0]);
+        var quiet = new TodayPage(noAlerts, _ => null, (_, _) => { }, (_, _) => { }, () => { });
+        Layout(quiet, 1000);
+        Check("with nothing to do, the alert actions say to pick something rather than vanishing",
+            quiet.Actions.ById("alert-show")?.DisabledReason == "Pick an alert first.",
+            quiet.Actions.ById("alert-show")?.DisabledReason ?? "(enabled)");
+
+        Check("the alert that is picked is about a client with an agreement, so opening it is offered",
+            page.Actions.ById("alert-agreement")?.Enabled == true
+            && page.Actions.ById("alert-agreement")?.Label.Contains("MW-A-0003") == true,
+            page.Actions.ById("alert-agreement")?.Label ?? "(none)");
+        page.Handlers["alert-show"]();
+        Check("showing the whole alert puts it up", shown.SequenceEqual(new[] { "Alert" }), string.Join(", ", shown));
+        page.Handlers["alert-agreement"]();
+        Check("and opening the client goes to the client, not to a reference the tree does not use",
+            went.SequenceEqual(new[] { "Client:Acme Ltd" }), string.Join(", ", went));
+        page.Handlers["dashboard-html"]();
+        Check("saving the dashboard runs the save", saved == 1, saved.ToString());
+        Layout(page, 1200, 800);
+        Shot(page, "2-today");
+
+        page.Alerts.SelectedIndex = 1;
+        Check("an alert about a client with no agreement says that, rather than offering nothing",
+            page.Actions.ById("alert-agreement")?.Enabled == false
+            && page.Actions.ById("alert-agreement")?.DisabledReason?.Contains("Zeta Ltd") == true,
+            page.Actions.ById("alert-agreement")?.DisabledReason ?? "(enabled)");
+    }
+
+    private static void CheckClients(BindingWatcher watcher)
+    {
+        var work = SomeWork();
+        var reloads = new List<bool>();
+        var went = new List<string>();
+        var ran = new List<string>();
+        var handlers = new Dictionary<string, Action>
+        {
+            ["client-new"] = () => ran.Add("client-new"),
+            ["agreement-new"] = () => ran.Add("agreement-new"),
+            ["engagement-new"] = () => ran.Add("engagement-new")
+        };
+
+        watcher.Clear();
+        ClientsPage? page = null;
+        Step("the client list lays out with no window", () =>
+        {
+            page = new ClientsPage(work, false, ended => reloads.Add(ended),
+                (kind, key) => went.Add($"{kind}:{key}"), handlers);
+            Layout(page, 1200, 800);
+            return 0;
+        });
+        if (page == null) return;
+        Check("no binding warnings from the client list", watcher.Lines.Count == 0, string.Join(" | ", watcher.Lines.Take(2)));
+
+        Check("every piece of work is on it", page.Work.Table == work && work.Rows.Count == 4,
+            $"{work.Rows.Count} rows");
+        var empty = new ClientsPage(work.Clone(), false, _ => { }, (_, _) => { }, handlers);
+        Layout(empty, 1000);
+        Check("an empty list says so, and says where to start",
+            empty.Summary.Contains("No work to show") && empty.Summary.Contains("New client"), empty.Summary);
+        Check("and offers exactly the three ways to start something new",
+            empty.Actions.Actions.Count == 3 && empty.Actions.Available.Count == 3,
+            string.Join(", ", empty.Actions.Actions.Select(a => a.Id)));
+        Check("a list with work in it starts on its first row",
+            page.Work.SelectedIndex == 0 && page.Summary.Contains("open ticket(s)"), page.Summary);
+
+        page.Work.Select("Ref", "MW-A-0003");
+        Check("picking a support agreement offers the support actions",
+            page.Actions.ById("agreement-open") != null && page.Actions.ById("ticket-new") != null,
+            string.Join(", ", page.Actions.Actions.Select(a => a.Id)));
+        Check("the ones the window cannot do yet are still on show, greyed, saying where to go",
+            page.Actions.ById("agreement-open")?.Enabled == false
+            && page.Actions.ById("agreement-open")?.DisabledReason == ClientsPage.NotYet,
+            page.Actions.ById("agreement-open")?.DisabledReason ?? "(enabled)");
+        Check("and the ones it can do are offered",
+            page.Actions.ById("client-new")?.Enabled == true && page.Actions.ById("ticket-new")?.Enabled == false);
+        Check("the line underneath says what is unusual about the row",
+            page.Summary.Contains("2 open ticket(s)") && !page.Summary.Contains("0 onboarding"), page.Summary);
+        Layout(page, 1200, 800);
+        Shot(page, "3-clients");
+
+        page.Work.Select("Ref", "C-0012");
+        Check("picking consultancy offers the consultancy actions instead",
+            page.Actions.ById("engagement-open") != null && page.Actions.ById("work-log") != null
+            && page.Actions.ById("agreement-open") == null,
+            string.Join(", ", page.Actions.Actions.Select(a => a.Id)));
+        Check("and its unbilled work is in the line underneath",
+            page.Summary.Contains("not yet invoiced"), page.Summary);
+
+        page.Work.Select("Ref", "C-0033");
+        Check("consultancy whose Type cell reads \"Molehill Watch\" is still treated as consultancy",
+            page.Actions.ById("engagement-open") != null && page.Actions.ById("agreement-open") == null,
+            string.Join(", ", page.Actions.Actions.Select(a => a.Id)));
+
+        page.Handlers["engagement-new"]();
+        Check("an action that is wired runs", ran.SequenceEqual(new[] { "engagement-new" }), string.Join(", ", ran));
+
+        var tick = Descendants<CheckBox>(page).FirstOrDefault();
+        Check("there is a tick box for the finished work", tick != null);
+        if (tick != null)
+        {
+            tick.IsChecked = true;
+            tick.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+            Check("ticking it asks for the list again, with the finished work in it",
+                reloads.SequenceEqual(new[] { true }), string.Join(", ", reloads));
+        }
+
+        page.Work.Select("Ref", "C-0012");
+        went.Clear();
+        page.Open();
+        Check("opening a row goes to that engagement, by the reference the tree is keyed on",
+            went.SequenceEqual(new[] { "Engagement:C-0012" }), string.Join(", ", went));
+
+        var tree = Nav.Build(work);
+        var shell = new Shell(_ => page!);
+        shell.Load(tree);
+        Check("the toolbar takes everything the page offers, greyed reasons and all",
+            shell.Actions.Buttons.Count == page.Actions.Actions.Count,
+            $"{shell.Actions.Buttons.Count} buttons for {page.Actions.Actions.Count} actions");
     }
 
     private static void CheckPalette()

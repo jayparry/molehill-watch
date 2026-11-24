@@ -1,4 +1,4 @@
-namespace MolehillManager;
+﻿namespace MolehillManager;
 
 /// <summary>Which front end to put up.</summary>
 public enum FrontEnd
@@ -24,8 +24,14 @@ public static class Startup
     /// </summary>
     public const FrontEnd Default = FrontEnd.Terminal;
 
-    /// <summary>Which front end to start: --tui always means the terminal, silence means the default.</summary>
-    public static FrontEnd ChooseFrontEnd(bool tuiAsked) => tuiAsked ? FrontEnd.Terminal : Default;
+    /// <summary>
+    ///   Which front end to start. --tui always means the terminal and wins over --gui, because it
+    ///   is the one that can do everything; --gui asks for the window whatever the default is, which
+    ///   is how the window is reachable while the default is still the terminal; silence means the
+    ///   default.
+    /// </summary>
+    public static FrontEnd ChooseFrontEnd(bool tuiAsked, bool guiAsked = false) =>
+        tuiAsked ? FrontEnd.Terminal : guiAsked ? FrontEnd.Window : Default;
 
     private static string Shorten(string text)
     {

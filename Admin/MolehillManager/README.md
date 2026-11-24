@@ -1,4 +1,4 @@
-# Molehill Manager
+﻿# Molehill Manager
 
 A terminal front end for the **MolehillAdmin** database. It covers clients, agreements, instances, onboarding, tickets, time, billing and invoices. It runs on your own machine and is never installed on a client server.
 
@@ -92,6 +92,7 @@ Editing the file by hand is fine:
 MolehillManager.exe --setup                  # open the settings screen first
 MolehillManager.exe --config D:\test.json    # a separate file, e.g. for a test copy of MolehillAdmin
 MolehillManager.exe --tui                    # the terminal front end, whatever the default becomes
+MolehillManager.exe --gui                    # the window (see below), whatever the default is
 ```
 
 Running from source (`dotnet run`) needs the .NET 8 SDK and keeps its config next to the build output.
@@ -134,6 +135,31 @@ Invoice numbers follow the invoice date: after every billing run the drafts are 
 - Everything logged is the raw entries, including non-billable ones; Enter on one corrects or removes it (once invoiced, void the invoice first).
 - F4 also offers: change the rate, PO, dates or put it on hold; mark it finished (which invoices what's left); cancel it; raise an invoice by hand; run billing for it.
 - **Finished - invoice what is left** starts on the engagement's end date if it has one (change it if the work really stopped another day), otherwise blank = today. The final invoice is dated whatever you give it, so the part-month goes out without waiting for month end.
+
+## The window (`--gui`)
+
+Being built a screen at a time. What is there now: a tree down the left (Today, Clients and each
+client's work, Tickets, Billing, Settings), a breadcrumb saying where you are, and **a row of named
+buttons for whatever is selected**.
+
+That toolbar is the point of it. In the terminal an action that does not apply is not disabled, it
+is *absent*, so there is no way to learn what is possible or why something is missing - which is
+what made the terminal UI hard to drive once there were 41 forms behind three function keys. The
+window shows every action, greys the ones that do not apply, and puts the reason on the button:
+"Already invoiced on MDS-INV-2026-0009", "4 hours of it have been used". Actions the window cannot
+do yet are shown the same way, saying to run `--tui` for that one, so nothing silently disappears
+while the port is half finished.
+
+**Today** is the daily to-do list with the priority cell coloured the same red, amber and blue as
+the dashboard HTML clients receive by e-mail, and the money figures underneath. **Clients** is
+everything being billed, with a tick box for finished work and a line underneath saying what is
+unusual about the row selected. Double-clicking a row, and clicking its node in the tree, go to the
+same place.
+
+The terminal front end stays, and is still what you get by default - the window cannot ask for a
+server yet, so a genuine first run needs `--tui` once. Everything else about it is already shared:
+the 41 forms are laid out from the same `FormSpec`s, cells are formatted by the same code, and both
+front ends ask the start-up questions through one interface.
 
 ## Keys
 
@@ -183,6 +209,14 @@ code, and your shell won't wait for the `.exe` long enough to read one.
 .\MolehillManager.cmd --selftest                      # read-only: every screen, agreement window and form
 .\MolehillManager.cmd --selftest-write --allow-writes # submits every form: a TEST copy of MolehillAdmin only
 .\MolehillManager.cmd --selftest-config               # config file handling and encryption (no database)
+.\MolehillManager.cmd --selftest-gui                  # the window: every view built and laid out (no database)
 .\MolehillManager.cmd --selftest-setup SQL01          # the first-run settings screen, driven headlessly
 .\MolehillManager.cmd --selftest-install SQL01        # create / install / upgrade scratch MolehillAdmin_selftest_* databases, then drops them
 ```
+
+`--selftest-gui` needs no database and no screen. It builds every view on an STA thread with
+no window, lays it out, and reads the text and the control states back out of the visual tree;
+a `TraceListener` on WPF's data-binding source turns a mistyped binding - which otherwise
+renders blank and logs a warning nobody reads - into a failure. It also holds the palette to
+`Site/assets/molehill.css` and the alert colours to the dashboard HTML in
+`MolehillAdmin_Install.sql`, so the window cannot drift away from what clients are sent.

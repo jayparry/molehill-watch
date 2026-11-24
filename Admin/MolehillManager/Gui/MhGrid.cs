@@ -1,4 +1,4 @@
-using System.Data;
+﻿using System.Data;
 using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
@@ -57,17 +57,25 @@ internal sealed class MhGrid : DataGrid
         Foreground = AppResources.Resource<System.Windows.Media.Brush>("Ink");
         HorizontalGridLinesBrush = AppResources.Resource<System.Windows.Media.Brush>("Line");
         FontFamily = AppResources.Resource<System.Windows.Media.FontFamily>("BodyFont");
-        AutoGeneratingColumn += OnAutoGeneratingColumn;
+        AutoGeneratingColumn += (s, e) => OnAutoGeneratingColumn(this, e);
     }
 
-    private static void OnAutoGeneratingColumn(object? sender, DataGridAutoGeneratingColumnEventArgs e)
+    /// <summary>
+    ///   A look for one column's cells, by column name - how the Today page colours an alert's
+    ///   priority. It has to be asked for here rather than set on the column afterwards: the columns
+    ///   are generated when the grid is first measured, not when the table is bound, so anything set
+    ///   straight after Bind is set on an empty collection and quietly does nothing at all.
+    /// </summary>
+    public Func<string, Style?>? CellStyleFor { get; set; }
+
+    private static void OnAutoGeneratingColumn(MhGrid grid, DataGridAutoGeneratingColumnEventArgs e)
     {
         // carried for the code to branch on, not for reading: the same rule as Output.Shown
         if (e.PropertyName.StartsWith('_')) { e.Cancel = true; return; }
 
         var text = new DataGridTextColumn
         {
-            Header = e.PropertyName,
+            Header = Output.Heading(e.PropertyName),
             Binding = new Binding($"[{e.PropertyName}]")
             {
                 Converter = CellText.Instance,
@@ -80,6 +88,8 @@ internal sealed class MhGrid : DataGrid
             text.CellStyle = RightAligned();
         if (Wide.Contains(e.PropertyName))
             text.MaxWidth = 380;
+        if (grid.CellStyleFor?.Invoke(e.PropertyName) is { } look)
+            text.CellStyle = look;
 
         e.Column = text;
     }
@@ -112,6 +122,22 @@ internal sealed class MhGrid : DataGrid
     /// <summary>The selected row, or null when nothing is selected.</summary>
     public DataRow? SelectedRow() =>
         SelectedItem is DataRowView view ? view.Row : null;
+
+    /// <summary>
+    ///   Selects the first row whose <paramref name="column"/> reads as <paramref name="value"/>,
+    ///   and says whether there was one. How the tree puts you on a client it has just opened.
+    /// </summary>
+    public bool Select(string column, string value)
+    {
+        if (Table == null || !Table.Columns.Contains(column)) return false;
+        for (var i = 0; i < Table.Rows.Count; i++)
+        {
+            if (Output.Format(column, Table.Rows[i][column]) != value) continue;
+            SelectedIndex = i;
+            return true;
+        }
+        return false;
+    }
 
     /// <summary>One cell of the selected row, formatted as the screen shows it. Null when there is none.</summary>
     public string? Selected(string column)

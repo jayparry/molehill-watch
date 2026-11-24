@@ -1,4 +1,4 @@
-// The pure half of Output: turning a value or a table into text. Shared by the terminal UI,
+﻿// The pure half of Output: turning a value or a table into text. Shared by the terminal UI,
 // the text tables on every detail pane and - the reason it is a file of its own - the GUI grid,
 // which must not reach into a Terminal.Gui file to format a cell. Nothing here draws anything.
 using System.Data;
@@ -23,6 +23,30 @@ public static partial class Output
     /// </summary>
     public static bool ReadsBetterVertical(DataTable table) =>
         table.Rows.Count == 1 && Shown(table).Count > 4;
+
+    /// <summary>
+    ///   A column name as a heading: "OpenTickets" becomes "Open tickets", "DueBy" becomes "Due by".
+    ///   The names are written for SQL and read by people, and the window has the room to say them
+    ///   properly. Only the heading changes - the column is still found, sorted and formatted by its
+    ///   real name, because every other rule in the app matches on that.
+    /// </summary>
+    public static string Heading(string column)
+    {
+        if (column.Length == 0) return column;
+        var words = new StringBuilder();
+        for (var i = 0; i < column.Length; i++)
+        {
+            // a capital after a small letter starts a word; a run of capitals (VAT, SLA, PO) does not
+            if (i > 0 && char.IsUpper(column[i]) && !char.IsUpper(column[i - 1]))
+            {
+                words.Append(' ');
+                words.Append(char.ToLowerInvariant(column[i]));
+                continue;
+            }
+            words.Append(column[i]);
+        }
+        return words.ToString();
+    }
 
     public static string TextTable(DataTable table, bool vertical = false)
     {

@@ -34,6 +34,21 @@ public sealed record MhActionSet(string Title, IReadOnlyList<MhAction> Actions)
     public MhAction? ById(string id) => Actions.FirstOrDefault(a => a.Id == id);
 
     public MhActionSet Add(params MhAction[] more) => new(Title, Actions.Concat(more).ToList());
+
+    /// <summary>
+    ///   The same set with everything outside <paramref name="ids"/> greyed and carrying
+    ///   <paramref name="reason"/>. What a part-built window offers: the action is still on show,
+    ///   so nothing quietly disappears while the port is half done, and the reason says where to go
+    ///   for it meanwhile. An action already disabled keeps the reason it had, that being the more
+    ///   specific of the two.
+    /// </summary>
+    public MhActionSet Only(IEnumerable<string> ids, string reason)
+    {
+        var handled = new HashSet<string>(ids);
+        return new MhActionSet(Title, Actions
+            .Select(a => !a.Enabled || handled.Contains(a.Id) ? a : MhAction.Off(a.Id, a.Label, reason))
+            .ToList());
+    }
 }
 
 /// <summary>
