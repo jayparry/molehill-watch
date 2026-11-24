@@ -179,6 +179,28 @@ public static partial class SelfTest
             both.Rows[0]["Ref"] = "A-1"; both.Rows[1]["Ref"] = "A-2";
             Check("Ref is preferred to Ticket when a table has both", RowKey.KeyColumn(both) == "Ref", RowKey.KeyColumn(both) ?? "(none)");
 
+            // The app's error policy, which both front ends share through AdminDb.Explain. Worth
+            // being exact about what the special case is for, because a mutation pass showed it
+            // changes nothing today: Describe of a FormatException with nothing inside it returns
+            // precisely the message, and every FormatException the app throws is bare. So the rule
+            // only bites when one carries an inner exception - which is what the third check below
+            // is, and without it, replacing Explain with Describe breaks no test at all.
+            var bare = new FormatException("Minutes: 'half an hour' is not a whole number.");
+            Check("what someone typed is shown as the app wrote it",
+                AdminDb.Explain(bare) == bare.Message, AdminDb.Explain(bare));
+            Check("and for a bare one that is the same as the full description",
+                AdminDb.Describe(bare) == bare.Message, AdminDb.Describe(bare));
+            var wrapped = new FormatException("Covered from: 'soon' is not a date (use yyyy-mm-dd).",
+                new InvalidOperationException("Sequence contains no elements"));
+            Check("a sentence about what was typed is not padded out with the detail underneath it",
+                AdminDb.Explain(wrapped) == wrapped.Message, AdminDb.Explain(wrapped));
+            Check("while the full description keeps that detail, for the places that want it",
+                AdminDb.Describe(wrapped).Contains("Sequence contains no elements"), AdminDb.Describe(wrapped));
+            var failed = new InvalidOperationException("The database is not there.", new IOException("the disk went away"));
+            Check("anything not about typing is described in full, inner exceptions and all",
+                AdminDb.Explain(failed) == AdminDb.Describe(failed) && AdminDb.Explain(failed).Contains("the disk went away"),
+                AdminDb.Explain(failed));
+
             Application.Init(new FakeDriver(), null);
             try
             {
@@ -774,8 +796,14 @@ public static partial class SelfTest
         }
         Check("every action the screens offer has code behind its Id", missing.Count == 0, string.Join(", ", missing));
 
-        foreach (var spec in AllForms(db, anyRef, anyClient, anyInstance, anyTicket, anyInvoice))
+        var everyForm = AllForms(db, anyRef, anyClient, anyInstance, anyTicket, anyInvoice).ToList();
+        foreach (var spec in everyForm)
             Step($"form '{spec.Title}' builds", () => { using var d = FormDialog.Create(spec, out _); return 0; });
+
+        // and the same specs in the window. This is the suite with a database to build them from,
+        // and it also settles whether the two frameworks' Applications can share a process: this
+        // one has already called Terminal.Gui's Application.Init with the fake driver.
+        RealFormsLayOut(everyForm);
 
         if (consultancy != null)
         {

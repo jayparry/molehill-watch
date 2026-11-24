@@ -70,9 +70,21 @@ public static partial class SelfTest
         }
     }
 
+    /// <summary>
+    ///   What one TextBlock shows. A TextBlock built through its Inlines reads back Text == "" -
+    ///   setting Text makes a Run, but adding Runs never updates Text - so a view written that way
+    ///   would lay out, look right, and be invisible to every test here. The views are written not
+    ///   to do it; this reads the inlines anyway, so that the harness is not the thing that is
+    ///   blind if one ever does.
+    /// </summary>
+    private static string TextOf(TextBlock block) =>
+        block.Text.Length > 0
+            ? block.Text
+            : string.Concat(block.Inlines.OfType<System.Windows.Documents.Run>().Select(r => r.Text));
+
     /// <summary>All the text a control would show, in tree order.</summary>
     private static List<string> Texts(DependencyObject root) =>
-        Descendants<TextBlock>(root).Select(t => t.Text).Where(t => !string.IsNullOrWhiteSpace(t)).ToList();
+        Descendants<TextBlock>(root).Select(TextOf).Where(t => !string.IsNullOrWhiteSpace(t)).ToList();
 
     /// <summary>
     ///   One part of the suite, with a throw turned into a FAIL rather than an unhandled exception.
@@ -123,7 +135,188 @@ public static partial class SelfTest
 
         Section("the palette", CheckPalette);
         Section("the grid", () => CheckGrid(watcher));
+        Section("the toolbar", () => CheckToolbar(watcher));
+        Section("the forms", () => CheckForms(watcher));
         return Finish();
+    }
+
+    private static void CheckToolbar(BindingWatcher watcher)
+    {
+        // a real rule, not one invented for the test: a pre-paid package that has been invoiced and
+        // partly used, so two of its five actions do not apply and both have something to say.
+        var set = ActionRules.Prepaid("PP-14", "Open", invoice: "MDS-INV-2026-0009", used: 4m);
+        var ran = new List<string>();
+        var handlers = set.Actions.Where(a => a.Enabled)
+            .ToDictionary(a => a.Id, a => (Action)(() => ran.Add(a.Id)));
+
+        watcher.Clear();
+        var toolbar = new Toolbar();
+        var host = new UserControl { Content = toolbar };
+        Step("the toolbar takes an action set and lays out", () => { toolbar.Show(set, handlers); Layout(host, 1100, 120); return 0; });
+        Check("no binding warnings from the toolbar", watcher.Lines.Count == 0, string.Join(" | ", watcher.Lines.Take(2)));
+
+        var buttons = toolbar.Buttons;
+        Check("every action is on show, not only the ones that apply",
+            buttons.Count == set.Actions.Count && buttons.Count > set.Available.Count,
+            $"{buttons.Count} buttons for {set.Actions.Count} actions, {set.Available.Count} of them available");
+        Check("the labels are the action labels",
+            buttons.Select(b => b.Content as string).SequenceEqual(set.Actions.Select(a => a.Label)),
+            string.Join(" | ", buttons.Select(b => b.Content)));
+        Check("each button is tagged with its action id, so nothing is dispatched by label",
+            buttons.Select(b => b.Tag as string).SequenceEqual(set.Actions.Select(a => a.Id)),
+            string.Join(" | ", buttons.Select(b => b.Tag)));
+
+        foreach (var action in set.Actions)
+        {
+            var button = buttons.First(b => (b.Tag as string) == action.Id);
+            Check($"toolbar: {action.Id} is {(action.Enabled ? "offered" : "greyed")}",
+                button.IsEnabled == action.Enabled);
+            if (action.Enabled) continue;
+            Check($"toolbar: {action.Id} says why not",
+                (button.ToolTip as string) == action.DisabledReason, button.ToolTip as string ?? "(nothing)");
+            Check($"toolbar: {action.Id} shows that reason even though it is greyed",
+                ToolTipService.GetShowOnDisabled(button));
+        }
+
+        var invoice = buttons.First(b => (b.Tag as string) == "prepaid-invoice");
+        Check("and the reason names the invoice it is already on",
+            (invoice.ToolTip as string)?.Contains("MDS-INV-2026-0009") == true, invoice.ToolTip as string ?? "");
+        var cancel = buttons.First(b => (b.Tag as string) == "prepaid-cancel");
+        Check("and the one about used hours says how many",
+            (cancel.ToolTip as string)?.Contains("4") == true, cancel.ToolTip as string ?? "");
+
+        var usage = buttons.First(b => (b.Tag as string) == "prepaid-usage");
+        usage.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+        Check("pressing a button runs its action", ran.SequenceEqual(new[] { "prepaid-usage" }), string.Join(", ", ran));
+
+        ExpectError("an action offered with nothing to run is refused when the toolbar is built",
+            () => new Toolbar().Show(set, new Dictionary<string, Action>()), "nothing to run");
+
+        // the window's half of the error policy: a failure reports rather than escaping
+        var reported = new List<string>();
+        Report.Sink = (title, message) => reported.Add($"{title}: {message}");
+        try
+        {
+            var angry = new Toolbar();
+            angry.Show(ActionRules.Ticket("MW-00001"),
+                ActionRules.Ticket("MW-00001").Actions.ToDictionary(a => a.Id,
+                    a => (Action)(() => throw new FormatException("Minutes: 'half an hour' is not a whole number."))));
+            angry.Buttons[0].RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+            Check("an action that fails is reported, not thrown out of the window",
+                reported.Count == 1 && reported[0].Contains("half an hour"), string.Join(" | ", reported));
+            Check("and a message about what was typed is shown as it was written",
+                reported[0].EndsWith("Minutes: 'half an hour' is not a whole number."), reported[0]);
+        }
+        finally { Report.Sink = null; }
+    }
+
+    /// <summary>
+    ///   Every real form in the app, laid out in the window as well as in the terminal. Called from
+    ///   the read-only suite, which is the one with a database to build the specs from; the synthetic
+    ///   form in <see cref="CheckForms"/> covers the renderer's rules, and this covers the 41 forms
+    ///   that actually exist, with their real defaults, choices and help.
+    /// </summary>
+    public static void RealFormsLayOut(IEnumerable<FormSpec> specs)
+    {
+        var watcher = BindingWatcher.Install();
+        foreach (var spec in specs)
+        {
+            watcher.Clear();
+            var form = Step($"form '{spec.Title}' lays out in the window", () =>
+            {
+                var built = new MhForm(spec);
+                Layout(built, 900);
+                return built;
+            });
+            if (form == null) continue;
+            Check($"form '{spec.Title}': no binding warnings",
+                watcher.Lines.Count == 0, string.Join(" | ", watcher.Lines.Take(2)));
+            var shown = Texts(form);
+            var unlabelled = spec.Fields.Where(f => !shown.Contains(f.Label)).Select(f => f.Label).ToList();
+            Check($"form '{spec.Title}': every field is labelled",
+                unlabelled.Count == 0, string.Join(", ", unlabelled));
+        }
+    }
+
+    private static void CheckForms(BindingWatcher watcher)
+    {
+        // every kind of field there is, so the renderer is covered without needing a database
+        var spec = new FormSpec
+        {
+            Title = "Everything",
+            Intro = "One of each, to lay out.",
+            Fields = new List<Field>
+            {
+                Field.Text("name", "Client name", required: true, help: "as it should appear on the invoice"),
+                Field.Memo("notes", "Notes"),
+                Field.Date("from", "Covered from", required: true),
+                Field.DateTime("at", "Raised at"),
+                Field.Int("minutes", "Minutes", required: true),
+                Field.Decimal("rate", "Rate"),
+                Field.Bool("urgent", "Urgent", def: true),
+                Field.Choice("severity", "Severity", new[] { "Low", "Normal", "High" }, def: "Normal")
+            },
+            Submit = v => { var r = new ProcResult(); r.Messages.Add($"{v["name"]} / {v.Int("minutes")} / {v["severity"]}"); return r; }
+        };
+
+        watcher.Clear();
+        var form = new MhForm(spec);
+        Step("a form with one of every field lays out", () => { Layout(form, 900); return 0; });
+        Check("no binding warnings from the form", watcher.Lines.Count == 0, string.Join(" | ", watcher.Lines.Take(2)));
+
+        var texts = Texts(form);
+        Check("the intro is shown", texts.Contains("One of each, to lay out."), string.Join(" | ", texts.Take(3)));
+        foreach (var field in spec.Fields)
+            Check($"form: {field.Name} is labelled", texts.Any(t => t.StartsWith(field.Label)), field.Label);
+        // the star is its own TextBlock next to the label, so "labelled, then starred" in tree order
+        static bool Starred(DependencyObject root, string label)
+        {
+            var blocks = Descendants<TextBlock>(root).Select(TextOf).ToList();
+            var at = blocks.IndexOf(label);
+            return at >= 0 && at + 1 < blocks.Count && blocks[at + 1].Trim() == "*";
+        }
+        Check("a required field is marked with a star", Starred(form, "Client name"),
+            string.Join(" | ", texts.Where(t => t.Contains('*'))));
+        Check("and one that is not required is not", !Starred(form, "Notes"));
+        Check("the star says what it means, for anyone who has not met the convention",
+            Descendants<TextBlock>(form).Any(t => TextOf(t).Trim() == "*" && (t.ToolTip as string) == "Required"));
+        Check("the help sits with its field rather than being dropped for want of room",
+            texts.Contains("as it should appear on the invoice"));
+        Check("a date says what shape it wants", texts.Contains("yyyy-mm-dd"));
+
+        Check("a choice is a drop-down, already on its default",
+            Descendants<ComboBox>(form).SingleOrDefault() is { SelectedItem: "Normal" });
+        Check("a yes/no is a tick box, already set",
+            Descendants<CheckBox>(form).SingleOrDefault() is { IsChecked: true });
+        Check("the memo takes more than one line",
+            Descendants<TextBox>(form).Any(t => t.AcceptsReturn && t.TextWrapping == TextWrapping.Wrap));
+
+        // filling it in and submitting, with nothing on screen but the control
+        var boxes = Descendants<TextBox>(form).ToList();
+        boxes[0].Text = "Contoso Ltd";          // name
+        boxes[2].Text = "2026-03-01";           // from
+        boxes[3].Text = "2026-03-01 09:30";     // at
+        boxes[4].Text = "90";                   // minutes
+        var values = form.Values();
+        Check("what was typed is read back off the controls",
+            values["name"] == "Contoso Ltd" && values["minutes"] == "90" && values["severity"] == "Normal"
+            && values["urgent"] == "1", $"{values["name"]} / {values["minutes"]} / {values["severity"]} / {values["urgent"]}");
+        var result = form.Submit();
+        Check("submitting runs the form's own Submit",
+            result?.Messages.FirstOrDefault() == "Contoso Ltd / 90 / Normal", result?.Messages.FirstOrDefault() ?? "(nothing)");
+        Check("and nothing is complained about", form.Problem == null, form.Problem ?? "");
+
+        // and the failure path: the form stays up with the reason on it
+        boxes[4].Text = "half an hour";
+        Check("a number that is not one is refused", form.Submit() == null);
+        Check("the reason is put on the form, which stays open",
+            form.Problem?.Contains("not a whole number") == true, form.Problem ?? "(nothing shown)");
+        Check("and it names the field by its label", form.Problem?.StartsWith("Minutes") == true, form.Problem ?? "");
+
+        boxes[4].Text = "90";
+        boxes[0].Text = "   ";
+        Check("a required field left blank is refused", form.Submit() == null);
+        Check("and says which one", form.Problem?.Contains("Client name") == true, form.Problem ?? "");
     }
 
     private static void CheckPalette()
