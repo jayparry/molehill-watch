@@ -175,11 +175,13 @@ If a client's Molehill Watch lives in their own DBA database, add `-Database <na
 
 ## Consultancy and other work
 
-Work that isn't Molehill Watch support - a migration, a review, a few days of advice - is a **consultancy engagement**. You agree a day rate (or an hourly rate, or a fixed price), log the days as you work, and the billing run invoices **every two weeks**, counted from the day the work started.
+Work that isn't Molehill Watch support - a migration, a review, a few days of advice - is a **consultancy engagement**. You agree a day rate (or an hourly rate, a fixed price, or a price per instance), log the days as you work, and the billing run invoices **every two weeks**, counted from the day the work started.
 
 | Step | Command |
 |---|---|
 | Start one | `EXEC dbo.usp_Engagement_Add @Client = N'Contoso Ltd', @Name = N'Data warehouse migration', @DayRate = 650, @PurchaseOrder = N'PO-4471';` |
+| Start a per-instance one | `EXEC dbo.usp_Engagement_Add @Client = N'Contoso Ltd', @Name = N'SQL Server health check', @BillingMode = 'PerInstance', @FirstUnitPrice = 1450, @ExtraUnitPrice = 350, @UnitCount = 3, @PriceCap = 3500;` |
+| Correct the instance count | `EXEC dbo.usp_Engagement_Update @Engagement = 'CON-0003', @UnitCount = 7;` |
 | Log a day | `EXEC dbo.usp_Work_Log @Engagement = 'CON-0001', @Days = 1, @Description = N'Discovery workshop';` |
 | Log part of a day | `EXEC dbo.usp_Work_Log @Engagement = 'CON-0001', @Hours = 3, @Description = N'Schema review', @WorkDate = '2026-08-04';` |
 | Log something you won't charge for | `... @Hours = 1, @Description = N'Internal write-up', @IsBillable = 0;` |
@@ -193,6 +195,18 @@ Work that isn't Molehill Watch support - a migration, a review, a few days of ad
 **How days are worked out.** A day is 7.5 hours (`DayHours`) and each day worked rounds up to the nearest half day (`DayRateRounding`: `HalfDay`, `WholeDay` or `Exact`; an engagement can override it). Everything logged on the same date counts together, so 2 hours in the morning and 3 in the afternoon is one day, not two half days. Each day worked becomes one invoice line, with what you did on it.
 
 **Rates.** `@DayRate` is the usual arrangement. `@BillingMode = 'Hourly'` with `@HourlyRate` bills by the hour instead. `@BillingMode = 'FixedPrice'` with `@FixedPrice` invoices the agreed price when you mark the work finished - log the days anyway, so you can see what it really cost. `@OutOfHoursRate` is optional: without it, evening and weekend work is billed at the day rate like anything else.
+
+**Priced per instance.** `@BillingMode = 'PerInstance'` is for work sold by the server rather than by the day - a health check across an estate. It takes `@FirstUnitPrice` for the first instance, `@ExtraUnitPrice` for each one after it (leave it out and the rest are included), `@UnitCount` for how many there are, and an optional `@PriceCap` the total never passes. The price is worked out in the database, so `Engagement.UnitTotal` is the one figure the invoice, the dashboard and the app all read:
+
+| First | Each extra | Count | Cap | Comes to |
+|---|---|---|---|---|
+| 1,450 | 350 | 1 | 3,500 | 1,450 |
+| 1,450 | 350 | 3 | 3,500 | 2,150 |
+| 1,450 | 350 | 10 | 3,500 | 3,500 (capped) |
+
+Like a fixed price it is invoiced when you mark the work finished, not by the fortnight, and the dashboard doesn't chase the days logged against it as unbilled work. The invoice shows the client how the figure was reached - a line for the first instance, a line for the others, and, where the cap bit, a line for what it took off - because that breakdown is the reason for selling it this way. Log the days anyway: they tell you whether the price is right.
+
+Why per instance rather than per day: the collection and the report are automated, so pricing by the day means every improvement to the tooling cuts the invoice. A fixed price per instance turns the same automation into margin.
 
 **When it's invoiced.** Each engagement is billed in fortnights from its own start date: an engagement that started on Monday 6 July has periods 6-19 July, 20 July - 2 August, and so on. A period is invoiced once it has ended, dated its last day, and a period with no work in it raises nothing. Marking the engagement finished invoices the part period straight away, dated the day it finished.
 

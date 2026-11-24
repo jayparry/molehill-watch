@@ -252,6 +252,8 @@ public static class Queries
                              CASE WHEN a.StartDate > @Today THEN a.StartDate ELSE @Today END)), 0), 'N0') + '/month'
                     WHEN 'DayRate'    THEN NCHAR(163) + FORMAT(e.DayRate, 'N0') + '/day'
                     WHEN 'Hourly'     THEN NCHAR(163) + FORMAT(e.HourlyRate, 'N0') + '/hour'
+                    WHEN 'PerInstance' THEN NCHAR(163) + FORMAT(e.UnitTotal, 'N0') + '/'
+                         + CONVERT(nvarchar(10), ISNULL(e.UnitCount, 1)) + ' inst'
                     ELSE NCHAR(163) + FORMAT(e.FixedPrice, 'N0') + ' fixed' END AS Rate,
                CASE WHEN e.EngagementType = 'Monitoring'
                     THEN NULLIF(FORMAT(ISNULL((SELECT SUM(te.Minutes) / 60.0 FROM dbo.TimeEntry te
@@ -274,11 +276,12 @@ public static class Queries
     {
         var t = db.Query("""
             SELECT e.EngagementRef, c.ClientName, e.EngagementType, e.Name, e.BillingMode, e.DayRate, e.HourlyRate, e.OutOfHoursRate,
-                   e.FixedPrice, e.DayRounding, e.PurchaseOrder, e.Status, e.StartDate, e.EndDate, e.CompletedOn, e.Notes,
+                   e.FixedPrice, e.UnitCount, e.FirstUnitPrice, e.ExtraUnitPrice, e.PriceCap, e.UnitTotal,
+                   e.DayRounding, e.PurchaseOrder, e.Status, e.StartDate, e.EndDate, e.CompletedOn, e.Notes,
                    (SELECT STRING_AGG(ct.FullName + ISNULL(N' <' + ct.Email + N'>', N' (no e-mail)'), N'; ') FROM dbo.Contact ct
                     WHERE ct.ClientId = c.ClientId AND ct.IsActive = 1 AND ct.IsBillingContact = 1) AS InvoicesTo,
                    ISNULL(u.Days, 0) AS UnbilledDays, ISNULL(u.Value, 0) AS UnbilledValue, u.LastWorked,
-                   CASE WHEN e.BillingMode = 'FixedPrice' THEN NULL
+                   CASE WHEN e.BillingMode IN ('FixedPrice', 'PerInstance') THEN NULL
                         ELSE DATEADD(day, -1, dbo.fn_ConsultancyPeriodStart(e.StartDate,
                              dbo.fn_ConsultancyPeriod(e.StartDate, CAST(dbo.fn_UkNow() AS date), dbo.fn_EngagementBillingDays(e.EngagementId)) + 1,
                              dbo.fn_EngagementBillingDays(e.EngagementId))) END AS PeriodEndsOn,

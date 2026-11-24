@@ -823,6 +823,63 @@ public static class SelfTest
             r => r.First!.Rows.Cast<DataRow>().Any(x => (DateTime)x["InvoiceDate"] != conEnd) ? "invoice not dated on the finish date"
                  : (decimal)Queries.Engagement(db, conRef)!["UnbilledDays"] == 0m ? null : "days left unbilled");
 
+        /* per-instance work: a health check sold by the server. The price is worked out from the
+           count, so the sums are what can go wrong - and the cap only shows itself at a count high
+           enough to pass it. */
+        var piRef = $"PIN-{stamp}";
+        Step("new per-instance engagement", () => Submit(AdminForms.NewEngagement(db, name), ("ClientName", name),
+                ("Name", "SQL Server health check"), ("BillingMode", "Per instance"),
+                ("FirstUnitPrice", "1450"), ("ExtraUnitPrice", "350"), ("UnitCount", "3"), ("PriceCap", "3500"),
+                ("StartDate", D(DateTime.Today)), ("EngagementRef", piRef)),
+            r => r.First is { Rows.Count: 1 } t2 && (string)t2.Rows[0]["EngagementRef"] == piRef ? null : "engagement not returned");
+        Step("three instances price at 1450 + 2 x 350", () => Queries.Engagement(db, piRef)!,
+            r => (decimal)r["UnitTotal"] == 2150m ? null : $"£{r["UnitTotal"]}");
+        Step("the summary shows how the price is built", () => EngagementWindow.Summary(db, piRef, includeWork: false),
+            s2 => s2.Contains("£2,150.00 for 3 instance(s)") && s2.Contains("£1,450.00 first, then £350.00 each")
+                  && s2.Contains("capped at £3,500.00") && s2.Contains("Invoiced when you mark it finished")
+                  ? null : s2.Split('\n').Skip(1).FirstOrDefault() ?? "no line");
+        var piChoice = Queries.EngagementChoices(db).First(c => Queries.RefFromChoice(c) == piRef);
+        Step("nothing is invoiced until it is finished", () => Submit(AdminForms.RunBilling(db), ("Client", piChoice)),
+            r => r.First is { Rows.Count: 0 } ? null : $"{r.First?.Rows.Count} invoice(s) raised early");
+        /* The days a health check took are still worth recording, they are just not what the client
+           is charged for. Logging some is what makes the fortnightly billing visible by its absence:
+           without it there is nothing for a period to invoice and the mode is never really tested. */
+        Step("the days it took are logged, but they are not what is billed", () =>
+            { Submit(AdminForms.LogWork(db, piRef), ("WorkDate", D(DateTime.Today)), ("Days", "2"), ("Description", "Collection and write-up")); return Queries.Engagement(db, piRef)!; },
+            r => (decimal)r["TotalDays"] == 2m && r["PeriodEndsOn"] is DBNull ? null
+                 : $"{r["TotalDays"]} days, period ends {r["PeriodEndsOn"]}");
+        Step("two weeks of work does not raise a fortnightly invoice", () => Submit(AdminForms.RunBilling(db), ("Client", piChoice)),
+            r => r.First is { Rows.Count: 0 } ? null : $"{r.First?.Rows.Count} invoice(s) raised by the period");
+        Step("and the dashboard does not chase it as unbilled work", () => db.Proc("dbo.usp_Dashboard", ("@AlertsOnly", true)),
+            r => r.First!.Rows.Cast<DataRow>().Any(a2 => ((string)a2["Item"]).StartsWith("Unbilled work: " + piRef))
+                 ? "listed as unbilled work, but it is invoiced on completion" : null);
+        Step("a bigger estate is capped, not charged per instance for ever", () =>
+            { Submit(AdminForms.EditEngagement(db, piRef), ("UnitCount", "10")); return Queries.Engagement(db, piRef)!; },
+            r => (decimal)r["UnitTotal"] == 3500m ? null : $"£{r["UnitTotal"]} for 10, expected the £3,500 cap");
+        ExpectError("an estate of none is refused", () => Submit(AdminForms.EditEngagement(db, piRef), ("UnitCount", "0")), "1 or more");
+        Step("finish it", () => Submit(AdminForms.CompleteEngagement(db, piRef), ("CompletedOn", D(DateTime.Today))));
+        var piBilled = Step("the completion invoice is the capped total", () => Submit(AdminForms.RunBilling(db), ("Client", piChoice)),
+            r => r.First is { Rows.Count: 1 } t2 && (decimal)t2.Rows[0]["Total"] == 3500m ? null
+                 : $"{r.First?.Rows.Count} invoice(s), total {r.First?.Rows.Cast<DataRow>().FirstOrDefault()?["Total"]}");
+        var piInvoice = piBilled?.First?.Rows[0]["InvoiceNo"] as string ?? "?";
+        Step("it shows the first instance, the other nine, and what the cap took off", () => Queries.InvoiceLines(db, piInvoice),
+            t2 =>
+            {
+                var l = t2.Rows.Cast<DataRow>().ToList();
+                var first = l.FirstOrDefault(r => ((string)r["Description"]).Contains("first SQL Server instance"));
+                var extra = l.FirstOrDefault(r => ((string)r["Description"]).Contains("further instance"));
+                var cap = l.FirstOrDefault(r => (string)r["Type"] == "Adjustment");
+                return first != null && (decimal)first["Amount"] == 1450m
+                       && extra != null && (decimal)extra["Qty"] == 9m && (decimal)extra["Amount"] == 3150m
+                       && cap != null && (decimal)cap["Amount"] == -1100m
+                       ? null : string.Join(" | ", l.Select(r => $"{r["Type"]} {r["Qty"]}x{r["Price"]}={r["Amount"]}"));
+            });
+        Step("billing again raises nothing twice", () => Submit(AdminForms.RunBilling(db), ("Client", piChoice)),
+            r => r.First is { Rows.Count: 0 } ? null : $"{r.First?.Rows.Count} more invoice(s)");
+        ExpectError("a per-instance engagement with no first-instance price is refused", () =>
+            Submit(AdminForms.NewEngagement(db, name), ("ClientName", name), ("Name", "No price"),
+                   ("BillingMode", "Per instance"), ("EngagementRef", $"PIX-{stamp}")), "FirstUnitPrice");
+
         // an invoice typed by hand
         var typed = Step("new invoice typed by hand", () => Submit(AdminForms.NewInvoice(db), ("ClientName", name)),
             r => r.First is { Rows.Count: 1 } ? null : "no invoice");

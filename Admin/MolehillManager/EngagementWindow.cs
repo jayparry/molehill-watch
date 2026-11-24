@@ -106,6 +106,9 @@ public sealed class EngagementWindow
     /// <summary>Contacts are the client's, so look them up through any agreement they have; the client name works too.</summary>
     private string ClientContactsRef() => _ref;
 
+    /// <summary>How many instances a per-instance price covers; blank on the engagement means the one.</summary>
+    private static int UnitCount(DataRow e) => e["UnitCount"] is int c ? c : 1;
+
     /// <summary>The engagement in a few lines; with the work and invoices for the Clients tab preview.</summary>
     public static string Summary(AdminDb db, string engagementRef, bool includeWork)
     {
@@ -118,6 +121,10 @@ public sealed class EngagementWindow
             "DayRate" => $"£{e["DayRate"]:N2} a day",
             "Hourly" => $"£{e["HourlyRate"]:N2} an hour",
             "FixedPrice" => $"£{e["FixedPrice"]:N2} fixed price",
+            "PerInstance" => $"£{e["UnitTotal"]:N2} for {UnitCount(e)} instance(s)"
+                             + $" (£{e["FirstUnitPrice"]:N2} first"
+                             + (e["ExtraUnitPrice"] is decimal x && x > 0 ? $", then £{x:N2} each" : ", the rest included")
+                             + (e["PriceCap"] is decimal cap ? $", capped at £{cap:N2}" : "") + ")",
             _ => "per the agreement"
         };
         var sb = new StringBuilder();
@@ -130,7 +137,7 @@ public sealed class EngagementWindow
                       + (e["LastWorked"] is DBNull ? "" : $"; last worked {F("LastWorked")}"));
         sb.AppendLine($"Invoiced so far: £{e["Invoiced"]:N2}"
                       + (e["PurchaseOrder"] is DBNull ? "" : $"   PO: {F("PurchaseOrder")}")
-                      + (mode == "FixedPrice" ? "   Invoiced when you mark it finished"
+                      + (mode is "FixedPrice" or "PerInstance" ? "   Invoiced when you mark it finished"
                          : e["PeriodEndsOn"] is DateTime ends
                            ? $"   Billed every {e["BillingEveryDays"]} days from the start: this period ends {ends:dd MMM yyyy}" : ""));
         sb.AppendLine($"Invoices to: {(e["InvoicesTo"] is DBNull ? "NO ONE - add a contact that receives invoices" : F("InvoicesTo"))}");

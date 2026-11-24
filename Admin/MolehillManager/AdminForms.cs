@@ -720,14 +720,14 @@ public static class AdminForms
 
     public static readonly (string Label, string Value)[] BillingModes =
     {
-        ("Day rate", "DayRate"), ("Hourly", "Hourly"), ("Fixed price", "FixedPrice")
+        ("Day rate", "DayRate"), ("Hourly", "Hourly"), ("Fixed price", "FixedPrice"), ("Per instance", "PerInstance")
     };
     public static readonly (string Label, string? Value)[] Roundings =
     {
         ("Standard (half days)", null), ("Half days", "HalfDay"), ("Whole days", "WholeDay"), ("Exact hours", "Exact")
     };
 
-    /// <summary>A piece of consultancy work for a client: day rate, hourly or fixed price.</summary>
+    /// <summary>A piece of consultancy work for a client: day rate, hourly, fixed price or per instance.</summary>
     public static FormSpec NewEngagement(AdminDb db, string? clientName = null)
     {
         var clients = Queries.ClientNames(db);
@@ -737,7 +737,9 @@ public static class AdminForms
         {
             Title = "New consultancy engagement",
             Intro = "Work for a client that is not Molehill Watch support: a project, a review, advice. Log the days against it as you go, " +
-                    "and the billing run invoices it every two weeks, counted from the day it starts. Fixed-price work is invoiced when you mark it finished.",
+                    "and the billing run invoices it every two weeks, counted from the day it starts. Fixed-price and per-instance work " +
+                    "is invoiced when you mark it finished. Per instance is for work sold by the server - a health check across an estate - " +
+                    "where the price is a figure for the first instance and a smaller one for each after it.",
             Fields =
             {
                 Field.Choice("ClientName", "Client", clients.ToArray()),
@@ -746,6 +748,10 @@ public static class AdminForms
                 Field.Decimal("DayRate", "Day rate (£)", help: "day-rate work"),
                 Field.Decimal("HourlyRate", "Hourly rate (£)", help: "hourly work"),
                 Field.Decimal("FixedPrice", "Fixed price (£)", help: "fixed-price work"),
+                Field.Decimal("FirstUnitPrice", "First instance (£)", help: "per-instance work"),
+                Field.Decimal("ExtraUnitPrice", "Each extra instance (£)", help: "blank = the rest are included"),
+                Field.Int("UnitCount", "Instances covered", help: "blank = 1; change it once the estate is confirmed"),
+                Field.Decimal("PriceCap", "Never more than (£)", help: "blank = no ceiling, however many there are"),
                 Field.Decimal("OutOfHoursRate", "Out-of-hours rate (£/h)", help: "blank = out-of-hours work is billed at the day rate"),
                 Field.Choice("DayRounding", "Rounding", Roundings.Select(r => r.Label).ToArray()),
                 Field.Int("BillingEveryDays", "Invoiced every (days)", help: "blank = 14 (a fortnight); 7 weekly, 28 four-weekly"),
@@ -760,6 +766,8 @@ public static class AdminForms
                 ("@Name", v.Str("Name")),
                 ("@BillingMode", BillingModes.First(m => m.Label == v["BillingMode"]).Value),
                 ("@DayRate", v.Dec("DayRate")), ("@HourlyRate", v.Dec("HourlyRate")), ("@FixedPrice", v.Dec("FixedPrice")),
+                ("@UnitCount", v.Int("UnitCount")), ("@FirstUnitPrice", v.Dec("FirstUnitPrice")),
+                ("@ExtraUnitPrice", v.Dec("ExtraUnitPrice")), ("@PriceCap", v.Dec("PriceCap")),
                 ("@OutOfHoursRate", v.Dec("OutOfHoursRate")),
                 ("@DayRounding", Roundings.First(r => r.Label == v["DayRounding"]).Value),
                 ("@BillingEveryDays", v.Int("BillingEveryDays")),
@@ -782,6 +790,10 @@ public static class AdminForms
                 Field.Decimal("DayRate", "Day rate (£)", def: Now("DayRate")),
                 Field.Decimal("HourlyRate", "Hourly rate (£)", def: Now("HourlyRate")),
                 Field.Decimal("FixedPrice", "Fixed price (£)", def: Now("FixedPrice")),
+                Field.Decimal("FirstUnitPrice", "First instance (£)", def: Now("FirstUnitPrice")),
+                Field.Decimal("ExtraUnitPrice", "Each extra instance (£)", def: Now("ExtraUnitPrice")),
+                Field.Int("UnitCount", "Instances covered", def: Now("UnitCount")),
+                Field.Decimal("PriceCap", "Never more than (£)", def: Now("PriceCap")),
                 Field.Decimal("OutOfHoursRate", "Out-of-hours rate (£/h)", def: Now("OutOfHoursRate")),
                 Field.Int("BillingEveryDays", "Invoiced every (days)", def: Now("BillingEveryDays"), help: "blank = leave as it is"),
                 Field.Date("StartDate", "Starts", def: Now("StartDate")),
@@ -792,6 +804,8 @@ public static class AdminForms
             },
             Submit = v => db.Proc("dbo.usp_Engagement_Update", ("@Engagement", engagementRef), ("@Name", v.Str("Name")),
                 ("@DayRate", v.Dec("DayRate")), ("@HourlyRate", v.Dec("HourlyRate")), ("@FixedPrice", v.Dec("FixedPrice")),
+                ("@UnitCount", v.Int("UnitCount")), ("@FirstUnitPrice", v.Dec("FirstUnitPrice")),
+                ("@ExtraUnitPrice", v.Dec("ExtraUnitPrice")), ("@PriceCap", v.Dec("PriceCap")),
                 ("@OutOfHoursRate", v.Dec("OutOfHoursRate")), ("@BillingEveryDays", v.Int("BillingEveryDays")),
                 ("@StartDate", v.Date("StartDate")), ("@EndDate", v.Date("EndDate")),
                 ("@PurchaseOrder", v.Str("PurchaseOrder")), ("@Status", v.Str("Status")), ("@Notes", v.Str("Notes")))
@@ -805,7 +819,7 @@ public static class AdminForms
         return new FormSpec
         {
             Title = $"Finish {engagementRef}",
-            Intro = "Marks the work finished. The next billing run invoices whatever is left - and, for fixed-price work, the agreed price. "
+            Intro = "Marks the work finished. The next billing run invoices whatever is left - and, for fixed-price and per-instance work, the agreed price. "
                     + "The invoice is dated the day you give here.",
             Fields = { Field.Date("CompletedOn", "Finished on", def: expectedEnd,
                                   help: expectedEnd == "" ? "blank = today" : "the end date on the engagement; change it if it really finished another day") },

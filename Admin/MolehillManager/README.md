@@ -119,6 +119,7 @@ Invoice numbers follow the invoice date: after every billing run the drafts are 
 
 - Tabs for **Days worked**, **Everything logged**, **Invoices** and **Contacts**.
 - F2 logs work: give days (1, 0.5) or hours, and what you did. Everything logged on one date is billed as that day's work, rounded up to the nearest half day.
+- **Billed as** picks how the work is priced: day rate, hourly, fixed price, or **per instance**. Per instance is for work sold by the server - a health check across an estate - and asks for the price of the **first instance**, the price of **each extra instance** (blank = the rest are included), how many **instances** it covers, and a figure it should **never be more than**. The summary shows what that comes to, and you can correct the count later as the estate is confirmed. Like a fixed price it is invoiced when you mark it finished, and the invoice shows the client the first instance, the others, and anything the cap took off.
 - **Invoiced every (days)** on the engagement sets its own billing rhythm (blank = the house default of 14). The summary line says when the current period ends.
 - Days worked shows what each day will be charged, or what it was invoiced at if it has already been billed.
 - Everything logged is the raw entries, including non-billable ones; Enter on one corrects or removes it (once invoiced, void the invoice first).

@@ -1,6 +1,6 @@
 # Molehill Watch – SQL Server Support Package toolkit
 
-The monitoring side is Molehill Watch. The admin database behind it, **Molehill Admin**, bills everything Molehill Data Services does: Molehill Watch support agreements, consultancy at a day rate, and one-off invoices typed by hand.
+The monitoring side is Molehill Watch. The admin database behind it, **Molehill Admin**, bills everything Molehill Data Services does: Molehill Watch support agreements, consultancy at a day rate, productised work priced per instance, and one-off invoices typed by hand.
 
 *Catching molehills before they're mountains.*
 

@@ -1,7 +1,7 @@
 /*
 ===============================================================================
  Molehill Watch - SQL Server Support Package
- Molehill Admin: clients, engagements, tickets, time and billing  Version 2.6.0
+ Molehill Admin: clients, engagements, tickets, time and billing  Version 2.7.0
  Molehill Data Services  -  jay@jayparry.co.uk  -  molehilldataservices.com
 -------------------------------------------------------------------------------
  Runs on YOUR OWN SQL Server (Express is fine), not on client servers.
@@ -130,6 +130,9 @@ CREATE TABLE dbo.Engagement (
     HourlyRate     decimal(9,2)  NULL,          -- Hourly mode
     OutOfHoursRate decimal(9,2)  NULL,          -- optional: hourly rate for out-of-hours consultancy
     FixedPrice     decimal(10,2) NULL,          -- FixedPrice mode: invoiced when the work is marked complete
+    -- PerInstance mode adds UnitCount, FirstUnitPrice, ExtraUnitPrice, PriceCap and the UnitTotal
+    -- they come to. They are added in the upgrade section below, as every column added after 1.0 is,
+    -- so the price is worked out in exactly one place.
     DayRounding    varchar(10)   NULL CONSTRAINT CK_Engagement_Rounding CHECK (DayRounding IN ('HalfDay', 'WholeDay', 'Exact')),
     PurchaseOrder  nvarchar(100) NULL,          -- client PO number, printed on the invoice
     Status         varchar(15)   NOT NULL CONSTRAINT DF_Engagement_Status DEFAULT 'Active'
@@ -494,6 +497,52 @@ END
 IF COL_LENGTH(N'dbo.Engagement', N'BillingEveryDays') IS NULL
     ALTER TABLE dbo.Engagement ADD BillingEveryDays int NULL
         CONSTRAINT CK_Engagement_BillingEveryDays CHECK (BillingEveryDays IS NULL OR BillingEveryDays BETWEEN 1 AND 365);
+
+/*---------------------------------------------------------------------------
+  2.7.0: per-instance pricing. Productised work - a health check across an
+  estate - is sold by the instance rather than by the day, so that automating
+  the work makes it more profitable instead of less. The columns go on first,
+  then the two constraints are replaced to let the new mode through.
+---------------------------------------------------------------------------*/
+IF COL_LENGTH(N'dbo.Engagement', N'FirstUnitPrice') IS NULL
+    ALTER TABLE dbo.Engagement ADD
+        UnitCount      int           NULL,
+        FirstUnitPrice decimal(10,2) NULL,
+        ExtraUnitPrice decimal(10,2) NULL,
+        PriceCap       decimal(10,2) NULL,
+        CONSTRAINT CK_Engagement_Units CHECK (
+            (UnitCount      IS NULL OR UnitCount      >= 1) AND
+            (FirstUnitPrice IS NULL OR FirstUnitPrice >= 0) AND
+            (ExtraUnitPrice IS NULL OR ExtraUnitPrice >= 0) AND
+            (PriceCap       IS NULL OR PriceCap       >  0));
+GO
+
+IF COL_LENGTH(N'dbo.Engagement', N'UnitTotal') IS NULL
+    ALTER TABLE dbo.Engagement ADD
+        UnitTotal AS (CASE WHEN FirstUnitPrice IS NULL THEN NULL
+                           WHEN PriceCap IS NOT NULL
+                                AND FirstUnitPrice + ISNULL(ExtraUnitPrice, 0) * (ISNULL(UnitCount, 1) - 1) > PriceCap
+                                THEN PriceCap
+                           ELSE FirstUnitPrice + ISNULL(ExtraUnitPrice, 0) * (ISNULL(UnitCount, 1) - 1) END) PERSISTED;
+GO
+
+IF EXISTS (SELECT 1 FROM sys.check_constraints WHERE name = N'CK_Engagement_Mode' AND definition NOT LIKE N'%PerInstance%')
+BEGIN
+    ALTER TABLE dbo.Engagement DROP CONSTRAINT CK_Engagement_Mode;
+    ALTER TABLE dbo.Engagement ADD CONSTRAINT CK_Engagement_Mode
+        CHECK (BillingMode IN ('AgreementCycle', 'DayRate', 'Hourly', 'FixedPrice', 'PerInstance'));
+END
+
+IF EXISTS (SELECT 1 FROM sys.check_constraints WHERE name = N'CK_Engagement_Rates' AND definition NOT LIKE N'%FirstUnitPrice%')
+BEGIN
+    ALTER TABLE dbo.Engagement DROP CONSTRAINT CK_Engagement_Rates;
+    ALTER TABLE dbo.Engagement ADD CONSTRAINT CK_Engagement_Rates CHECK (
+        (BillingMode = 'DayRate'     AND DayRate        IS NOT NULL) OR
+        (BillingMode = 'Hourly'      AND HourlyRate     IS NOT NULL) OR
+        (BillingMode = 'FixedPrice'  AND FixedPrice     IS NOT NULL) OR
+        (BillingMode = 'PerInstance' AND FirstUnitPrice IS NOT NULL) OR
+         BillingMode = 'AgreementCycle');
+END
 
 /*---------------------------------------------------------------------------
   2.0.0: engagements. Databases from 1.x hang everything off the agreement;
@@ -1456,11 +1505,15 @@ GO
 CREATE OR ALTER PROCEDURE dbo.usp_Engagement_Add
     @Client         nvarchar(200),               -- client name
     @Name           nvarchar(200),               -- what the work is, e.g. 'Data warehouse migration'
-    @BillingMode    varchar(20)   = 'DayRate',   -- DayRate | Hourly | FixedPrice
+    @BillingMode    varchar(20)   = 'DayRate',   -- DayRate | Hourly | FixedPrice | PerInstance
     @DayRate        decimal(9,2)  = NULL,        -- agreed day rate
     @HourlyRate     decimal(9,2)  = NULL,        -- Hourly mode
     @OutOfHoursRate decimal(9,2)  = NULL,        -- optional hourly rate for out-of-hours work
     @FixedPrice     decimal(10,2) = NULL,        -- FixedPrice mode
+    @UnitCount      int           = NULL,        -- PerInstance mode: how many instances it covers (blank = 1)
+    @FirstUnitPrice decimal(10,2) = NULL,        -- PerInstance mode: the first instance
+    @ExtraUnitPrice decimal(10,2) = NULL,        -- each instance after the first; blank = included
+    @PriceCap       decimal(10,2) = NULL,        -- the most it can come to, whatever the count
     @StartDate      date          = NULL,
     @EndDate        date          = NULL,
     @PurchaseOrder  nvarchar(100) = NULL,        -- the client's PO number, printed on invoices
@@ -1473,14 +1526,19 @@ BEGIN
     SET NOCOUNT ON;
     DECLARE @ClientId int = dbo.fn_ClientId(@Client);
     IF @ClientId IS NULL BEGIN RAISERROR(N'Client "%s" not found. Run usp_Client_Add first.', 16, 1, @Client); RETURN; END
-    IF @BillingMode NOT IN ('DayRate', 'Hourly', 'FixedPrice')
+    IF @BillingMode NOT IN ('DayRate', 'Hourly', 'FixedPrice', 'PerInstance')
     BEGIN
-        RAISERROR(N'@BillingMode must be DayRate, Hourly or FixedPrice. A Molehill Watch support agreement is set up with usp_Agreement_Create instead.', 16, 1);
+        RAISERROR(N'@BillingMode must be DayRate, Hourly, FixedPrice or PerInstance. A Molehill Watch support agreement is set up with usp_Agreement_Create instead.', 16, 1);
         RETURN;
     END
     IF @BillingMode = 'DayRate'    AND ISNULL(@DayRate, 0)    <= 0 BEGIN RAISERROR(N'A day-rate engagement needs @DayRate.', 16, 1); RETURN; END
     IF @BillingMode = 'Hourly'     AND ISNULL(@HourlyRate, 0) <= 0 BEGIN RAISERROR(N'An hourly engagement needs @HourlyRate.', 16, 1); RETURN; END
     IF @BillingMode = 'FixedPrice' AND ISNULL(@FixedPrice, 0) <= 0 BEGIN RAISERROR(N'A fixed-price engagement needs @FixedPrice.', 16, 1); RETURN; END
+    IF @BillingMode = 'PerInstance' AND ISNULL(@FirstUnitPrice, 0) <= 0
+    BEGIN RAISERROR(N'A per-instance engagement needs @FirstUnitPrice - the price for the first instance.', 16, 1); RETURN; END
+    IF @UnitCount IS NOT NULL AND @UnitCount < 1 BEGIN RAISERROR(N'@UnitCount must be 1 or more.', 16, 1); RETURN; END
+    IF @ExtraUnitPrice IS NOT NULL AND @ExtraUnitPrice < 0 BEGIN RAISERROR(N'@ExtraUnitPrice cannot be negative.', 16, 1); RETURN; END
+    IF @PriceCap IS NOT NULL AND @PriceCap <= 0 BEGIN RAISERROR(N'@PriceCap must be more than 0.', 16, 1); RETURN; END
     IF @DayRounding IS NOT NULL AND @DayRounding NOT IN ('HalfDay', 'WholeDay', 'Exact')
     BEGIN RAISERROR(N'@DayRounding must be HalfDay, WholeDay or Exact.', 16, 1); RETURN; END
     IF @BillingEveryDays IS NOT NULL AND @BillingEveryDays NOT BETWEEN 1 AND 365
@@ -1496,18 +1554,32 @@ BEGIN
     BEGIN RAISERROR(N'Engagement %s already exists.', 16, 1, @EngagementRef); RETURN; END
 
     INSERT dbo.Engagement (EngagementRef, ClientId, EngagementType, Name, BillingMode, DayRate, HourlyRate, OutOfHoursRate,
-                           FixedPrice, DayRounding, BillingEveryDays, PurchaseOrder, Status, StartDate, EndDate, Notes)
+                           FixedPrice, UnitCount, FirstUnitPrice, ExtraUnitPrice, PriceCap,
+                           DayRounding, BillingEveryDays, PurchaseOrder, Status, StartDate, EndDate, Notes)
     VALUES (@EngagementRef, @ClientId, 'Consultancy', @Name, @BillingMode, @DayRate, @HourlyRate, @OutOfHoursRate,
-            @FixedPrice, @DayRounding, @BillingEveryDays, @PurchaseOrder, 'Active', ISNULL(@StartDate, CAST(dbo.fn_UkNow() AS date)), @EndDate, @Notes);
+            @FixedPrice, @UnitCount, @FirstUnitPrice, @ExtraUnitPrice, @PriceCap,
+            @DayRounding, @BillingEveryDays, @PurchaseOrder, 'Active', ISNULL(@StartDate, CAST(dbo.fn_UkNow() AS date)), @EndDate, @Notes);
 
     PRINT N'Engagement ' + @EngagementRef + N' created. Log work with usp_Work_Log, then usp_Billing_Run invoices it '
-        + CASE WHEN @BillingMode = 'FixedPrice' THEN N'when you mark it complete (usp_Engagement_Complete).'
+        + CASE WHEN @BillingMode IN ('FixedPrice', 'PerInstance') THEN N'when you mark it complete (usp_Engagement_Complete).'
                ELSE N'every ' + CONVERT(nvarchar(10), ISNULL(@BillingEveryDays, dbo.fn_ConsultancyBillingDays())) + N' days from the start date.' END;
+
+    IF @BillingMode = 'PerInstance'
+    BEGIN
+        DECLARE @Priced decimal(10,2) = (SELECT UnitTotal FROM dbo.Engagement WHERE EngagementRef = @EngagementRef);
+        PRINT N'Priced at ' + NCHAR(163) + FORMAT(@Priced, 'N2') + N' for ' + CONVERT(nvarchar(10), ISNULL(@UnitCount, 1))
+            + N' instance(s). Correct the count with usp_Engagement_Update @UnitCount once the estate is confirmed.';
+        IF @PriceCap IS NOT NULL AND @PriceCap < @FirstUnitPrice
+            PRINT N'Note: the cap is below the price of the first instance, so the cap is all this can ever charge.';
+    END
 
     SELECT e.EngagementRef, c.ClientName, e.Name, e.BillingMode,
            Rate = CASE e.BillingMode WHEN 'DayRate' THEN NCHAR(163) + FORMAT(e.DayRate, 'N2') + N'/day'
                                      WHEN 'Hourly'  THEN NCHAR(163) + FORMAT(e.HourlyRate, 'N2') + N'/hour'
+                                     WHEN 'PerInstance' THEN NCHAR(163) + FORMAT(e.UnitTotal, 'N2') + N' for '
+                                          + CONVERT(nvarchar(10), ISNULL(e.UnitCount, 1)) + N' instance(s)'
                                      ELSE NCHAR(163) + FORMAT(e.FixedPrice, 'N2') + N' fixed' END,
+           e.UnitCount, e.FirstUnitPrice, e.ExtraUnitPrice, e.PriceCap, e.UnitTotal,
            e.OutOfHoursRate, e.Status, e.StartDate, e.EndDate, e.PurchaseOrder
     FROM dbo.Engagement e JOIN dbo.Client c ON c.ClientId = e.ClientId WHERE e.EngagementRef = @EngagementRef;
 END
@@ -1520,6 +1592,10 @@ CREATE OR ALTER PROCEDURE dbo.usp_Engagement_Update       -- NULL = leave as it 
     @HourlyRate     decimal(9,2)  = NULL,
     @OutOfHoursRate decimal(9,2)  = NULL,
     @FixedPrice     decimal(10,2) = NULL,
+    @UnitCount      int           = NULL,       -- PerInstance mode: how many instances it covers
+    @FirstUnitPrice decimal(10,2) = NULL,
+    @ExtraUnitPrice decimal(10,2) = NULL,
+    @PriceCap       decimal(10,2) = NULL,
     @StartDate      date          = NULL,
     @EndDate        date          = NULL,
     @PurchaseOrder  nvarchar(100) = NULL,
@@ -1540,11 +1616,16 @@ BEGIN
     BEGIN RAISERROR(N'@DayRounding must be HalfDay, WholeDay or Exact.', 16, 1); RETURN; END
     IF @BillingEveryDays IS NOT NULL AND @BillingEveryDays NOT BETWEEN 1 AND 365
     BEGIN RAISERROR(N'@BillingEveryDays must be between 1 and 365.', 16, 1); RETURN; END
+    IF @UnitCount IS NOT NULL AND @UnitCount < 1 BEGIN RAISERROR(N'@UnitCount must be 1 or more.', 16, 1); RETURN; END
+    IF @ExtraUnitPrice IS NOT NULL AND @ExtraUnitPrice < 0 BEGIN RAISERROR(N'@ExtraUnitPrice cannot be negative.', 16, 1); RETURN; END
+    IF @PriceCap IS NOT NULL AND @PriceCap <= 0 BEGIN RAISERROR(N'@PriceCap must be more than 0.', 16, 1); RETURN; END
 
     UPDATE dbo.Engagement
     SET Name = ISNULL(NULLIF(LTRIM(RTRIM(@Name)), N''), Name),
         DayRate = ISNULL(@DayRate, DayRate), HourlyRate = ISNULL(@HourlyRate, HourlyRate),
         OutOfHoursRate = ISNULL(@OutOfHoursRate, OutOfHoursRate), FixedPrice = ISNULL(@FixedPrice, FixedPrice),
+        UnitCount = ISNULL(@UnitCount, UnitCount), FirstUnitPrice = ISNULL(@FirstUnitPrice, FirstUnitPrice),
+        ExtraUnitPrice = ISNULL(@ExtraUnitPrice, ExtraUnitPrice), PriceCap = ISNULL(@PriceCap, PriceCap),
         StartDate = ISNULL(@StartDate, StartDate), EndDate = ISNULL(@EndDate, EndDate),
         PurchaseOrder = ISNULL(@PurchaseOrder, PurchaseOrder), DayRounding = ISNULL(@DayRounding, DayRounding),
         BillingEveryDays = ISNULL(@BillingEveryDays, BillingEveryDays),
@@ -1554,6 +1635,21 @@ BEGIN
     IF (@DayRate IS NOT NULL OR @HourlyRate IS NOT NULL OR @OutOfHoursRate IS NOT NULL)
        AND EXISTS (SELECT 1 FROM dbo.TimeEntry WHERE EngagementId = @Id AND InvoiceId IS NULL AND IsBillable = 1)
         PRINT N'Note: the new rate applies to all time that has not been invoiced yet, including work already logged.';
+
+    IF (@UnitCount IS NOT NULL OR @FirstUnitPrice IS NOT NULL OR @ExtraUnitPrice IS NOT NULL OR @PriceCap IS NOT NULL)
+       AND (SELECT BillingMode FROM dbo.Engagement WHERE EngagementId = @Id) = 'PerInstance'
+    BEGIN
+        IF EXISTS (SELECT 1 FROM dbo.Invoice i JOIN dbo.InvoiceLine l ON l.InvoiceId = i.InvoiceId
+                   WHERE i.EngagementId = @Id AND l.LineType = 'FixedFee' AND i.Status <> 'Void')
+            PRINT N'Note: this has already been invoiced, so the new price changes nothing. Void that invoice first if it was wrong.';
+        ELSE
+        BEGIN
+            -- PRINT takes an expression, not a subquery, so read the new figures out first
+            DECLARE @NowTotal decimal(10,2), @NowUnits int;
+            SELECT @NowTotal = UnitTotal, @NowUnits = ISNULL(UnitCount, 1) FROM dbo.Engagement WHERE EngagementId = @Id;
+            PRINT N'Now ' + NCHAR(163) + FORMAT(@NowTotal, 'N2') + N' for ' + CONVERT(nvarchar(10), @NowUnits) + N' instance(s).';
+        END
+    END
 
     EXEC dbo.usp_Engagement_Show @Engagement = @Engagement;
 END
@@ -1608,15 +1704,22 @@ BEGIN
            Rate = CASE e.BillingMode WHEN 'DayRate' THEN NCHAR(163) + FORMAT(e.DayRate, 'N2') + N'/day'
                                      WHEN 'Hourly'  THEN NCHAR(163) + FORMAT(e.HourlyRate, 'N2') + N'/hour'
                                      WHEN 'FixedPrice' THEN NCHAR(163) + FORMAT(e.FixedPrice, 'N2') + N' fixed'
+                                     WHEN 'PerInstance' THEN NCHAR(163) + FORMAT(e.UnitTotal, 'N2') + N' for '
+                                          + CONVERT(nvarchar(10), ISNULL(e.UnitCount, 1)) + N' instance(s)'
                                      ELSE N'per the agreement' END,
+           PerInstance = CASE WHEN e.BillingMode = 'PerInstance'
+                              THEN NCHAR(163) + FORMAT(e.FirstUnitPrice, 'N2') + N' first, then '
+                                   + CASE WHEN ISNULL(e.ExtraUnitPrice, 0) = 0 THEN N'no charge'
+                                          ELSE NCHAR(163) + FORMAT(e.ExtraUnitPrice, 'N2') END + N' each'
+                                   + ISNULL(N', capped at ' + NCHAR(163) + FORMAT(e.PriceCap, 'N2'), N'') END,
            OutOfHours = CASE WHEN e.OutOfHoursRate IS NULL THEN N'at the day rate' ELSE NCHAR(163) + FORMAT(e.OutOfHoursRate, 'N2') + N'/hour' END,
            e.Status, e.StartDate, e.EndDate, e.CompletedOn, e.PurchaseOrder,
            DayRounding = ISNULL(e.DayRounding, dbo.fn_Setting('DayRateRounding')),
            BillingPeriod = CASE WHEN e.BillingMode = 'AgreementCycle' THEN N'with the monthly Molehill Watch cycle'
-                                WHEN e.BillingMode = 'FixedPrice' THEN N'on completion'
+                                WHEN e.BillingMode IN ('FixedPrice', 'PerInstance') THEN N'on completion'
                                 ELSE N'every ' + CONVERT(nvarchar(10), dbo.fn_EngagementBillingDays(e.EngagementId)) + N' days from '
                                      + CONVERT(nvarchar(11), e.StartDate, 106) END,
-           NextInvoiceOn = CASE WHEN e.BillingMode NOT IN ('FixedPrice', 'AgreementCycle') AND e.Status IN ('Active', 'OnHold')
+           NextInvoiceOn = CASE WHEN e.BillingMode NOT IN ('FixedPrice', 'PerInstance', 'AgreementCycle') AND e.Status IN ('Active', 'OnHold')
                                 THEN DATEADD(day, -1, dbo.fn_ConsultancyPeriodStart(e.StartDate,
                                      dbo.fn_ConsultancyPeriod(e.StartDate, CAST(dbo.fn_UkNow() AS date), dbo.fn_EngagementBillingDays(e.EngagementId)) + 1,
                                      dbo.fn_EngagementBillingDays(e.EngagementId))) END,
@@ -1655,9 +1758,11 @@ BEGIN
            Rate = CASE e.BillingMode WHEN 'DayRate' THEN NCHAR(163) + FORMAT(e.DayRate, 'N0') + N'/day'
                                      WHEN 'Hourly'  THEN NCHAR(163) + FORMAT(e.HourlyRate, 'N0') + N'/hour'
                                      WHEN 'FixedPrice' THEN NCHAR(163) + FORMAT(e.FixedPrice, 'N0') + N' fixed'
+                                     WHEN 'PerInstance' THEN NCHAR(163) + FORMAT(e.UnitTotal, 'N0') + N'/'
+                                          + CONVERT(nvarchar(10), ISNULL(e.UnitCount, 1)) + N' inst'
                                      ELSE N'agreement' END,
            Invoiced_Every = CASE WHEN e.EngagementType = 'Monitoring' THEN N'monthly cycle'
-                                 WHEN e.BillingMode = 'FixedPrice' THEN N'on completion'
+                                 WHEN e.BillingMode IN ('FixedPrice', 'PerInstance') THEN N'on completion'
                                  ELSE CONVERT(nvarchar(10), dbo.fn_EngagementBillingDays(e.EngagementId)) + N' days' END,
            UnbilledDays  = ISNULL(u.Days, 0),
            UnbilledValue = ISNULL(u.Value, 0),
@@ -2792,17 +2897,20 @@ BEGIN
       4. consultancy engagements: time invoiced in arrears at the end of each
          billing period - a fortnight from the engagement's start date unless
          ConsultancyBillingDays says otherwise - or as soon as the work is
-         marked complete; fixed prices are invoiced on completion.
+         marked complete; fixed and per-instance prices are invoiced on completion.
     -------------------------------------------------------------------------*/
     DECLARE @Eid int, @Mode varchar(20), @Fixed decimal(10,2), @EStatus varchar(15), @EComp date,
             @ERef varchar(30), @EName nvarchar(200), @EStart date, @Period int,
-            @PEnd date, @PStart date, @IDate date, @FpDays nvarchar(20);
+            @PEnd date, @PStart date, @IDate date, @FpDays nvarchar(20),
+            @Units int, @FirstU decimal(10,2), @ExtraU decimal(10,2), @Cap decimal(10,2), @UnitTot decimal(10,2);
     DECLARE con CURSOR LOCAL FAST_FORWARD FOR
         SELECT e.EngagementId, e.BillingMode, e.FixedPrice, e.Status, e.CompletedOn, e.EngagementRef, e.Name,
-               ISNULL(e.StartDate, (SELECT MIN(CAST(te.WorkStart AS date)) FROM dbo.TimeEntry te WHERE te.EngagementId = e.EngagementId))
+               ISNULL(e.StartDate, (SELECT MIN(CAST(te.WorkStart AS date)) FROM dbo.TimeEntry te WHERE te.EngagementId = e.EngagementId)),
+               e.UnitCount, e.FirstUnitPrice, e.ExtraUnitPrice, e.PriceCap, e.UnitTotal
         FROM dbo.Engagement e WHERE e.EngagementId IN (SELECT EngagementId FROM @Engs) ORDER BY e.EngagementRef;
     OPEN con;
-    FETCH NEXT FROM con INTO @Eid, @Mode, @Fixed, @EStatus, @EComp, @ERef, @EName, @EStart;
+    FETCH NEXT FROM con INTO @Eid, @Mode, @Fixed, @EStatus, @EComp, @ERef, @EName, @EStart,
+                             @Units, @FirstU, @ExtraU, @Cap, @UnitTot;
     WHILE @@FETCH_STATUS = 0
     BEGIN
         IF @Mode IN ('DayRate', 'Hourly') AND @EStart IS NOT NULL
@@ -2848,27 +2956,53 @@ BEGIN
             END
             CLOSE per; DEALLOCATE per;
         END
-        ELSE IF @Mode = 'FixedPrice' AND @EStatus = 'Completed'
+        ELSE IF @Mode IN ('FixedPrice', 'PerInstance') AND @EStatus = 'Completed'
              AND NOT EXISTS (SELECT 1 FROM dbo.Invoice i JOIN dbo.InvoiceLine l ON l.InvoiceId = i.InvoiceId
                              WHERE i.EngagementId = @Eid AND l.LineType = 'FixedFee' AND i.Status <> 'Void')
         BEGIN
             SET @IDate = ISNULL(@EComp, @AsOfDate);
             BEGIN TRAN;
             EXEC dbo.usp_Invoice_New @EngagementId = @Eid, @InvoiceDate = @IDate, @InvoiceId = @InvoiceId OUTPUT;
-            INSERT dbo.InvoiceLine (InvoiceId, LineType, EngagementId, Description, Quantity, UnitPrice, Amount)
-            VALUES (@InvoiceId, 'FixedFee', @Eid, @EName + N' - agreed fixed price, completed ' + CONVERT(nvarchar(11), @IDate, 106), 1, @Fixed, @Fixed);
-
+            IF @Mode = 'FixedPrice'
+                INSERT dbo.InvoiceLine (InvoiceId, LineType, EngagementId, Description, Quantity, UnitPrice, Amount)
+                VALUES (@InvoiceId, 'FixedFee', @Eid, @EName + N' - agreed fixed price, completed ' + CONVERT(nvarchar(11), @IDate, 106), 1, @Fixed, @Fixed);
+            ELSE
+            BEGIN
+                /* Priced per instance, so the invoice shows how the figure was reached rather than
+                   one total: the client can see what the estate cost them and what the cap saved. */
+                DECLARE @Extras int = ISNULL(@Units, 1) - 1;
+                DECLARE @Listed decimal(10,2) = @FirstU + ISNULL(@ExtraU, 0) * @Extras;
+                INSERT dbo.InvoiceLine (InvoiceId, LineType, EngagementId, Description, Quantity, UnitPrice, Amount)
+                VALUES (@InvoiceId, 'FixedFee', @Eid,
+                        @EName + N' - first SQL Server instance, completed ' + CONVERT(nvarchar(11), @IDate, 106),
+                        1, @FirstU, @FirstU);
+                IF @Extras > 0 AND ISNULL(@ExtraU, 0) > 0
+                    INSERT dbo.InvoiceLine (InvoiceId, LineType, EngagementId, Description, Quantity, UnitPrice, Amount)
+                    VALUES (@InvoiceId, 'FixedFee', @Eid,
+                            N'Each further instance reviewed (' + CONVERT(nvarchar(10), @Extras) + N' after the first)',
+                            @Extras, @ExtraU, CAST(@Extras * @ExtraU AS decimal(10,2)));
+                IF @Extras > 0 AND ISNULL(@ExtraU, 0) = 0
+                    INSERT dbo.InvoiceLine (InvoiceId, LineType, EngagementId, Description, Quantity, UnitPrice, Amount)
+                    VALUES (@InvoiceId, 'Info', @Eid,
+                            CONVERT(nvarchar(10), @Extras) + N' further instance(s) reviewed, included in the price', 0, 0, 0);
+                IF @UnitTot < @Listed
+                    INSERT dbo.InvoiceLine (InvoiceId, LineType, EngagementId, Description, Quantity, UnitPrice, Amount)
+                    VALUES (@InvoiceId, 'Adjustment', @Eid,
+                            N'Estate price capped at ' + NCHAR(163) + FORMAT(@Cap, 'N2'),
+                            1, @UnitTot - @Listed, @UnitTot - @Listed);
+            END
             SET @FpDays = (SELECT FORMAT(ISNULL(SUM(w.Days), 0), 'N2') FROM dbo.fn_ConsultancyWork(@Eid, 1) w);
             IF @FpDays <> N'0.00'
                 INSERT dbo.InvoiceLine (InvoiceId, LineType, EngagementId, Description, Quantity, UnitPrice, Amount)
-                VALUES (@InvoiceId, 'Info', @Eid, N'Work done: ' + @FpDays + N' days, covered by the fixed price', 0, 0, 0);
+                VALUES (@InvoiceId, 'Info', @Eid, N'Work done: ' + @FpDays + N' days, covered by the agreed price', 0, 0, 0);
 
             UPDATE dbo.TimeEntry SET InvoiceId = @InvoiceId WHERE EngagementId = @Eid AND IsBillable = 1 AND InvoiceId IS NULL;
             EXEC dbo.usp_Invoice_Recalculate @InvoiceId = @InvoiceId;
             COMMIT;
             INSERT @Created VALUES (@InvoiceId);
         END
-        FETCH NEXT FROM con INTO @Eid, @Mode, @Fixed, @EStatus, @EComp, @ERef, @EName, @EStart;
+        FETCH NEXT FROM con INTO @Eid, @Mode, @Fixed, @EStatus, @EComp, @ERef, @EName, @EStart,
+                                 @Units, @FirstU, @ExtraU, @Cap, @UnitTot;
     END
     CLOSE con; DEALLOCATE con;
 
@@ -3450,7 +3584,8 @@ BEGIN
     FROM dbo.Engagement e JOIN dbo.Client c ON c.ClientId = e.ClientId
     CROSS APPLY (SELECT Days = SUM(w.Days), Value = SUM(w.Quantity * w.UnitPrice), LastWorked = MAX(w.WorkDate)
                  FROM dbo.fn_ConsultancyWork(e.EngagementId, 1) w) u
-    WHERE e.EngagementType = 'Consultancy' AND e.Status IN ('Active', 'OnHold') AND e.BillingMode <> 'FixedPrice' AND u.Days > 0;
+    WHERE e.EngagementType = 'Consultancy' AND e.Status IN ('Active', 'OnHold')
+      AND e.BillingMode NOT IN ('FixedPrice', 'PerInstance') AND u.Days > 0;
 
     INSERT #A
     SELECT 2, 'Consultancy', c.ClientName, N'Engagement past its end date: ' + e.EngagementRef + N' ' + e.Name,
@@ -3459,10 +3594,15 @@ BEGIN
     WHERE e.EngagementType = 'Consultancy' AND e.Status IN ('Active', 'OnHold') AND e.EndDate < @Today;
 
     INSERT #A
-    SELECT 2, 'Consultancy', c.ClientName, N'Fixed price to invoice: ' + e.EngagementRef + N' ' + e.Name,
-           NCHAR(163) + FORMAT(e.FixedPrice, 'N2') + N' agreed, completed ' + CONVERT(nvarchar(11), e.CompletedOn, 106) + N'. The next billing run raises it.', NULL
+    SELECT 2, 'Consultancy', c.ClientName,
+           CASE e.BillingMode WHEN 'PerInstance' THEN N'Per-instance price to invoice: ' ELSE N'Fixed price to invoice: ' END
+           + e.EngagementRef + N' ' + e.Name,
+           NCHAR(163) + FORMAT(COALESCE(e.FixedPrice, e.UnitTotal), 'N2')
+           + CASE WHEN e.BillingMode = 'PerInstance'
+                  THEN N' for ' + CONVERT(nvarchar(10), ISNULL(e.UnitCount, 1)) + N' instance(s)' ELSE N' agreed' END
+           + N', completed ' + CONVERT(nvarchar(11), e.CompletedOn, 106) + N'. The next billing run raises it.', NULL
     FROM dbo.Engagement e JOIN dbo.Client c ON c.ClientId = e.ClientId
-    WHERE e.EngagementType = 'Consultancy' AND e.BillingMode = 'FixedPrice' AND e.Status = 'Completed'
+    WHERE e.EngagementType = 'Consultancy' AND e.BillingMode IN ('FixedPrice', 'PerInstance') AND e.Status = 'Completed'
       AND NOT EXISTS (SELECT 1 FROM dbo.Invoice i JOIN dbo.InvoiceLine l ON l.InvoiceId = i.InvoiceId
                       WHERE i.EngagementId = e.EngagementId AND l.LineType = 'FixedFee' AND i.Status <> 'Void');
 
@@ -3600,6 +3740,8 @@ BEGIN
     SELECT e.EngagementRef, c.ClientName, e.Name, e.Status,
            Rate = CASE e.BillingMode WHEN 'DayRate' THEN NCHAR(163) + FORMAT(e.DayRate, 'N0') + N'/day'
                                      WHEN 'Hourly'  THEN NCHAR(163) + FORMAT(e.HourlyRate, 'N0') + N'/hour'
+                                     WHEN 'PerInstance' THEN NCHAR(163) + FORMAT(e.UnitTotal, 'N0') + N'/'
+                                          + CONVERT(nvarchar(10), ISNULL(e.UnitCount, 1)) + N' inst'
                                      ELSE NCHAR(163) + FORMAT(e.FixedPrice, 'N0') + N' fixed' END,
            UnbilledDays = ISNULL(u.Days, 0), UnbilledValue = ISNULL(u.Value, 0), LastWorked = u.LastWorked,
            Invoiced = ISNULL((SELECT SUM(i.Total) FROM dbo.Invoice i WHERE i.EngagementId = e.EngagementId AND i.Status <> 'Void'), 0)
@@ -3759,6 +3901,6 @@ DECLARE @Logo nvarchar(max) = CONVERT(nvarchar(max), N'data:image/png;base64,') 
 UPDATE dbo.Setting SET Value = @Logo WHERE Name = 'LogoDataUri' AND ISNULL(Value, N'') = N'';
 GO
 
-INSERT dbo.InstallHistory (Version) VALUES ('2.6.0');   -- bump with every schema change: Molehill Manager offers the upgrade
-PRINT N'Molehill Admin 2.6.0 installed.';
+INSERT dbo.InstallHistory (Version) VALUES ('2.7.0');   -- bump with every schema change: Molehill Manager offers the upgrade
+PRINT N'Molehill Admin 2.7.0 installed.';
 GO
