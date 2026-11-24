@@ -192,7 +192,10 @@ public static class AdminForms
         var priceList = v.Str("PriceListName");
         return db.Proc("dbo.usp_Agreement_Create", ("@ClientName", clientName), ("@StartDate", v.Date("StartDate")),
             ("@SignedDate", v.Date("SignedDate")), ("@TicketChannel", v.Str("TicketChannel")), ("@AgreementRef", v.Str("AgreementRef")),
-            ("@PriceListName", priceList == LatestStandard ? null : priceList));
+            ("@PriceListName", priceList == LatestStandard ? null : priceList),
+            // the form that creates a client has no term field, and a missing field reads as blank,
+            // so this is null there and the price list's own term is used
+            ("@InitialTermMonths", v.Int("InitialTermMonths")));
     }
 
     public static FormSpec NewAgreement(AdminDb db)
@@ -210,7 +213,9 @@ public static class AdminForms
                 Field.Date("SignedDate", "Signed on"),
                 Field.Text("TicketChannel", "Ticket channel", help: "blank = the standard e-mail address"),
                 Field.Text("AgreementRef", "Agreement ref", help: "blank = next number"),
-                Field.Choice("PriceListName", "Price list", priceLists)
+                Field.Choice("PriceListName", "Price list", priceLists),
+                Field.Int("InitialTermMonths", "Initial term (months)",
+                    help: "blank = the price list's term. 6 where a health check fee is being credited")
             },
             Submit = v => CreateAgreement(db, v.Str("ClientName") ?? throw new FormatException("Add a client first."), v)
         };

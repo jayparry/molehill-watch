@@ -1,7 +1,7 @@
 /*
 ===============================================================================
  Molehill Watch - SQL Server Support Package
- Molehill Admin: clients, engagements, tickets, time and billing  Version 2.7.0
+ Molehill Admin: clients, engagements, tickets, time and billing  Version 2.7.1
  Molehill Data Services  -  jay@jayparry.co.uk  -  molehilldataservices.com
 -------------------------------------------------------------------------------
  Runs on YOUR OWN SQL Server (Express is fine), not on client servers.
@@ -493,6 +493,13 @@ BEGIN
                                                                WHEN Status = ''Cancelled'' THEN ''NotBilled''
                                                                ELSE ''NextCycle'' END;');
 END
+
+/*---------------------------------------------------------------------------
+  2.7.1: usp_Agreement_Create takes @InitialTermMonths. The term used to come
+  only from the price list, so every agreement got the standard three months.
+  The health check credit is given against a six-month term, which needs one
+  agreement to differ from the price list without inventing a second one.
+---------------------------------------------------------------------------*/
 
 IF COL_LENGTH(N'dbo.Engagement', N'BillingEveryDays') IS NULL
     ALTER TABLE dbo.Engagement ADD BillingEveryDays int NULL
@@ -1274,7 +1281,9 @@ CREATE OR ALTER PROCEDURE dbo.usp_Agreement_Create
     @SignedDate    date          = NULL,
     @TicketChannel nvarchar(300) = N'E-mail to jay@jayparry.co.uk',
     @AgreementRef  varchar(30)   = NULL,     -- default MWA-0001 style
-    @PriceListName nvarchar(100) = NULL      -- default: latest standard price list effective at the start date
+    @PriceListName nvarchar(100) = NULL,     -- default: latest standard price list effective at the start date
+    @InitialTermMonths int       = NULL      -- default: the price list's term. 6 for a health-check credit deal,
+                                             -- where the credit is only given against a six-month term
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -1285,6 +1294,8 @@ BEGIN
                                     ELSE (SELECT TOP (1) PriceListId FROM dbo.PriceList WHERE IsStandard = 1 AND EffectiveFrom <= @StartDate ORDER BY EffectiveFrom DESC) END;
     IF @PriceListId IS NULL SET @PriceListId = (SELECT TOP (1) PriceListId FROM dbo.PriceList WHERE IsStandard = 1 ORDER BY EffectiveFrom);
     IF @PriceListId IS NULL BEGIN RAISERROR(N'No price list found.', 16, 1); RETURN; END
+    IF @InitialTermMonths IS NOT NULL AND @InitialTermMonths < 1
+        BEGIN RAISERROR(N'The initial term must be at least one month.', 16, 1); RETURN; END
 
     BEGIN TRAN;
     -- the agreement is a monitoring engagement; both share one reference
@@ -1294,7 +1305,8 @@ BEGIN
     DECLARE @EngagementId int = SCOPE_IDENTITY();
 
     INSERT dbo.Agreement (AgreementRef, ClientId, EngagementId, SignedDate, StartDate, InitialTermMonths, PriceListId, TicketChannel)
-    SELECT @TempRef, @ClientId, @EngagementId, @SignedDate, @StartDate, InitialTermMonths, @PriceListId, @TicketChannel
+    SELECT @TempRef, @ClientId, @EngagementId, @SignedDate, @StartDate,
+           ISNULL(@InitialTermMonths, InitialTermMonths), @PriceListId, @TicketChannel
     FROM dbo.PriceList WHERE PriceListId = @PriceListId;
     DECLARE @AgreementId int = SCOPE_IDENTITY();
     IF @AgreementRef IS NULL
@@ -3901,6 +3913,6 @@ DECLARE @Logo nvarchar(max) = CONVERT(nvarchar(max), N'data:image/png;base64,') 
 UPDATE dbo.Setting SET Value = @Logo WHERE Name = 'LogoDataUri' AND ISNULL(Value, N'') = N'';
 GO
 
-INSERT dbo.InstallHistory (Version) VALUES ('2.7.0');   -- bump with every schema change: Molehill Manager offers the upgrade
-PRINT N'Molehill Admin 2.7.0 installed.';
+INSERT dbo.InstallHistory (Version) VALUES ('2.7.1');   -- bump with every schema change: Molehill Manager offers the upgrade
+PRINT N'Molehill Admin 2.7.1 installed.';
 GO
