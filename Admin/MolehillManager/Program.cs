@@ -14,7 +14,7 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
-        ConsoleHost.Prepare(args);         // before anything prints, and before the encoding is set
+        ConsoleHost.Prepare();             // before anything prints: see ConsoleHost
 
         string? configArg = null, connectionOverride = null;
         bool forceSetup = false, installOnly = false, selfTest = false, selfTestWrite = false,
@@ -152,6 +152,10 @@ internal static class Program
 
     private static int RunTerminal(AppConfig config, string path, bool existed, bool forceSetup, string? loadProblem)
     {
+        // a windowed program has no console of its own, and Terminal.Gui cannot draw without one.
+        // Double-clicking the exe comes through here while the terminal is still the default.
+        ConsoleHost.EnsureConsoleForTerminalUi();
+
         try
         {
             Application.Init();
