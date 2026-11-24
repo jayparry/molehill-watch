@@ -138,13 +138,17 @@ internal static class Dialogs
 /// </summary>
 internal sealed class MhWindow : Window
 {
-    private readonly AdminDb _db;
+    private readonly AppConfig _config;
+    private readonly string _configPath;
     private readonly Shell _shell;
+    private AdminDb _db;          // replaced when the settings screen points somewhere else
     private bool _showEnded;
 
-    public MhWindow(AdminDb db)
+    public MhWindow(AdminDb db, AppConfig config, string configPath)
     {
         _db = db;
+        _config = config;
+        _configPath = configPath;
         _shell = new Shell(Open);
 
         Title = "Molehill Manager";
@@ -167,8 +171,30 @@ internal sealed class MhWindow : Window
     {
         NavKind.Today => Today(),
         NavKind.Clients or NavKind.Client => Clients(node),
+        NavKind.Settings => Settings(),
         _ => new PlainPage(node.Label, NotBuilt(node))
     };
+
+    /// <summary>
+    ///   The settings, as a page rather than a dialog - it is a place in the tree, so it behaves
+    ///   like one. Saving re-reads the connection, because the whole point of changing it mid-session
+    ///   is to be looking at a different database afterwards.
+    /// </summary>
+    private IShellPage Settings()
+    {
+        var view = new SettingsView(_config, _configPath, "",
+            (title, message, buttons) => Dialogs.Ask(this, title, message, buttons));
+        view.Finished += result =>
+        {
+            if (result != SetupResult.Saved) return;
+            Report.Try("Settings", () =>
+            {
+                _db = new AdminDb(_config.BuildConnectionString());
+                Reload();
+            });
+        };
+        return new PlainPage("Settings", view);
+    }
 
     private IShellPage Today() => new TodayPage(
         Queries.Dashboard(_db),
@@ -233,6 +259,7 @@ internal sealed class MhWindow : Window
         TextWrapping = TextWrapping.Wrap,
         Margin = new Thickness(18),
         MaxWidth = 520,
+        HorizontalAlignment = HorizontalAlignment.Left,
         Foreground = AppResources.Resource<Brush>("Muted")
     };
 }

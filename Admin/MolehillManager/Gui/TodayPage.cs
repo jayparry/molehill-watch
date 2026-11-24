@@ -131,6 +131,7 @@ internal sealed class TodayPage : UserControl, IShellPage
                     FontSize = 11.5,
                     Foreground = AppResources.Resource<Brush>("Muted"),
                     MaxWidth = 210,
+                    HorizontalAlignment = HorizontalAlignment.Left,
                     TextWrapping = TextWrapping.Wrap
                 },
                 new TextBlock

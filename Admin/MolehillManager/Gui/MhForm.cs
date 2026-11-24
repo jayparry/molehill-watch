@@ -37,7 +37,8 @@ internal sealed class MhForm : UserControl
                 TextWrapping = TextWrapping.Wrap,
                 Foreground = AppResources.Resource<Brush>("Muted"),
                 Margin = new Thickness(0, 0, 0, 14),
-                MaxWidth = 720
+                MaxWidth = 720,
+                HorizontalAlignment = HorizontalAlignment.Left
             });
 
         foreach (var field in spec.Fields) rows.Children.Add(Row(field));
@@ -48,7 +49,8 @@ internal sealed class MhForm : UserControl
             Foreground = AppResources.Resource<Brush>("StatusRed"),
             Margin = new Thickness(0, 10, 0, 0),
             Visibility = Visibility.Collapsed,
-            MaxWidth = 720
+            MaxWidth = 720,
+            HorizontalAlignment = HorizontalAlignment.Left
         };
         rows.Children.Add(_problem);
 
@@ -92,7 +94,8 @@ internal sealed class MhForm : UserControl
                 FontSize = 11.5,
                 Foreground = AppResources.Resource<Brush>("Note"),
                 Margin = new Thickness(0, 3, 0, 0),
-                MaxWidth = 560
+                MaxWidth = 560,
+                HorizontalAlignment = HorizontalAlignment.Left
             });
 
         return stack;

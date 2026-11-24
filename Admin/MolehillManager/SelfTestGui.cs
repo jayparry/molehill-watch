@@ -133,6 +133,37 @@ public static partial class SelfTest
         }
     }
 
+    /// <summary>
+    ///   Text that is capped in width but still set to stretch. WPF centres an element whose
+    ///   alignment is Stretch and whose width is constrained, so a paragraph written with a MaxWidth
+    ///   and nothing else drifts into the middle of the pane - which reads as a mistake rather than
+    ///   a decision, and is invisible to every assertion about what the text says.
+    ///
+    ///   Found twice by looking at pictures, in two different views, before it was worth a check.
+    /// </summary>
+    /// <summary>
+    ///   Presses the button with these words on it. Calling the method behind a button is not the
+    ///   same test as pressing it: a mutation pass found three handlers wired to the wrong thing,
+    ///   all of which the direct calls sailed straight past.
+    /// </summary>
+    private static bool Press(FrameworkElement root, string label)
+    {
+        var button = Descendants<Button>(root).FirstOrDefault(b => (b.Content as string) == label);
+        if (button == null) return false;
+        button.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+        return true;
+    }
+
+    private static void NothingAdrift(FrameworkElement root, string what)
+    {
+        var adrift = Descendants<TextBlock>(root)
+            .Where(b => !double.IsInfinity(b.MaxWidth) && b.HorizontalAlignment == HorizontalAlignment.Stretch)
+            .Select(b => $"\"{TextOf(b).Split('\n')[0]}\" (MaxWidth {b.MaxWidth:0})")
+            .ToList();
+        Check($"{what}: no text is capped in width and left to centre itself",
+            adrift.Count == 0, string.Join(" | ", adrift.Take(3)));
+    }
+
     private static void Section(string name, Action body)
     {
         try { body(); }
@@ -178,6 +209,8 @@ public static partial class SelfTest
         Section("what a procedure said", () => CheckResultView(watcher));
         Section("the alert colours", CheckAlertColours);
         Section("the shell", () => CheckShell(watcher));
+        Section("the settings screen", () => CheckSettings(watcher));
+        Section("the password prompt", () => CheckSecret(watcher));
         Section("the Today page", () => CheckToday(watcher));
         Section("the client list", () => CheckClients(watcher));
         return Finish();
@@ -392,6 +425,7 @@ public static partial class SelfTest
         Check("and it is on the screen, not only in a list",
             Texts(host).Contains("Invoice MDS-INV-2026-0009 created, 3 lines."), string.Join(" | ", Texts(host).Take(3)));
         Check("the result set is a grid", view.Grids.Count == 1 && view.Grids[0].Table == wide);
+        NothingAdrift(host, "the result view");
 
         // the same rule the terminal prints by, not a second opinion written in WPF
         var one = new DataTable();
@@ -525,6 +559,7 @@ public static partial class SelfTest
             Texts(shell).Contains("Acme Ltd") && Texts(shell).Contains("Zeta Ltd"),
             string.Join(" | ", Texts(shell)));
         Shot(shell, "1-shell");
+        NothingAdrift(shell, "the shell");
 
         shell.Go(NavKind.Engagement, "C-0012");
         Check("the tree points at what was opened, rather than at where you were",
@@ -670,6 +705,7 @@ public static partial class SelfTest
         page.Handlers["dashboard-html"]();
         Check("saving the dashboard runs the save", saved == 1, saved.ToString());
         Layout(page, 1200, 800);
+        NothingAdrift(page, "the Today page");
         Shot(page, "2-today");
 
         page.Alerts.SelectedIndex = 1;
@@ -729,6 +765,7 @@ public static partial class SelfTest
         Check("the line underneath says what is unusual about the row",
             page.Summary.Contains("2 open ticket(s)") && !page.Summary.Contains("0 onboarding"), page.Summary);
         Layout(page, 1200, 800);
+        NothingAdrift(page, "the client list");
         Shot(page, "3-clients");
 
         page.Work.Select("Ref", "C-0012");
@@ -769,6 +806,257 @@ public static partial class SelfTest
         Check("the toolbar takes everything the page offers, greyed reasons and all",
             shell.Actions.Buttons.Count == page.Actions.Actions.Count,
             $"{shell.Actions.Buttons.Count} buttons for {page.Actions.Actions.Count} actions");
+    }
+
+    /// <summary>A config in a scratch folder: nothing here touches the real one.</summary>
+    private static (AppConfig Config, string Path, string Folder) ScratchConfig()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "MolehillManager-guitest-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(folder);
+        var config = new AppConfig
+        {
+            OutputFolder = Path.Combine(folder, "out"),
+            Connection = { Server = "SQL01", Database = "MolehillAdmin", Authentication = "Windows" }
+        };
+        return (config, Path.Combine(folder, ConfigStore.FileName), folder);
+    }
+
+    /// <summary>
+    ///   The settings screen. Everything checked here happens without a server: which fields a
+    ///   sign-in method uses, what it says about itself, that what was typed comes back as a draft,
+    ///   and that a draft which cannot be valid is refused before anything is written. The paths
+    ///   that need a server - Test against a real one, "Save anyway", the install offer - are the
+    ///   setup suite's job, and it drives the same Setup rules through ScriptedPrompts.
+    /// </summary>
+    private static void CheckSettings(BindingWatcher watcher)
+    {
+        var (config, path, folder) = ScratchConfig();
+        try
+        {
+            var asked = new List<string>();
+            var answer = 0;
+            int Ask(string title, string message, string[] buttons)
+            {
+                asked.Add($"{title}: {message.Replace("\n", " ")}");
+                return answer;
+            }
+
+            watcher.Clear();
+            SettingsView? view = null;
+            Step("the settings screen lays out with no window", () =>
+            {
+                view = new SettingsView(config, path, "The server is not set yet.", Ask);
+                Layout(view, 900, 700);
+                return 0;
+            });
+            if (view == null) return;
+            Check("no binding warnings from the settings screen", watcher.Lines.Count == 0,
+                string.Join(" | ", watcher.Lines.Take(2)));
+
+            Check("it says why it opened", Texts(view).Contains("The server is not set yet."),
+                string.Join(" | ", Texts(view).Take(4)));
+            Check("and where the answers are written", Texts(view).Any(t => t.StartsWith("Saved to ") && t.Contains(ConfigStore.FileName)),
+                string.Join(" | ", Texts(view).Where(t => t.StartsWith("Saved to"))));
+
+            // the rule that makes the screen worth having: seven methods, each using different fields
+            foreach (var method in AppConfig.AuthMethods)
+            {
+                view.Authentication = method;
+                Layout(view, 900, 700);
+                Check($"settings: {method} takes a user name only if it uses one",
+                    view.UserEnabled == AppConfig.AllowsUser(method),
+                    $"user {(view.UserEnabled ? "on" : "off")}, expected {(AppConfig.AllowsUser(method) ? "on" : "off")}");
+                Check($"settings: {method} takes a secret only if it needs one",
+                    view.SecretEnabled == AppConfig.NeedsSecret(method),
+                    $"secret {(view.SecretEnabled ? "on" : "off")}");
+                Check($"settings: {method} explains itself", view.Hint == MolehillManager.Setup.AuthHint(method), view.Hint);
+            }
+
+            // what was typed is what gets examined - including the method's stored value, not its label
+            view.Authentication = "SqlLogin";
+            view.Server = " SQL02 ";
+            view.Database = "MolehillAdmin";
+            view.User = "mm";
+            view.Secret = "S3cret";
+            view.Timeout = "30";
+            view.AutoRefresh = "5";
+            view.Encrypt = "Strict";
+            view.TrustCertificate = false;
+            view.SavePassword = true;
+            view.OutputFolder = Path.Combine(folder, "invoices");
+            var draft = view.Draft();
+            Check("the draft carries what was typed",
+                draft.Server == " SQL02 " && draft.User == "mm" && draft.Secret == "S3cret"
+                && draft.Timeout == "30" && draft.AutoRefresh == "5",
+                $"{draft.Server}/{draft.User}/{draft.Timeout}/{draft.AutoRefresh}");
+            Check("and the sign-in method as the file stores it, not as the screen shows it",
+                draft.Authentication == "SqlLogin", draft.Authentication);
+            Check("and the encryption and certificate settings",
+                draft.Encrypt == "Strict" && !draft.TrustServerCertificate, draft.Encrypt);
+
+            // a draft that cannot be valid is refused without the server being asked at all
+            view.Timeout = "9999";
+            asked.Clear();
+            var verdict = view.Save();
+            Check("a timeout nobody could mean is refused", verdict == SetupResult.Cancelled);
+            Check("and the reason is shown, naming the field",
+                asked.Count == 1 && asked[0].Contains("Timeout", StringComparison.OrdinalIgnoreCase),
+                string.Join(" | ", asked));
+            Check("and nothing is written", !File.Exists(path), path);
+
+            asked.Clear();
+            var tested = view.Test();
+            Check("Test refuses it the same way, and still writes nothing",
+                tested.Verdict == SaveVerdict.Invalid && !File.Exists(path) && asked.Count == 1,
+                string.Join(" | ", asked));
+
+            view.Timeout = "30";
+            view.Server = "";
+            asked.Clear();
+            Check("a missing server is refused too", view.Save() == SetupResult.Cancelled && asked.Count == 1,
+                string.Join(" | ", asked));
+
+            // A server that never answers, without needing one: a closed port on localhost is
+            // refused at once, with no DNS lookup and nothing network-dependent to hang on. This is
+            // the path where a wrong answer quietly throws away what has just been typed, so it
+            // belongs in the suite that runs anywhere rather than only the one that needs a server.
+            view.Server = "localhost,14331";
+            view.Database = "MolehillAdmin";
+            view.Authentication = "Windows";
+            view.Timeout = "1";
+            view.OutputFolder = Path.Combine(folder, "invoices");
+
+            asked.Clear();
+            answer = 0;                                        // "Keep editing"
+            Check("a server that does not answer is not quietly saved over",
+                view.Save() == SetupResult.Cancelled);
+            Check("and it asks whether to save anyway",
+                asked.Count == 1 && asked[0].StartsWith("Could not connect")
+                && asked[0].Contains("Save these settings anyway?"), string.Join(" | ", asked));
+            Check("keeping editing writes nothing", !File.Exists(path), path);
+
+            asked.Clear();
+            var unreachable = view.Test();
+            Check("Test reports that the server did not answer",
+                unreachable.Verdict == SaveVerdict.Unreachable, unreachable.Verdict.ToString());
+            Check("and trying settings never writes them", !File.Exists(path), path);
+
+            asked.Clear();
+            answer = 1;                                        // "Save anyway"
+            Check("saving anyway saves", view.Save() == SetupResult.Saved);
+            Check("and what was typed is in the file",
+                File.Exists(path) && File.ReadAllText(path).Contains("localhost,14331"),
+                File.Exists(path) ? "written" : "no file");
+            File.Delete(path);
+
+            // Cancel, pressed rather than called: the button has to be wired to the right thing
+            var ended = new List<SetupResult>();
+            view.Finished += r => ended.Add(r);
+            Check("there is a Cancel button to press", Press(view, "Cancel"));
+            Check("pressing it reports cancelled, not saved",
+                view.Result == SetupResult.Cancelled && ended.SequenceEqual(new[] { SetupResult.Cancelled }),
+                view.Result.ToString());
+            Check("and still nothing is written", !File.Exists(path));
+
+            foreach (var width in new[] { 700, 900, 1200 })
+                Step($"the settings screen lays out at {width}", () => { Layout(view, width, 700); return 0; });
+
+            view.Authentication = "SqlLogin";
+            view.Server = "SQL02";
+            view.User = "mm";
+            Layout(view, 880, 700);
+            NothingAdrift(view, "the settings screen");
+            Shot(view, "5-settings");
+        }
+        finally
+        {
+            try { Directory.Delete(folder, true); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
+    }
+
+    /// <summary>
+    ///   The password prompt, and the three different things its answer can mean. Start-up reads
+    ///   null as "give up", "" as "open the settings screen" and anything else as the password, so
+    ///   returning the wrong one turns a correctable mistake into the app closing.
+    /// </summary>
+    private static void CheckSecret(BindingWatcher watcher)
+    {
+        var (config, path, folder) = ScratchConfig();
+        try
+        {
+            var asked = new List<string>();
+            int Ask(string title, string message, string[] buttons) { asked.Add($"{title}: {message}"); return 0; }
+
+            watcher.Clear();
+            SecretView? view = null;
+            Step("the password prompt lays out with no window", () =>
+            {
+                view = new SecretView(config, path, "Sign in as mm.", Ask);
+                Layout(view, 560, 300);
+                return 0;
+            });
+            if (view == null) return;
+            Check("no binding warnings from the password prompt", watcher.Lines.Count == 0,
+                string.Join(" | ", watcher.Lines.Take(2)));
+            Check("it says who it is signing in as", Texts(view).Contains("Sign in as mm."),
+                string.Join(" | ", Texts(view)));
+
+            // an empty box is a typo, not an answer: it asks again rather than closing
+            Check("connecting with nothing typed does not connect", !view.Connect());
+            Check("and says what to type", asked.Count == 1 && asked[0].Contains("password"), string.Join(" | ", asked));
+            Check("and the prompt is still waiting", view.Value == null);
+
+            view.Cancel();
+            Check("cancelling means give up, which start-up reads as null", view.Value == null);
+
+            var second = new SecretView(config, path, "Sign in as mm.", Ask);
+            Layout(second, 560, 300);
+            string? got = "unset";
+            second.Finished += v => got = v;
+            Check("there is a Settings button to press", Press(second, "Settings..."));
+            Check("Settings means the whole screen, which start-up reads as an empty string",
+                second.Value == "" && got == "", second.Value ?? "(null)");
+
+            var third = new SecretView(config, path, "Sign in as mm.", Ask);
+            Layout(third, 560, 300);
+            string? gaveUp = "unset";
+            third.Finished += v => gaveUp = v;
+            Check("there is a Cancel button to press", Press(third, "Cancel"));
+            Check("and pressing it is giving up, which start-up reads as null",
+                third.Value == null && gaveUp == null, third.Value ?? "(null)");
+
+            // a password the server will not take: the same closed port, so no server is needed
+            var refused = new AppConfig
+            {
+                OutputFolder = config.OutputFolder,
+                Connection = { Server = "localhost,14331", Database = "MolehillAdmin", Authentication = "SqlLogin", User = "mm", ConnectTimeoutSeconds = 1 }
+            };
+            var refusedView = new SecretView(refused, path, "Sign in as mm.", Ask);
+            Layout(refusedView, 560, 300);
+            refusedView.Secret = "S3cret-Pa55word!";
+            asked.Clear();
+            Check("a password the server will not take does not get through", !refusedView.Connect());
+            Check("the screen stays open, because the usual reason is a typo", refusedView.Value == null);
+            Check("and it says what went wrong",
+                asked.Count >= 1 && asked[0].StartsWith("Could not connect"), string.Join(" | ", asked));
+            Check("and nothing is written for a password that did not work", !File.Exists(path), path);
+
+            // a client secret is not a password, and the box says which it wants
+            var sp = new AppConfig { OutputFolder = config.OutputFolder, Connection = { Server = "SQL01", Database = "d", Authentication = "EntraServicePrincipal" } };
+            var spView = new SecretView(sp, path, "Sign in.", Ask);
+            Layout(spView, 560, 300);
+            Check("a service principal is asked for a client secret, not a password",
+                spView.What == "Client secret" && Texts(spView).Contains("Client secret"),
+                string.Join(" | ", Texts(spView)));
+
+            Layout(view, 560, 300);
+            NothingAdrift(view, "the password prompt");
+            Shot(view, "6-secret");
+        }
+        finally
+        {
+            try { Directory.Delete(folder, true); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
     }
 
     private static void CheckPalette()

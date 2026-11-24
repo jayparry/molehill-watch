@@ -60,7 +60,8 @@ internal sealed class ResultView : UserControl
                 Text = message,
                 TextWrapping = TextWrapping.Wrap,
                 Margin = new Thickness(0, 0, 0, 4),
-                MaxWidth = 760
+                MaxWidth = 760,
+                HorizontalAlignment = HorizontalAlignment.Left
             });
         }
 
@@ -129,7 +130,8 @@ internal sealed class ResultView : UserControl
                 Text = Output.Format(column.ColumnName, row[column]),
                 TextWrapping = TextWrapping.Wrap,
                 Margin = new Thickness(0, 0, 0, 4),
-                MaxWidth = 640
+                MaxWidth = 640,
+                HorizontalAlignment = HorizontalAlignment.Left
             };
             WpfGrid.SetRow(value, line);
             WpfGrid.SetColumn(value, 1);

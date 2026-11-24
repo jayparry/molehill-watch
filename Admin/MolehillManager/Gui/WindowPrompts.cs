@@ -8,57 +8,110 @@ namespace MolehillManager.Gui;
 ///   The window's answers to the start-up questions - the third implementation of
 ///   <see cref="IStartupPrompts"/>, after the terminal's and the scripted one in the self-test.
 ///
-///   Three of the six are real already, because the pieces they need are built: a question is
-///   <see cref="Dialogs.Ask"/>, something to read is <see cref="Dialogs.Read"/>, and a form is
-///   <see cref="MhForm"/> - which is how the business-details form appears after a fresh install.
-///
-///   The two that ask for settings are not, and they say so rather than failing quietly. They need
-///   the settings screen, which is Phase 4; all of its rules are already in <see cref="Setup"/>,
-///   where <see cref="SetupDialog"/> and a future WPF screen both read them, so what is left there
-///   is laying out seven authentication methods and their hints. Until then the terminal front end
-///   does the first run, which is also why the default is still the terminal: a window that cannot
-///   ask for a server would be a worse first run than the one we have.
+///   Every one of them is a thin wrapper now: the settings screen is <see cref="SettingsView"/>,
+///   the password prompt is <see cref="SecretView"/>, a form is <see cref="MhForm"/>, and all three
+///   decide nothing - <see cref="Setup"/> and <see cref="Startup.Connect"/> do. What is left here is
+///   putting a control in a window, running it, and handing back what it said.
 /// </summary>
 internal sealed class WindowPrompts : IStartupPrompts
 {
-    private const string Setup =
-        "The window cannot change the settings yet.\n\n"
-        + "Run MolehillManager --tui once to set up the server and the database; after that the "
-        + "window will start straight into the app.";
+    /// <summary>The window the questions belong to, once there is one. Null during start-up.</summary>
+    public Window? Owner { get; set; }
 
     public SetupResult AskSettings(AppConfig config, string path, string why)
     {
-        Dialogs.Read(null, "Settings", Words($"{why}\n\n{Setup}\n\nThe settings file is {path}."));
-        return SetupResult.Cancelled;
+        var view = new SettingsView(config, path, why, Choose);
+        var window = Frame("Molehill Manager settings", view, 820, 640);
+        view.Finished += _ => window.Close();
+        window.ShowDialog();
+        return view.Result;
     }
 
     public string? AskSecret(AppConfig config, string path, string prompt)
     {
-        Dialogs.Read(null, "Password", Words($"{prompt}\n\n{Setup}"));
-        return null;
+        var view = new SecretView(config, path, prompt, Choose);
+        var window = Frame("Sign in", view, 560, 300);
+        window.SizeToContent = SizeToContent.Height;
+        var answered = false;
+        view.Finished += _ => { answered = true; window.Close(); };
+        window.ShowDialog();
+        // closing the window with the X is the same as giving up, not the same as pressing Settings
+        return answered ? view.Value : null;
     }
 
     public int Choose(string title, string message, params string[] buttons) =>
-        Dialogs.Ask(null, title, message, buttons);
+        Dialogs.Ask(Owner, title, message, buttons);
 
-    public void ShowText(string title, string text) => Dialogs.Read(null, title, Words(text));
+    public void ShowText(string title, string text) => Dialogs.Read(Owner, title, Words(text));
 
-    public void RunForm(FormSpec spec) => Dialogs.Form(null, spec);
+    public void RunForm(FormSpec spec) => Dialogs.Form(Owner, spec);
 
     /// <summary>
-    ///   Installs, then shows what the script said. The terminal puts a progress box up and feeds it
-    ///   from the callback; here the messages are shown at the end, because an install that is doing
-    ///   something is better signalled by a window that is plainly busy than by a list of SQL batch
-    ///   names nobody reads.
+    ///   Installs, showing what the script is doing as it goes. The work runs off the UI thread and
+    ///   reports back through the dispatcher, the way the terminal marshals through its main loop;
+    ///   without that the window would be frozen for the ten seconds the install takes and look like
+    ///   it had crashed at exactly the moment someone is least sure of the app.
     /// </summary>
     public string? RunInstall(AppConfig config, out List<string> messages)
     {
-        var said = new List<string>();
-        string? problem = null;
-        try { AdminInstaller.Install(config, line => said.Add(line)); }
-        catch (Exception ex) { problem = AdminDb.Explain(ex); }
-        messages = said;
-        return problem;
+        var collected = new List<string>();
+        string? error = null;
+
+        var step = new TextBlock
+        {
+            Text = "Starting...",
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(18, 18, 18, 6),
+            MaxWidth = 500,
+            HorizontalAlignment = HorizontalAlignment.Left
+        };
+        var rows = new StackPanel();
+        rows.Children.Add(step);
+        rows.Children.Add(new TextBlock
+        {
+            Text = "This takes a few seconds.",
+            Foreground = AppResources.Resource<Brush>("Muted"),
+            Margin = new Thickness(18, 0, 18, 18)
+        });
+        var window = Frame($"Installing MolehillAdmin into [{config.Connection.Database}]",
+            new Border { Background = AppResources.Resource<Brush>("Paper"), Child = rows }, 560, 180);
+        window.SizeToContent = SizeToContent.Height;
+
+        window.Loaded += (_, _) => Task.Run(() =>
+        {
+            try
+            {
+                collected = AdminInstaller.Install(config,
+                    s => window.Dispatcher.Invoke(() => step.Text = s));
+            }
+            catch (Exception ex)
+            {
+                error = ex is InvalidOperationException ? ex.Message : AdminDb.Describe(ex);
+            }
+            finally
+            {
+                window.Dispatcher.Invoke(window.Close);
+            }
+        });
+        window.ShowDialog();
+
+        messages = collected;
+        return error;
+    }
+
+    private Window Frame(string title, UIElement content, double width, double height)
+    {
+        var window = new Window
+        {
+            Title = title,
+            Width = width,
+            Height = height,
+            WindowStartupLocation = Owner == null ? WindowStartupLocation.CenterScreen : WindowStartupLocation.CenterOwner,
+            Background = AppResources.Resource<Brush>("Paper"),
+            Content = content
+        };
+        if (Owner != null) window.Owner = Owner;
+        return window;
     }
 
     private static UIElement Words(string text) => new ScrollViewer
@@ -70,6 +123,7 @@ internal sealed class WindowPrompts : IStartupPrompts
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(18),
             MaxWidth = 640,
+            HorizontalAlignment = HorizontalAlignment.Left,
             Foreground = AppResources.Resource<Brush>("Ink")
         }
     };

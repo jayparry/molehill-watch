@@ -16,10 +16,13 @@ internal static class WindowApp
     public static int Run(AppConfig config, string path, bool existed, bool forceSetup, bool loadFailed)
     {
         var app = AppResources.Ensure();
-        var connection = Startup.Connect(new WindowPrompts(), config, path, existed, forceSetup, loadFailed);
+        var prompts = new WindowPrompts();
+        var connection = Startup.Connect(prompts, config, path, existed, forceSetup, loadFailed);
         if (connection == null) return 1;   // the person gave up, and was told why
 
-        var window = new MhWindow(new AdminDb(connection));
+        var window = new MhWindow(new AdminDb(connection), config, path);
+        // from here on the questions have a window to belong to, so they open over it
+        prompts.Owner = window;
         // AppResources keeps the Application alive on purpose, so that the view tests can build one
         // and not have it shut down under them; a real run ends when the window is closed.
         app.ShutdownMode = ShutdownMode.OnMainWindowClose;
