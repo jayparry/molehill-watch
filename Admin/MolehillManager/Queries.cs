@@ -12,20 +12,6 @@ public static class Queries
              WHEN @Today <= dbo.fn_InitialTermEnd(a.AgreementId) THEN 'Initial term' ELSE 'Rolling monthly' END
         """;
 
-    public static DataTable Agreements(AdminDb db, bool includeEnded) => db.Query($"""
-        DECLARE @Today date = CAST(dbo.fn_UkNow() AS date);
-        SELECT a.AgreementRef AS Ref, c.ClientName AS Client, {AgreementStatus} AS Status,
-               a.StartDate AS Started,
-               (SELECT COUNT(*) FROM dbo.Instance i WHERE i.AgreementId = a.AgreementId AND i.CoveredTo IS NULL) AS Instances,
-               (SELECT SUM(MonthlyFee) FROM dbo.fn_AgreementFees(a.AgreementId, CASE WHEN a.StartDate > @Today THEN a.StartDate ELSE @Today END)) AS MonthlyFee,
-               (SELECT COUNT(*) FROM dbo.Ticket t WHERE t.AgreementId = a.AgreementId AND t.Status NOT IN ('Resolved', 'Closed')) AS OpenTickets,
-               (SELECT COUNT(*) FROM dbo.OnboardingItem o WHERE o.AgreementId = a.AgreementId AND o.IsRequired = 1 AND o.CompletedDate IS NULL) AS OnboardingLeft,
-               (SELECT SUM(p.Remaining) FROM dbo.fn_PrepaidPackages(a.AgreementId, @Today) p WHERE p.State IN ('Active', 'Not started')) AS PrepaidLeft
-        FROM dbo.Agreement a JOIN dbo.Client c ON c.ClientId = a.ClientId
-        WHERE @IncludeEnded = 1 OR a.EndDate IS NULL OR a.EndDate >= @Today
-        ORDER BY c.ClientName, a.StartDate;
-        """, ("@IncludeEnded", includeEnded));
-
     /// <summary>"MWA-0001 - Client" for pickers.</summary>
     public static List<string> AgreementChoices(AdminDb db) =>
         db.Query("""
@@ -35,6 +21,23 @@ public static class Queries
             """).Rows.Cast<DataRow>().Select(r => (string)r[0]).ToList();
 
     public static string RefFromChoice(string choice) => choice.Split(" - ", 2)[0].Trim();
+
+    /// <summary>
+    ///   True while an invoice can still be changed. This gates adding, removing and adjusting
+    ///   lines, so it belongs with the other reads rather than inside the screen that asks.
+    /// </summary>
+    public static bool IsDraftInvoice(AdminDb db, string invoiceNo) =>
+        db.Scalar("SELECT 1 FROM dbo.Invoice WHERE InvoiceNo = @No AND Status = 'Draft';", ("@No", invoiceNo)) != null;
+
+    /// <summary>
+    ///   The agreement to open for a client named on a dashboard alert: the one still running,
+    ///   otherwise the one that ran most recently. Null when the client has none.
+    /// </summary>
+    public static string? AgreementRefForClient(AdminDb db, string clientName) =>
+        db.Scalar("""
+            SELECT TOP (1) a.AgreementRef FROM dbo.Agreement a JOIN dbo.Client c ON c.ClientId = a.ClientId
+            WHERE c.ClientName = @Client ORDER BY CASE WHEN a.EndDate IS NULL THEN 0 ELSE 1 END, a.StartDate DESC;
+            """, ("@Client", clientName)) as string;
 
     public static List<string> ClientNames(AdminDb db) =>
         db.Query("SELECT ClientName FROM dbo.Client ORDER BY ClientName;").Rows.Cast<DataRow>().Select(r => (string)r[0]).ToList();
@@ -261,7 +264,8 @@ public static class Queries
                     ELSE NULLIF(NCHAR(163) + FORMAT(ISNULL(u.Value, 0), 'N0') + ' (' + FORMAT(ISNULL(u.Days, 0), 'N2') + ' d)', NCHAR(163) + '0 (0.00 d)')
                     END AS Unbilled,
                (SELECT COUNT(*) FROM dbo.Ticket t WHERE t.AgreementId = a.AgreementId AND t.Status NOT IN ('Resolved', 'Closed')) AS OpenTickets,
-               (SELECT COUNT(*) FROM dbo.OnboardingItem o WHERE o.AgreementId = a.AgreementId AND o.IsRequired = 1 AND o.CompletedDate IS NULL) AS OnboardingLeft
+               (SELECT COUNT(*) FROM dbo.OnboardingItem o WHERE o.AgreementId = a.AgreementId AND o.IsRequired = 1 AND o.CompletedDate IS NULL) AS OnboardingLeft,
+               e.EngagementType AS _EngagementType
         FROM dbo.Engagement e
         JOIN dbo.Client c ON c.ClientId = e.ClientId
         LEFT JOIN dbo.Agreement a ON a.EngagementId = e.EngagementId
@@ -322,7 +326,7 @@ public static class Queries
                CASE e.RateType WHEN 'OutOfHours' THEN 'Out of hours' ELSE 'Business hours' END AS Rate,
                CASE WHEN e.IsBillable = 1 THEN 'Yes' ELSE 'No' END AS Billable,
                ISNULL(i.InvoiceNo, CASE WHEN e.IsBillable = 1 THEN 'at the next billing run' ELSE 'not billable' END) AS Invoiced,
-               e.Description
+               e.Description, e.InvoiceId AS _InvoiceId
         FROM dbo.TimeEntry e JOIN dbo.Engagement g ON g.EngagementId = e.EngagementId
         LEFT JOIN dbo.Invoice i ON i.InvoiceId = e.InvoiceId
         WHERE g.EngagementRef = @Ref ORDER BY e.WorkStart DESC, e.TimeEntryId DESC;

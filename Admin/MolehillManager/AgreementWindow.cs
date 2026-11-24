@@ -286,7 +286,7 @@ public sealed class AgreementWindow
         var idText = Grid.Selected(_contacts, "Id");
         if (idText == null || !int.TryParse(idText, out var id)) return ("Contacts", new() { add });
         var name = Grid.Selected(_contacts, "Name") ?? "Contact";
-        var current = Grid.Selected(_contacts, "Status") == "Current";
+        var current = Grid.SelectedRow(_contacts)?["Status"] as string == "Current";
         return ($"Contact {name}", new()
         {
             ("Edit details (name, e-mail, phone, raises tickets / receives invoices)", () => Ui.Form(AdminForms.EditContact(_db, id), Refresh)),
@@ -313,7 +313,8 @@ public sealed class AgreementWindow
         var sell = ("Sell pre-paid hours", (Action)(() => Ui.Form(AdminForms.SellPrepaid(_db, _ref), Refresh)));
         var reference = Grid.Selected(_prepaid, "Ref");
         if (reference == null) return ("Pre-paid hours", new() { sell });
-        var state = Grid.Selected(_prepaid, "State");
+        var row = Grid.SelectedRow(_prepaid);
+        var state = row?["State"] as string;
         var list = new List<(string, Action)>
         {
             ("Where the hours went", () => Ui.Try("Pre-paid hours", () =>
@@ -325,9 +326,13 @@ public sealed class AgreementWindow
         if (state != "Cancelled")
         {
             list.Add(("Change expiry, how it is charged, notes", () => Ui.Form(AdminForms.UpdatePrepaid(_db, reference), Refresh)));
-            if (Grid.Selected(_prepaid, "Invoice") == null)
+            // both of these used to be decided from the formatted cell text, where an unused
+            // package reads as the string "0" and an uninvoiced one as an empty cell
+            if (row?["Invoice"] is null or DBNull)
                 list.Add(("Invoice it now, on its own", () => Ui.Form(AdminForms.InvoicePrepaid(_db, reference), Refresh)));
-            if (Grid.Selected(_prepaid, "Used") is "0" or null) list.Add(("Cancel (unused only)", () => Ui.Form(AdminForms.CancelPrepaid(_db, reference), Refresh)));
+            var used = row?["Used"];
+            if (used is null or DBNull || (used is decimal hours && hours == 0m))
+                list.Add(("Cancel (unused only)", () => Ui.Form(AdminForms.CancelPrepaid(_db, reference), Refresh)));
         }
         list.Add(sell);
         return ($"Pre-paid hours {reference}", list);

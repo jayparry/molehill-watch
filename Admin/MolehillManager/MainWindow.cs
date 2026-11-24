@@ -250,8 +250,12 @@ public sealed class MainWindow
             : AgreementWindow.Summary(_db, reference, includeInstances: true));
     }
 
-    /// <summary>Is the selected row on the Clients tab consultancy work rather than a support agreement?</summary>
-    private bool IsConsultancy() => Grid.Selected(_agreements, "Type") == "Consultancy";
+    /// <summary>
+    ///   Is the selected row on the Clients tab consultancy work rather than a support agreement?
+    ///   Read from the raw EngagementType the query carries, not from the words in the Type cell:
+    ///   this one branch picks the detail pane, the window that opens and the whole action list.
+    /// </summary>
+    private bool IsConsultancy() => Grid.SelectedRow(_agreements)?["_EngagementType"] as string == "Consultancy";
 
     private void ShowTicketDetail()
     {
@@ -322,11 +326,7 @@ public sealed class MainWindow
             {
                 list.Add(("Show the whole alert", ShowAlert));
                 var client = row.Table.Columns.Contains("Client") ? row["Client"] as string : null;
-                var reference = string.IsNullOrEmpty(client) ? null
-                    : _db.Scalar("""
-                        SELECT TOP (1) a.AgreementRef FROM dbo.Agreement a JOIN dbo.Client c ON c.ClientId = a.ClientId
-                        WHERE c.ClientName = @c ORDER BY CASE WHEN a.EndDate IS NULL THEN 0 ELSE 1 END, a.StartDate DESC;
-                        """, ("@c", client)) as string;
+                var reference = string.IsNullOrEmpty(client) ? null : Queries.AgreementRefForClient(_db, client);
                 if (reference != null) list.Add(($"Open {client}'s agreement ({reference})", () => { new AgreementWindow(_db, reference).Run(); RefreshAll(); }));
             }
             list.Add(("Save the dashboard as HTML", () => Ui.Try("Dashboard", () => Ui.Saved("Dashboard", AdminForms.SaveDashboardHtml(_db, AdminForms.OutputFolder)))));

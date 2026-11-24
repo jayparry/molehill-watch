@@ -25,6 +25,8 @@ public static class Grid
         {
             var style = view.Style.GetOrCreateColumnStyle(c);
             var name = c.ColumnName;
+            // carried for the code to branch on, not for reading: see Output.Shown
+            if (name.StartsWith('_')) { style.Visible = false; continue; }
             style.RepresentationGetter = v => Output.Format(name, v);
             if (c.DataType == typeof(decimal) || c.DataType == typeof(int)) style.Alignment = TextAlignment.Right;
             if (c.ColumnName is "Description" or "Title" or "Basis" or "Notes" or "Detail") style.MaxWidth = 50;
@@ -75,7 +77,7 @@ public static class InvoiceActions
 {
     public static List<(string Label, Action Run)> List(AdminDb db, string invoiceNo, Action refresh)
     {
-        var draft = db.Scalar("SELECT 1 FROM dbo.Invoice WHERE InvoiceNo = @n AND Status = 'Draft';", ("@n", invoiceNo)) != null;
+        var draft = Queries.IsDraftInvoice(db, invoiceNo);
         var list = new List<(string, Action)>
         {
             ("Save as HTML (and open)", () => Ui.Try("Invoice", () => Ui.Saved("Invoice", AdminForms.SaveInvoiceHtml(db, invoiceNo, AdminForms.OutputFolder)))),

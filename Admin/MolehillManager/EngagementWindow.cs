@@ -190,7 +190,9 @@ public sealed class EngagementWindow
             if (idText == null || !int.TryParse(idText, out var id)) return ("Everything logged", new() { log });
             var invoiced = Grid.Selected(_entries, "Invoiced");
             var list = new List<(string, Action)>();
-            if (invoiced != null && invoiced.StartsWith("MDS") || invoiced is { } s && s.Contains('-') && !s.Contains("billing run") && !s.Contains("billable"))
+            // on an invoice or not, from the row's InvoiceId. This used to be read out of the words
+            // in the Invoiced cell, starting with a hard-coded "MDS" - and InvoicePrefix is a setting.
+            if (Grid.SelectedRow(_entries)?["_InvoiceId"] is int)
                 list.Add(("Already invoiced - void the invoice first to change it", () =>
                     MessageBox.Query("Logged work", $"This time is on invoice {invoiced}. Void that invoice, then change the time.", "Ok")));
             else

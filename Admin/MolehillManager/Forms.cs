@@ -337,31 +337,39 @@ public static class Output
         Application.Run(dialog);
     }
 
+    /// <summary>
+    ///   The columns worth showing. A leading underscore marks one a query carries for the code to
+    ///   branch on - a raw status, an id - rather than for anyone to read, so no screen prints it.
+    /// </summary>
+    public static IReadOnlyList<DataColumn> Shown(DataTable table) =>
+        table.Columns.Cast<DataColumn>().Where(c => !c.ColumnName.StartsWith('_')).ToList();
+
     public static string TextTable(DataTable table, bool vertical = false)
     {
         var sb = new StringBuilder();
         if (table.Rows.Count == 0) { sb.AppendLine("(no rows)"); return sb.ToString(); }
+        var shown = Shown(table);
 
         // one row with many columns reads better as "Name : value" lines
-        if (vertical || (table.Rows.Count == 1 && table.Columns.Count > 4))
+        if (vertical || (table.Rows.Count == 1 && shown.Count > 4))
         {
-            var w = table.Columns.Cast<DataColumn>().Max(c => c.ColumnName.Length);
+            var w = shown.Max(c => c.ColumnName.Length);
             foreach (DataRow row in table.Rows)
             {
-                foreach (DataColumn c in table.Columns) sb.AppendLine($"{c.ColumnName.PadRight(w)} : {Format(c.ColumnName, row[c])}");
+                foreach (var c in shown) sb.AppendLine($"{c.ColumnName.PadRight(w)} : {Format(c.ColumnName, row[c])}");
                 sb.AppendLine();
             }
             return sb.ToString();
         }
 
-        var widths = table.Columns.Cast<DataColumn>()
+        var widths = shown
             .Select(c => Math.Min(40, Math.Max(c.ColumnName.Length, table.Rows.Cast<DataRow>().Select(r => Format(c.ColumnName, r[c]).Length).DefaultIfEmpty(0).Max())))
             .ToArray();
         string Cell(string s, int w) => (s.Length > w ? s[..(w - 1)] + "…" : s).PadRight(w);
-        sb.AppendLine(string.Join("  ", table.Columns.Cast<DataColumn>().Select((c, i) => Cell(c.ColumnName, widths[i]))).TrimEnd());
+        sb.AppendLine(string.Join("  ", shown.Select((c, i) => Cell(c.ColumnName, widths[i]))).TrimEnd());
         sb.AppendLine(string.Join("  ", widths.Select(w => new string('-', w))));
         foreach (DataRow row in table.Rows)
-            sb.AppendLine(string.Join("  ", table.Columns.Cast<DataColumn>().Select((c, i) => Cell(Format(c.ColumnName, row[c]), widths[i]))).TrimEnd());
+            sb.AppendLine(string.Join("  ", shown.Select((c, i) => Cell(Format(c.ColumnName, row[c]), widths[i]))).TrimEnd());
         return sb.ToString();
     }
 
