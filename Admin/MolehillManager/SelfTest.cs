@@ -373,8 +373,142 @@ public static class SelfTest
         return Finish();
     }
 
+    /// <summary>
+    ///   Every availability rule, as a plain function of the selection: no screen and no database.
+    ///   Each check below is one rule that used to live inside a window, where nothing could reach
+    ///   it. Both halves matter - that what applies is offered, and that what does not is refused
+    ///   with a reason fit to show the user.
+    /// </summary>
+    private static void RunRules()
+    {
+        static string Ids(MhActionSet s) => string.Join(" ", s.Actions.Select(a => a.Enabled ? a.Id : $"({a.Id})"));
+        static bool On(MhActionSet s, string id) => s.ById(id)?.Enabled == true;
+        static bool Off(MhActionSet s, string id, string reasonHas) =>
+            s.ById(id) is { Enabled: false, DisabledReason: { } why } && why.Contains(reasonHas, StringComparison.OrdinalIgnoreCase);
+
+        // every set names its actions once, or looking one up by Id would find the wrong one
+        var every = new List<MhActionSet>
+        {
+            ActionRules.NewOnClients(),
+            ActionRules.Clients(null, null, false),
+            ActionRules.Clients("ST-1", "Acme", false), ActionRules.Clients("CST-1", "Acme", true),
+            ActionRules.TicketsTab(null), ActionRules.TicketsTab("MW-1"),
+            ActionRules.BillingTab(null, false), ActionRules.BillingTab("INV-1", true), ActionRules.BillingTab("INV-1", false),
+            ActionRules.Dashboard(false, null, null), ActionRules.Dashboard(true, "Acme", "ST-1"), ActionRules.Dashboard(true, "Acme", null),
+            ActionRules.Instances(null), ActionRules.Instances("SQL01"),
+            ActionRules.Onboarding(null), ActionRules.Onboarding("CONTACTS"),
+            ActionRules.Contact(null, null, false), ActionRules.Contact(3, "Pat", true), ActionRules.Contact(3, "Pat", false),
+            ActionRules.Weekly(),
+            ActionRules.Prepaid(null, null, null, null), ActionRules.Prepaid("PP-1", "Open", null, null),
+            ActionRules.Prepaid("PP-1", "Cancelled", null, null), ActionRules.Prepaid("PP-1", "Open", "INV-1", 4m),
+            ActionRules.AgreementWide("ST-1", false), ActionRules.AgreementWide("ST-1", true),
+            ActionRules.EngagementInvoices(null, false), ActionRules.EngagementInvoices("INV-1", true),
+            ActionRules.LoggedWork(null, false, null), ActionRules.LoggedWork(7, false, null), ActionRules.LoggedWork(7, true, "INV-1"),
+            ActionRules.DaysWorked(null), ActionRules.DaysWorked("01 Nov 2026"),
+            ActionRules.EngagementWide("CST-1", false), ActionRules.EngagementWide("CST-1", true)
+        };
+        var duplicated = every.Where(s => s.Actions.Select(a => a.Id).Distinct().Count() != s.Actions.Count).ToList();
+        Check($"all {every.Count} action sets name each action once", duplicated.Count == 0,
+            string.Join(" / ", duplicated.Select(Ids)));
+        var mute = every.SelectMany(s => s.Actions).Where(a => !a.Enabled && string.IsNullOrWhiteSpace(a.DisabledReason)).ToList();
+        Check("every action that cannot be done says why", mute.Count == 0, string.Join(", ", mute.Select(a => a.Id)));
+
+        // a support agreement and consultancy work offer different things
+        var support = ActionRules.Clients("ST-1", "Acme", isConsultancy: false);
+        var consultancy = ActionRules.Clients("CST-1", "Acme", isConsultancy: true);
+        Check("a support agreement offers tickets and pre-paid hours, not finishing the work",
+            On(support, "agreement-open") && On(support, "ticket-new") && On(support, "prepaid-sell")
+            && support.ById("engagement-complete") == null, Ids(support));
+        Check("consultancy work offers logging work and finishing it, not tickets or pre-paid hours",
+            On(consultancy, "engagement-open") && On(consultancy, "work-log") && On(consultancy, "engagement-complete")
+            && consultancy.ById("ticket-new") == null && consultancy.ById("prepaid-sell") == null, Ids(consultancy));
+
+        // only a draft invoice can have its lines changed
+        var draft = ActionRules.BillingTab("INV-1", isDraft: true);
+        var sent = ActionRules.BillingTab("INV-1", isDraft: false);
+        Check("a draft invoice can have lines added, taken off and adjusted",
+            On(draft, "invoice-line-add") && On(draft, "invoice-line-remove") && On(draft, "invoice-adjust"), Ids(draft));
+        Check("an invoice that is not a draft cannot, and says so",
+            Off(sent, "invoice-line-add", "draft") && Off(sent, "invoice-line-remove", "draft") && Off(sent, "invoice-adjust", "draft")
+            && On(sent, "invoice-void") && On(sent, "invoice-paid"), Ids(sent));
+
+        // pre-paid hours: invoiced, used, cancelled
+        var fresh = ActionRules.Prepaid("PP-1", "Open", invoice: null, used: null);
+        var invoicedPackage = ActionRules.Prepaid("PP-1", "Open", invoice: "INV-9", used: 0m);
+        var partUsed = ActionRules.Prepaid("PP-1", "Open", invoice: null, used: 4m);
+        var cancelled = ActionRules.Prepaid("PP-1", "Cancelled", invoice: "INV-9", used: 0m);
+        // the values come out of a DataRow, where nothing is spelt null: an empty cell is DBNull,
+        // and a rule that only tests for null would read every unused package as a used one
+        var fromRow = ActionRules.Prepaid("PP-1", "Open", invoice: DBNull.Value, used: DBNull.Value);
+        Check("an unused, uninvoiced package can be invoiced on its own or cancelled",
+            On(fresh, "prepaid-invoice") && On(fresh, "prepaid-cancel") && On(fresh, "prepaid-update"), Ids(fresh));
+        Check("and the same when the empty cells arrive as DBNull, which is how a row gives them",
+            On(fromRow, "prepaid-invoice") && On(fromRow, "prepaid-cancel"), Ids(fromRow));
+        Check("a package already on an invoice cannot be invoiced again, and names the invoice",
+            Off(invoicedPackage, "prepaid-invoice", "INV-9") && On(invoicedPackage, "prepaid-cancel"), Ids(invoicedPackage));
+        Check("a part-used package cannot be cancelled, and says how much went",
+            Off(partUsed, "prepaid-cancel", "4") && On(partUsed, "prepaid-invoice"), Ids(partUsed));
+        Check("a cancelled package can only be looked at",
+            On(cancelled, "prepaid-usage") && Off(cancelled, "prepaid-update", "cancelled")
+            && Off(cancelled, "prepaid-invoice", "cancelled") && Off(cancelled, "prepaid-cancel", "cancelled"), Ids(cancelled));
+
+        // logged time that is already on an invoice
+        var open = ActionRules.LoggedWork(7, invoiced: false, null);
+        var billed = ActionRules.LoggedWork(7, invoiced: true, "INV-9");
+        Check("time not yet invoiced can be corrected or removed",
+            On(open, "entry-correct") && On(open, "entry-remove") && open.ById("entry-invoiced") == null, Ids(open));
+        Check("time already on an invoice cannot, and says which invoice to void",
+            Off(billed, "entry-correct", "INV-9") && Off(billed, "entry-remove", "INV-9")
+            && On(billed, "entry-invoiced"), Ids(billed));
+
+        // a contact is either current or removed, never both
+        var currentContact = ActionRules.Contact(3, "Pat", current: true);
+        var pastContact = ActionRules.Contact(3, "Pat", current: false);
+        Check("a current contact can be removed but not added back",
+            On(currentContact, "contact-remove") && Off(currentContact, "contact-readd", "already"), Ids(currentContact));
+        Check("a removed contact can be added back but not removed again",
+            On(pastContact, "contact-readd") && Off(pastContact, "contact-remove", "not a current"), Ids(pastContact));
+
+        // finished work cannot be finished or cancelled twice
+        var running = ActionRules.EngagementWide("CST-1", finished: false);
+        var done = ActionRules.EngagementWide("CST-1", finished: true);
+        Check("work in progress can be finished or cancelled",
+            On(running, "engagement-complete") && On(running, "engagement-cancel"), Ids(running));
+        Check("finished work cannot be finished or cancelled again",
+            Off(done, "engagement-complete", "already finished") && Off(done, "engagement-cancel", "already finished")
+            && On(done, "invoice-new") && On(done, "billing-run"), Ids(done));
+
+        // the dashboard's alert actions
+        var noAlert = ActionRules.Dashboard(false, null, null);
+        var withAgreement = ActionRules.Dashboard(true, "Acme", "ST-1");
+        var noAgreement = ActionRules.Dashboard(true, "Acme", null);
+        var noClient = ActionRules.Dashboard(true, null, null);
+        Check("with no alert picked, only saving the dashboard is offered",
+            Off(noAlert, "alert-show", "pick an alert") && Off(noAlert, "alert-agreement", "pick an alert")
+            && On(noAlert, "dashboard-html"), Ids(noAlert));
+        Check("an alert about a client with an agreement offers to open it, named",
+            On(withAgreement, "alert-agreement") && withAgreement.ById("alert-agreement")!.Label.Contains("Acme's agreement (ST-1)"), Ids(withAgreement));
+        Check("an alert whose client has no agreement says that, rather than offering nothing",
+            Off(noAgreement, "alert-agreement", "Acme has no agreement") && On(noAgreement, "alert-show"), Ids(noAgreement));
+        Check("an alert about no one in particular says that too",
+            Off(noClient, "alert-agreement", "not about one client"), Ids(noClient));
+
+        // the pause toggle is one action with two names
+        Check("pause and resume are the same action, named for what it will do",
+            ActionRules.AgreementWide("ST-1", paused: false).ById("agreement-pause")!.Label.StartsWith("Pause support")
+            && ActionRules.AgreementWide("ST-1", paused: true).ById("agreement-pause")!.Label == "Resume support");
+
+        // nothing selected: what is left is the things that need no selection
+        Check("with nothing selected a tab still offers what needs no selection",
+            ActionRules.Instances(null).Available.Select(a => a.Id).SequenceEqual(new[] { "instance-add" })
+            && ActionRules.TicketsTab(null).Available.Select(a => a.Id).SequenceEqual(new[] { "ticket-new" })
+            && ActionRules.Prepaid(null, null, null, null).Available.Select(a => a.Id).SequenceEqual(new[] { "prepaid-sell" })
+            && ActionRules.LoggedWork(null, false, null).Available.Select(a => a.Id).SequenceEqual(new[] { "work-log" }));
+    }
+
     private static void RunUi(AdminDb db)
     {
+        RunRules();
         Step("main window builds and loads every tab", () => { new MainWindow(db).CreateTop(); return 0; });
         Step("dashboard returns its 5 result sets", () => db.Proc("dbo.usp_Dashboard"), r => r.Tables.Count == 5 ? null : $"{r.Tables.Count} sets");
 
@@ -406,6 +540,43 @@ public static class SelfTest
         var anyTicket = tickets.Rows.Count > 0 ? (string)tickets.Rows[0]["Ticket"] : "MW-00001";
         var invoices = Queries.Invoices(db, "All");
         var anyInvoice = invoices.Rows.Count > 0 ? (string)invoices.Rows[0]["Invoice"] : "INV-0001";
+
+        // Everything offered has code behind its Id. Matching a chosen action by its label used to
+        // mean a renamed or repeated label ran the wrong thing, silently; a missing handler now
+        // fails here rather than when someone picks it.
+        var missing = new List<string>();
+        void Covered(string where, MhActionSet set, IReadOnlyDictionary<string, Action> handlers)
+        {
+            foreach (var a in set.Available.Where(a => !handlers.ContainsKey(a.Id))) missing.Add($"{where}: {a.Id}");
+        }
+        var main = new MainWindow(db);
+        main.CreateTop();
+        for (var i = 0; i < 4; i++)
+        {
+            var (set, handlers) = main.ActionsOn(i);
+            Covered($"main tab {i + 1}", set, handlers);
+        }
+        if (agreements.Count > 0)
+        {
+            var aw = new AgreementWindow(db, anyRef);
+            aw.Build();
+            foreach (var tab in aw.Tabs.ToList())
+            {
+                var (set, handlers) = aw.ActionsOn(tab);
+                Covered($"agreement {tab.Text}", set, handlers);
+            }
+        }
+        if (consultancy != null)
+        {
+            var ew = new EngagementWindow(db, (string)consultancy["Ref"]);
+            ew.Build();
+            foreach (var tab in ew.Tabs.ToList())
+            {
+                var (set, handlers) = ew.ActionsOn(tab);
+                Covered($"engagement {tab.Text}", set, handlers);
+            }
+        }
+        Check("every action the screens offer has code behind its Id", missing.Count == 0, string.Join(", ", missing));
 
         foreach (var spec in AllForms(db, anyRef, anyClient, anyInstance, anyTicket, anyInvoice))
             Step($"form '{spec.Title}' builds", () => { using var d = FormDialog.Create(spec, out _); return 0; });
@@ -954,6 +1125,55 @@ public static class SelfTest
             Check("ticking 'Show removed contacts' lists them", Listed("Sam Second") && Listed("Pat Tester"), win.RemovedNote);
             win.SetShowRemoved(false);
             Check("unticking hides them again", !Listed("Sam Second"));
+
+            // ---- the availability rules over real rows, not made-up ones. RunRules checks the
+            // rules themselves; these check that each screen hands them the right data, which is
+            // where the old code went wrong by reading the words out of a formatted cell.
+            static bool On(MhActionSet s, string id) => s.ById(id)?.Enabled == true;
+            static bool Off(MhActionSet s, string id, string reasonHas) =>
+                s.ById(id) is { Enabled: false, DisabledReason: { } why } && why.Contains(reasonHas, StringComparison.OrdinalIgnoreCase);
+            static string Ids(MhActionSet s) => string.Join(" ", s.Actions.Select(a => a.Enabled ? a.Id : $"({a.Id})"));
+
+            Check("a draft invoice is known to be one", Queries.IsDraftInvoice(db, typedNo));
+            Check("an invoice that has been sent and paid is not", !Queries.IsDraftInvoice(db, invoice));
+            var found = Queries.AgreementRefForClient(db, name);
+            Check("the dashboard can find the client's agreement from the alert", found != null && found.StartsWith(reference), found ?? "(none)");
+
+            var picked = new MainWindow(db);
+            picked.CreateTop();
+            var onSupport = picked.ClientActions(reference);
+            var onConsultancy = picked.ClientActions(conRef);
+            Check("the Clients tab offers agreement actions for the support agreement",
+                On(onSupport, "agreement-open") && On(onSupport, "ticket-new") && On(onSupport, "prepaid-sell")
+                && onSupport.ById("engagement-complete") == null, Ids(onSupport));
+            Check("and consultancy actions for the engagement on the same tab",
+                On(onConsultancy, "engagement-open") && On(onConsultancy, "work-log")
+                && onConsultancy.ById("ticket-new") == null, Ids(onConsultancy));
+
+            var packages = new AgreementWindow(db, reference);
+            packages.Build();
+            var invoiced = packages.PrepaidActions(package);
+            var dead = packages.PrepaidActions(spare);
+            Check("the package already on an invoice is not offered for invoicing again",
+                Off(invoiced, "prepaid-invoice", invoice), Ids(invoiced));
+            Check("and the hour taken out of it stops it being cancelled",
+                Off(invoiced, "prepaid-cancel", "already been used"), Ids(invoiced));
+            Check("the cancelled package offers nothing but where its hours went",
+                dead.Available.Select(a => a.Id).SequenceEqual(new[] { "prepaid-usage", "prepaid-sell" }), Ids(dead));
+
+            var logged = new EngagementWindow(db, conRef);
+            logged.Build();
+            var onInvoice = logged.EntryActions(invoiced: true);
+            var notYet = logged.EntryActions(invoiced: false);
+            Check("logged time that is already invoiced cannot be corrected or removed",
+                Off(onInvoice, "entry-correct", "void that invoice") && Off(onInvoice, "entry-remove", "void that invoice")
+                && On(onInvoice, "entry-invoiced"), Ids(onInvoice));
+            Check("logged time not on an invoice still can be",
+                On(notYet, "entry-correct") && On(notYet, "entry-remove"), Ids(notYet));
+            var finished = logged.EngagementWideSet();
+            Check("a finished engagement is not offered for finishing or cancelling again",
+                Off(finished, "engagement-complete", "already finished") && Off(finished, "engagement-cancel", "already finished")
+                && On(finished, "billing-run"), Ids(finished));
         }
         finally
         {

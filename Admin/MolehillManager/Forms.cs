@@ -286,14 +286,24 @@ public static class Picker
 {
     public static string? Choose(string title, IList<string> choices, string? current = null)
     {
-        string? chosen = null;
+        var picked = ChooseIndex(title, choices, current == null ? -1 : choices.IndexOf(current));
+        return picked == null ? null : choices[picked.Value];
+    }
+
+    /// <summary>
+    ///   Which one was chosen, rather than what it said. Two rows can read identically - two time
+    ///   entries of the same length on the same day, two invoice lines of the same amount - and
+    ///   looking the choice back up by its text would then act on the wrong one.
+    /// </summary>
+    public static int? ChooseIndex(string title, IList<string> choices, int current = -1)
+    {
+        int? chosen = null;
         var list = new ListView(choices.ToList()) { X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill() };
-        var index = current == null ? -1 : choices.IndexOf(current);
-        if (index >= 0) list.SelectedItem = index;
+        if (current >= 0) list.SelectedItem = current;
         var cancel = new Button("Cancel");
         var width = Math.Min(Math.Max(choices.Max(c => c.Length), title.Length) + 8, 100);
         var dialog = new Dialog(title, width, Math.Min(choices.Count + 5, 30), cancel);
-        list.OpenSelectedItem += e => { chosen = choices[e.Item]; Application.RequestStop(); };
+        list.OpenSelectedItem += e => { chosen = e.Item; Application.RequestStop(); };
         cancel.Clicked += () => Application.RequestStop();
         dialog.Add(list);
         list.SetFocus();
@@ -304,9 +314,25 @@ public static class Picker
     /// <summary>A list of named actions; runs the chosen one.</summary>
     public static void Actions(string title, params (string Label, Action Run)[] actions)
     {
-        var chosen = Choose(title, actions.Select(a => a.Label).ToList());
-        if (chosen == null) return;
-        actions.First(a => a.Label == chosen).Run();
+        var picked = ChooseIndex(title, actions.Select(a => a.Label).ToList());
+        if (picked != null) actions[picked.Value].Run();
+    }
+
+    /// <summary>
+    ///   Offers an action set and runs what was chosen, found by its Id. The terminal list shows
+    ///   only what can be done; the reason an action is unavailable is for the GUI, which has room
+    ///   to show it greyed out with the reason on it.
+    /// </summary>
+    public static void Actions(MhActionSet set, IReadOnlyDictionary<string, Action> handlers)
+    {
+        var available = set.Available;
+        if (available.Count == 0) return;
+        var picked = ChooseIndex(set.Title, available.Select(a => a.Label).ToList());
+        if (picked == null) return;
+        var action = available[picked.Value];
+        if (!handlers.TryGetValue(action.Id, out var run))
+            throw new InvalidOperationException($"No handler for the action '{action.Id}'.");
+        run();
     }
 }
 

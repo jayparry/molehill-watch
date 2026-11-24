@@ -159,110 +159,109 @@ public sealed class EngagementWindow
 
     private void LogWork() => Ui.Form(AdminForms.LogWork(_db, _ref), Refresh);
 
-    private (string Title, List<(string Label, Action Run)> Items) ContextActions()
+    private (MhActionSet Set, Dictionary<string, Action> Handlers) Context()
     {
         var tab = _tabs.SelectedTab;
-        var log = ("Log work", (Action)LogWork);
+        var handlers = new Dictionary<string, Action> { ["work-log"] = LogWork };
 
         if (tab == _invoiceTab)
         {
-            var newInvoice = ("New invoice typed by hand", (Action)(() => Ui.Form(AdminForms.NewInvoice(_db, _ref), Refresh)));
             var no = Grid.Selected(_invoices, "Invoice");
-            if (no == null) return ("Invoices", new() { newInvoice, log });
-            return ($"Invoice {no}", InvoiceActions.List(_db, no, Refresh).Append(newInvoice).ToList());
+            if (no != null) foreach (var (id, run) in InvoiceActions.Handlers(_db, no, Refresh)) handlers[id] = run;
+            handlers["invoice-new"] = () => Ui.Form(AdminForms.NewInvoice(_db, _ref), Refresh);
+            return (ActionRules.EngagementInvoices(no, no != null && Queries.IsDraftInvoice(_db, no)), handlers);
         }
         if (tab == _contactTab)
         {
-            var add = ("Add a contact", (Action)(() => Ui.Form(AdminForms.AddContact(_db, _clientName), Refresh)));
+            handlers["contact-add"] = () => Ui.Form(AdminForms.AddContact(_db, _clientName), Refresh);
             var idText = Grid.Selected(_contacts, "Id");
-            if (idText == null || !int.TryParse(idText, out var id)) return ("Contacts", new() { add });
+            if (idText == null || !int.TryParse(idText, out var id)) return (ActionRules.Contact(null, null, false), handlers);
             var name = Grid.Selected(_contacts, "Name") ?? "Contact";
-            return ($"Contact {name}", new()
-            {
-                ("Edit details (name, e-mail, phone, raises tickets / receives invoices)", () => Ui.Form(AdminForms.EditContact(_db, id), Refresh)),
-                ("Remove as a contact (kept in history)", () => Ui.Form(AdminForms.RemoveContact(_db, id), Refresh)),
-                add
-            });
+            handlers["contact-edit"] = () => Ui.Form(AdminForms.EditContact(_db, id), Refresh);
+            handlers["contact-remove"] = () => Ui.Form(AdminForms.RemoveContact(_db, id), Refresh);
+            handlers["contact-readd"] = () => Ui.Form(AdminForms.ReaddContact(_db, id), Refresh);
+            // this grid never lists removed contacts, so the one here is always a current one
+            return (ActionRules.Contact(id, name, current: true, history: false), handlers);
         }
         if (tab == _entriesTab)
         {
             var idText = Grid.Selected(_entries, "Id");
-            if (idText == null || !int.TryParse(idText, out var id)) return ("Everything logged", new() { log });
-            var invoiced = Grid.Selected(_entries, "Invoiced");
-            var list = new List<(string, Action)>();
-            // on an invoice or not, from the row's InvoiceId. This used to be read out of the words
-            // in the Invoiced cell, starting with a hard-coded "MDS" - and InvoicePrefix is a setting.
-            if (Grid.SelectedRow(_entries)?["_InvoiceId"] is int)
-                list.Add(("Already invoiced - void the invoice first to change it", () =>
-                    MessageBox.Query("Logged work", $"This time is on invoice {invoiced}. Void that invoice, then change the time.", "Ok")));
-            else
-            {
-                list.Add(("Correct it (date, time, description)", () => Ui.Form(AdminForms.EditTimeEntry(_db, id), Refresh)));
-                list.Add(("Remove it", () => Ui.Form(AdminForms.DeleteTimeEntry(_db, id), Refresh)));
-            }
-            list.Add(log);
-            return ($"Logged work #{id}", list);
+            if (idText == null || !int.TryParse(idText, out var id)) return (ActionRules.LoggedWork(null, false, null), handlers);
+            var invoiceNo = Grid.Selected(_entries, "Invoiced");
+            // on an invoice or not, from the row's raw InvoiceId. This used to be read out of the
+            // words in the Invoiced cell, starting with a hard-coded "MDS" - and the invoice prefix
+            // is a setting the user can change.
+            var invoiced = Grid.SelectedRow(_entries)?["_InvoiceId"] is int;
+            handlers["entry-invoiced"] = () =>
+                MessageBox.Query("Logged work", $"This time is on invoice {invoiceNo}. Void that invoice, then change the time.", "Ok");
+            handlers["entry-correct"] = () => Ui.Form(AdminForms.EditTimeEntry(_db, id), Refresh);
+            handlers["entry-remove"] = () => Ui.Form(AdminForms.DeleteTimeEntry(_db, id), Refresh);
+            return (ActionRules.LoggedWork(id, invoiced, invoiceNo), handlers);
         }
 
-        // Days worked
-        var date = Grid.Selected(_work, "Date");
-        if (date == null) return ("Days worked", new() { log });
-        return ($"{date}", new()
+        handlers["work-day-correct"] = () =>
         {
-            log,
-            ("Correct or remove what was logged that day", () =>
-            {
-                _tabs.SelectedTab = _entriesTab;
-                MessageBox.Query("Days worked", "Everything logged is on the next tab - pick the entry there to correct or remove it.", "Ok");
-            })
-        });
+            _tabs.SelectedTab = _entriesTab;
+            MessageBox.Query("Days worked", "Everything logged is on the next tab - pick the entry there to correct or remove it.", "Ok");
+        };
+        return (ActionRules.DaysWorked(Grid.Selected(_work, "Date")), handlers);
     }
 
     private void RowActions()
     {
-        var (title, items) = ContextActions();
-        Picker.Actions(title, items.ToArray());
+        var (set, handlers) = Context();
+        Picker.Actions(set, handlers);
     }
 
     private void ShowActions()
     {
-        var (title, items) = ContextActions();
-        items.Add(("Engagement actions (change, finish, invoice, billing) ...", EngagementActions));
-        Picker.Actions(title, items.ToArray());
+        var (set, handlers) = Context();
+        handlers["engagement-more"] = EngagementActions;
+        Picker.Actions(set.Add(new MhAction("engagement-more", "Engagement actions (change, finish, invoice, billing) ...")), handlers);
+    }
+
+    /// <summary>The actions for a tab, with nothing drawn (for the self-test).</summary>
+    internal (MhActionSet Set, Dictionary<string, Action> Handlers) ActionsOn(TabView.Tab? tab = null)
+    {
+        if (tab != null) _tabs.SelectedTab = tab;
+        return Context();
     }
 
     /// <summary>The F4 menu's labels for the tab showing (for the self-test).</summary>
     internal List<string> ActionLabels(TabView.Tab? tab = null)
     {
-        if (tab != null) _tabs.SelectedTab = tab;
-        var (title, items) = ContextActions();
-        return items.Select(i => i.Label).Prepend(title).ToList();
+        var set = ActionsOn(tab).Set;
+        return set.Available.Select(a => a.Label).Prepend(set.Title).ToList();
     }
 
     internal IEnumerable<TabView.Tab> Tabs => _tabs.Tabs;
 
-    private void EngagementActions()
+    private void EngagementActions() =>
+        Picker.Actions(EngagementWideSet(), new Dictionary<string, Action>
+        {
+            ["work-log"] = LogWork,
+            ["engagement-edit"] = () => Ui.Form(AdminForms.EditEngagement(_db, _ref), Refresh),
+            ["engagement-complete"] = () => Ui.Form(AdminForms.CompleteEngagement(_db, _ref), Refresh),
+            ["engagement-cancel"] = () => Ui.Form(AdminForms.CancelEngagement(_db, _ref), Refresh),
+            ["invoice-new"] = () => Ui.Form(AdminForms.NewInvoice(_db, _ref), Refresh),
+            ["billing-run"] = () => Ui.RunBilling(_db, _ref, Refresh)
+        });
+
+    /// <summary>
+    ///   Selects one logged-work row and returns what it offers (for the self-test): whether the
+    ///   time is already invoiced, read off the real row rather than the first one listed.
+    /// </summary>
+    internal MhActionSet EntryActions(bool invoiced)
     {
-        var e = Queries.Engagement(_db, _ref);
-        var finished = e?["Status"] as string is "Completed" or "Cancelled";
-        var list = new List<(string, Action)>
-        {
-            ("Log work", LogWork),
-            ("Change it (rate, name, PO, dates, on hold)", () => Ui.Form(AdminForms.EditEngagement(_db, _ref), Refresh))
-        };
-        if (!finished)
-        {
-            list.Add(("Finished - invoice what is left", () => Ui.Form(AdminForms.CompleteEngagement(_db, _ref), Refresh)));
-            list.Add(("Cancel (nothing invoiced)", () => Ui.Form(AdminForms.CancelEngagement(_db, _ref), Refresh)));
-        }
-        list.Add(("New invoice typed by hand", () => Ui.Form(AdminForms.NewInvoice(_db, _ref), Refresh)));
-        list.Add(("Run billing for this engagement", () => Ui.Try("Billing", () =>
-        {
-            var r = _db.Proc("dbo.usp_Billing_Run", ("@Client", _ref));
-            if (r.First is { Rows.Count: 0 }) r.Messages.Add("Nothing new to invoice.");
-            Output.Show("Billing", r);
-            Refresh();
-        })));
-        Picker.Actions($"Engagement {_ref}", list.ToArray());
+        _tabs.SelectedTab = _entriesTab;
+        var rows = _entries.Table.Rows.Cast<DataRow>().ToList();
+        var i = rows.FindIndex(r => (r["_InvoiceId"] is int) == invoiced);
+        if (i < 0) throw new InvalidOperationException($"no logged work that is {(invoiced ? "" : "not ")}invoiced.");
+        _entries.SelectedRow = i;
+        return Context().Set;
     }
+
+    /// <summary>The engagement-wide actions, with nothing drawn (for the self-test).</summary>
+    internal MhActionSet EngagementWideSet() =>
+        ActionRules.EngagementWide(_ref, Queries.Engagement(_db, _ref)?["Status"] as string is "Completed" or "Cancelled");
 }

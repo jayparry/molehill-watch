@@ -64,6 +64,19 @@ public static class Ui
         catch (Exception ex) { MessageBox.ErrorQuery(title, ex is FormatException ? ex.Message : AdminDb.Describe(ex), "Ok"); }
     }
 
+    /// <summary>
+    ///   Runs the billing for one client, agreement or engagement and shows what it did. The
+    ///   procedure says nothing at all when there was nothing to bill, so say so; this was written
+    ///   out three times, once in each window.
+    /// </summary>
+    public static void RunBilling(AdminDb db, string reference, Action refresh) => Try("Billing", () =>
+    {
+        var r = db.Proc("dbo.usp_Billing_Run", ("@Client", reference));
+        if (r.First is { Rows.Count: 0 }) r.Messages.Add("Nothing new to invoice.");
+        Output.Show("Billing", r);
+        refresh();
+    });
+
     /// <summary>Writes a file and offers to open it in the default browser.</summary>
     public static void Saved(string title, string path)
     {
@@ -75,35 +88,31 @@ public static class Ui
 /// <summary>The actions on an invoice, shared by the Billing tab and the engagement window.</summary>
 public static class InvoiceActions
 {
-    public static List<(string Label, Action Run)> List(AdminDb db, string invoiceNo, Action refresh)
+    /// <summary>What applies to this invoice: only a draft can have its lines changed.</summary>
+    public static MhActionSet Set(AdminDb db, string invoiceNo) =>
+        ActionRules.Invoice(invoiceNo, Queries.IsDraftInvoice(db, invoiceNo));
+
+    public static Dictionary<string, Action> Handlers(AdminDb db, string invoiceNo, Action refresh) => new()
     {
-        var draft = Queries.IsDraftInvoice(db, invoiceNo);
-        var list = new List<(string, Action)>
-        {
-            ("Save as HTML (and open)", () => Ui.Try("Invoice", () => Ui.Saved("Invoice", AdminForms.SaveInvoiceHtml(db, invoiceNo, AdminForms.OutputFolder)))),
-            ("Mark sent", () => Ui.Form(AdminForms.SetInvoiceStatus(db, invoiceNo, "Sent"), refresh)),
-            ("Mark paid", () => Ui.Form(AdminForms.SetInvoiceStatus(db, invoiceNo, "Paid"), refresh))
-        };
-        if (draft)
-        {
-            list.Add(("Add a line", () => Ui.Form(AdminForms.AddInvoiceLine(db, invoiceNo), refresh)));
-            list.Add(("Remove a line", () => Ui.Try("Invoice", () => RemoveLine(db, invoiceNo, refresh))));
-            list.Add(("Add an adjustment or credit", () => Ui.Form(AdminForms.AdjustInvoice(db, invoiceNo), refresh)));
-        }
-        list.Add(("Void", () =>
+        ["invoice-html"] = () => Ui.Try("Invoice", () => Ui.Saved("Invoice", AdminForms.SaveInvoiceHtml(db, invoiceNo, AdminForms.OutputFolder))),
+        ["invoice-sent"] = () => Ui.Form(AdminForms.SetInvoiceStatus(db, invoiceNo, "Sent"), refresh),
+        ["invoice-paid"] = () => Ui.Form(AdminForms.SetInvoiceStatus(db, invoiceNo, "Paid"), refresh),
+        ["invoice-line-add"] = () => Ui.Form(AdminForms.AddInvoiceLine(db, invoiceNo), refresh),
+        ["invoice-line-remove"] = () => Ui.Try("Invoice", () => RemoveLine(db, invoiceNo, refresh)),
+        ["invoice-adjust"] = () => Ui.Form(AdminForms.AdjustInvoice(db, invoiceNo), refresh),
+        ["invoice-void"] = () =>
         {
             if (MessageBox.Query("Void", $"Void {invoiceNo}? Any time it billed becomes billable again.", "Void", "Cancel") == 0)
                 Ui.Form(AdminForms.SetInvoiceStatus(db, invoiceNo, "Void"), refresh);
-        }));
-        list.Add(("Put draft numbers back in date order", () => Ui.Try("Invoice numbers", () =>
+        },
+        ["invoice-renumber"] = () => Ui.Try("Invoice numbers", () =>
         {
             var r = db.Proc("dbo.usp_Invoice_Renumber");
             if (r.First is { Rows.Count: 0 }) r.Messages.Add("Nothing to do - they are already in date order.");
             Output.Show("Invoice numbers", r);
             refresh();
-        })));
-        return list;
-    }
+        })
+    };
 
     /// <summary>Pick a line off a draft invoice and take it away (billing-run lines are refused by the database).</summary>
     private static void RemoveLine(AdminDb db, string invoiceNo, Action refresh)
@@ -112,28 +121,30 @@ public static class InvoiceActions
         if (lines.Rows.Count == 0) { MessageBox.Query("Invoice", "This invoice has no lines yet.", "Ok"); return; }
         var labels = lines.Rows.Cast<DataRow>()
             .Select(r => $"{Output.Format(r["Description"])}  -  {Output.Format(r["Amount"])}").ToList();
-        var chosen = Picker.Choose($"{invoiceNo} - which line?", labels);
-        if (chosen == null) return;
-        var row = lines.Rows[labels.IndexOf(chosen)];
-        Ui.Form(AdminForms.RemoveInvoiceLine(db, invoiceNo, (int)row["Id"], chosen), refresh);
+        var picked = Picker.ChooseIndex($"{invoiceNo} - which line?", labels);
+        if (picked == null) return;
+        var row = lines.Rows[picked.Value];
+        Ui.Form(AdminForms.RemoveInvoiceLine(db, invoiceNo, (int)row["Id"], labels[picked.Value]), refresh);
     }
 }
 
 /// <summary>The actions on a ticket, shared by the Tickets tab and the agreement window.</summary>
 public static class TicketActions
 {
-    public static List<(string Label, Action Run)> List(AdminDb db, string ticketRef, Action refresh) => new()
+    public static Dictionary<string, Action> Handlers(AdminDb db, string ticketRef, Action refresh) => new()
     {
-        ("Details and time logged", () => Ui.Try("Ticket", () => Details(db, ticketRef))),
-        ("Record first response", () => Ui.Form(AdminForms.RespondTicket(db, ticketRef), refresh)),
-        ("Log time", () => Ui.Try("Log time", () => Ui.Form(AdminForms.LogTime(db, ticketRef), refresh))),
-        ("Change rate (business hours / out of hours)", () => Ui.Try("Rate", () => Ui.Form(AdminForms.SetTicketRate(db, ticketRef), refresh))),
-        ("Correct or remove logged time", () => Ui.Try("Time", () => EditTime(db, ticketRef, refresh))),
-        ("Estimate / client approval", () => Ui.Form(AdminForms.EstimateTicket(db, ticketRef), refresh)),
-        ("Resolve or close", () => Ui.Form(AdminForms.CloseTicket(db, ticketRef), refresh))
+        ["ticket-details"] = () => Ui.Try("Ticket", () => Details(db, ticketRef)),
+        ["ticket-respond"] = () => Ui.Form(AdminForms.RespondTicket(db, ticketRef), refresh),
+        ["ticket-log-time"] = () => Ui.Try("Log time", () => Ui.Form(AdminForms.LogTime(db, ticketRef), refresh)),
+        ["ticket-rate"] = () => Ui.Try("Rate", () => Ui.Form(AdminForms.SetTicketRate(db, ticketRef), refresh)),
+        ["ticket-edit-time"] = () => Ui.Try("Time", () => EditTime(db, ticketRef, refresh)),
+        ["ticket-estimate"] = () => Ui.Form(AdminForms.EstimateTicket(db, ticketRef), refresh),
+        ["ticket-close"] = () => Ui.Form(AdminForms.CloseTicket(db, ticketRef), refresh),
+        ["ticket-new"] = () => Ui.Form(AdminForms.OpenTicket(db), refresh)
     };
 
-    public static void Show(AdminDb db, string ticketRef, Action refresh) => Picker.Actions($"Ticket {ticketRef}", List(db, ticketRef, refresh).ToArray());
+    public static void Show(AdminDb db, string ticketRef, Action refresh) =>
+        Picker.Actions(ActionRules.Ticket(ticketRef), Handlers(db, ticketRef, refresh));
 
     /// <summary>Pick one of the ticket's time entries, then correct or remove it.</summary>
     private static void EditTime(AdminDb db, string ticketRef, Action refresh)
@@ -143,10 +154,10 @@ public static class TicketActions
         var labels = entries.Rows.Cast<DataRow>()
             .Select(r => $"{Output.Format(r["Started"])}  {r["Minutes"]} min  {AdminForms.RateLabel(r["Rate"] as string)}  -  {Output.Format(r["Invoiced"])}")
             .ToList();
-        var chosen = Picker.Choose($"{ticketRef} - which time entry?", labels);
-        if (chosen == null) return;
-        var id = (int)entries.Rows[labels.IndexOf(chosen)]["Id"];
-        Picker.Actions(chosen,
+        var picked = Picker.ChooseIndex($"{ticketRef} - which time entry?", labels);
+        if (picked == null) return;
+        var id = (int)entries.Rows[picked.Value]["Id"];
+        Picker.Actions(labels[picked.Value],
             ("Correct it (date, minutes, rate, description)", () => Ui.Form(AdminForms.EditTimeEntry(db, id), refresh)),
             ("Remove it", () => Ui.Form(AdminForms.DeleteTimeEntry(db, id), refresh)));
     }

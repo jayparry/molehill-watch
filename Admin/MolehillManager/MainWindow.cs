@@ -283,102 +283,111 @@ public sealed class MainWindow
         if (_tabs.SelectedTab == _ticketsTab) Ui.Form(AdminForms.OpenTicket(_db), RefreshAll);
         else if (_tabs.SelectedTab == _billingTab) Ui.Form(AdminForms.RunBilling(_db), RefreshAll);
         else if (_tabs.SelectedTab == _clientsTab)
-            Picker.Actions("New", NewItems().ToArray());
+            Picker.Actions(ActionRules.NewOnClients() with { Title = "New" }, Clients().Handlers);
         else NewClient();
     }
 
-    /// <summary>What F2 offers on the Clients tab.</summary>
-    private List<(string Label, Action Run)> NewItems() => new()
-    {
-        ("New client (with their Molehill Watch agreement)", NewClient),
-        ("New consultancy engagement", () => Ui.Form(AdminForms.NewEngagement(_db, Grid.Selected(_agreements, "Client")), RefreshAll)),
-        ("New Molehill Watch agreement for an existing client", () => Ui.Form(AdminForms.NewAgreement(_db), RefreshAll))
-    };
-
-    /// <summary>F4: the actions for the tab showing and its selected row.</summary>
-    private (string Title, List<(string Label, Action Run)> Items) ContextActions()
+    /// <summary>
+    ///   F4: what can be done to the tab showing and its selected row, and what each one does. The
+    ///   rules live in <see cref="ActionRules"/> where they can be asserted without a screen; this
+    ///   only reads the selection and says which code runs for each Id.
+    /// </summary>
+    private (MhActionSet Set, Dictionary<string, Action> Handlers) Context()
     {
         if (_tabs.SelectedTab == _ticketsTab)
         {
-            var newTicket = ("New ticket", (Action)(() => Ui.Form(AdminForms.OpenTicket(_db), RefreshAll)));
             var reference = Grid.Selected(_tickets, "Ticket");
-            if (reference == null) return ("Tickets", new() { newTicket });
-            var list = TicketActions.List(_db, reference, RefreshAll);
-            list.Add(newTicket);
-            return ($"Ticket {reference}", list);
+            var handlers = reference == null
+                ? new Dictionary<string, Action>()
+                : TicketActions.Handlers(_db, reference, RefreshAll);
+            handlers["ticket-new"] = () => Ui.Form(AdminForms.OpenTicket(_db), RefreshAll);
+            return (ActionRules.TicketsTab(reference), handlers);
         }
         if (_tabs.SelectedTab == _billingTab)
         {
-            var run = ("Run billing", (Action)(() => Ui.Form(AdminForms.RunBilling(_db), RefreshAll)));
-            var typed = ("New invoice typed by hand", (Action)(() => Ui.Form(AdminForms.NewInvoice(_db), RefreshAll)));
             var no = Grid.Selected(_invoices, "Invoice");
-            if (no == null) return ("Billing", new() { run, typed });
-            var list = InvoiceActions.List(_db, no, RefreshAll);
-            list.Add(run);
-            list.Add(typed);
-            return ($"Invoice {no}", list);
+            var handlers = no == null
+                ? new Dictionary<string, Action>()
+                : InvoiceActions.Handlers(_db, no, RefreshAll);
+            handlers["billing-run"] = () => Ui.Form(AdminForms.RunBilling(_db), RefreshAll);
+            handlers["invoice-new"] = () => Ui.Form(AdminForms.NewInvoice(_db), RefreshAll);
+            return (ActionRules.BillingTab(no, no != null && Queries.IsDraftInvoice(_db, no)), handlers);
         }
         if (_tabs.SelectedTab == _dashTab)
         {
-            var list = new List<(string, Action)>();
             var row = Grid.SelectedRow(_alerts);
-            if (row != null)
+            var client = row != null && row.Table.Columns.Contains("Client") ? row["Client"] as string : null;
+            var reference = string.IsNullOrEmpty(client) ? null : Queries.AgreementRefForClient(_db, client);
+            var handlers = new Dictionary<string, Action>
             {
-                list.Add(("Show the whole alert", ShowAlert));
-                var client = row.Table.Columns.Contains("Client") ? row["Client"] as string : null;
-                var reference = string.IsNullOrEmpty(client) ? null : Queries.AgreementRefForClient(_db, client);
-                if (reference != null) list.Add(($"Open {client}'s agreement ({reference})", () => { new AgreementWindow(_db, reference).Run(); RefreshAll(); }));
-            }
-            list.Add(("Save the dashboard as HTML", () => Ui.Try("Dashboard", () => Ui.Saved("Dashboard", AdminForms.SaveDashboardHtml(_db, AdminForms.OutputFolder)))));
-            return ("Dashboard", list);
+                ["alert-show"] = ShowAlert,
+                ["dashboard-html"] = () => Ui.Try("Dashboard", () => Ui.Saved("Dashboard", AdminForms.SaveDashboardHtml(_db, AdminForms.OutputFolder)))
+            };
+            if (reference != null)
+                handlers["alert-agreement"] = () => { new AgreementWindow(_db, reference).Run(); RefreshAll(); };
+            return (ActionRules.Dashboard(row != null, client, reference), handlers);
         }
-        // Clients: support agreements and consultancy have different actions
-        var reference2 = Grid.Selected(_agreements, "Ref");
-        if (reference2 == null) return ("Clients", NewItems());
+        return Clients();
+    }
+
+    /// <summary>The Clients tab: a support agreement and consultancy work offer different things.</summary>
+    private (MhActionSet Set, Dictionary<string, Action> Handlers) Clients()
+    {
+        var reference = Grid.Selected(_agreements, "Ref");
         var name = Grid.Selected(_agreements, "Client");
-        var billing = ($"Run billing for {reference2}", (Action)(() => Ui.Try("Billing", () =>
+        var handlers = new Dictionary<string, Action>
         {
-            var r = _db.Proc("dbo.usp_Billing_Run", ("@Client", reference2));
-            if (r.First is { Rows.Count: 0 }) r.Messages.Add("Nothing new to invoice.");
-            Output.Show("Billing", r);
-            RefreshAll();
-        })));
-
-        if (IsConsultancy())
-            return ($"{name} ({reference2})", new()
-            {
-                ("Open it (days worked, invoices, contacts)", OpenSelected),
-                ("Log work", () => Ui.Form(AdminForms.LogWork(_db, reference2), RefreshAll)),
-                ("Change it (rate, name, PO, dates)", () => Ui.Form(AdminForms.EditEngagement(_db, reference2), RefreshAll)),
-                ("Finished - invoice what is left", () => Ui.Form(AdminForms.CompleteEngagement(_db, reference2), RefreshAll)),
-                ("New invoice typed by hand", () => Ui.Form(AdminForms.NewInvoice(_db, reference2), RefreshAll)),
-                billing,
-                ("New consultancy engagement", () => Ui.Form(AdminForms.NewEngagement(_db, name), RefreshAll))
-            });
-
-        return ($"{name} ({reference2})", new()
+            ["client-new"] = NewClient,
+            ["agreement-new"] = () => Ui.Form(AdminForms.NewAgreement(_db), RefreshAll),
+            ["engagement-new"] = () => Ui.Form(AdminForms.NewEngagement(_db, name), RefreshAll)
+        };
+        if (reference != null)
         {
-            ("Open the agreement (instances, contacts, onboarding, pre-paid hours...)", OpenSelected),
-            ("Open a ticket", () => Ui.Form(AdminForms.OpenTicket(_db, reference2), RefreshAll)),
-            ("Sell pre-paid hours", () => Ui.Form(AdminForms.SellPrepaid(_db, reference2), RefreshAll)),
-            ("New consultancy engagement for this client", () => Ui.Form(AdminForms.NewEngagement(_db, name), RefreshAll)),
-            billing,
-            ("New client", NewClient)
-        });
+            handlers["agreement-open"] = OpenSelected;
+            handlers["engagement-open"] = OpenSelected;
+            handlers["work-log"] = () => Ui.Form(AdminForms.LogWork(_db, reference), RefreshAll);
+            handlers["engagement-edit"] = () => Ui.Form(AdminForms.EditEngagement(_db, reference), RefreshAll);
+            handlers["engagement-complete"] = () => Ui.Form(AdminForms.CompleteEngagement(_db, reference), RefreshAll);
+            handlers["invoice-new"] = () => Ui.Form(AdminForms.NewInvoice(_db, reference), RefreshAll);
+            handlers["ticket-new"] = () => Ui.Form(AdminForms.OpenTicket(_db, reference), RefreshAll);
+            handlers["prepaid-sell"] = () => Ui.Form(AdminForms.SellPrepaid(_db, reference), RefreshAll);
+            handlers["billing-run"] = () => Ui.RunBilling(_db, reference, RefreshAll);
+        }
+        return (ActionRules.Clients(reference, name, IsConsultancy()), handlers);
     }
 
     private void ShowActions()
     {
-        var (title, items) = ContextActions();
-        Picker.Actions(title, items.ToArray());
+        var (set, handlers) = Context();
+        Picker.Actions(set, handlers);
+    }
+
+    /// <summary>The actions for a tab, with nothing drawn (for the self-test).</summary>
+    internal (MhActionSet Set, Dictionary<string, Action> Handlers) ActionsOn(int tabIndex)
+    {
+        _tabs.SelectedTab = _tabs.Tabs.ElementAt(tabIndex);
+        return Context();
+    }
+
+    /// <summary>
+    ///   Selects one row on the Clients tab and returns what it offers (for the self-test): the
+    ///   support-agreement / consultancy branch read off real data rather than the first row.
+    /// </summary>
+    internal MhActionSet ClientActions(string agreementRef)
+    {
+        _tabs.SelectedTab = _clientsTab;
+        var rows = _agreements.Table.Rows.Cast<DataRow>().ToList();
+        var i = rows.FindIndex(r => (string)r["Ref"] == agreementRef);
+        if (i < 0) throw new InvalidOperationException($"{agreementRef} is not on the Clients tab.");
+        _agreements.SelectedRow = i;
+        return Context().Set;
     }
 
     /// <summary>The F4 menu's labels for a tab (for the self-test).</summary>
     internal List<string> ActionLabels(int tabIndex)
     {
-        _tabs.SelectedTab = _tabs.Tabs.ElementAt(tabIndex);
-        var (title, items) = ContextActions();
-        return items.Select(i => i.Label).Prepend(title).ToList();
+        var set = ActionsOn(tabIndex).Set;
+        return set.Available.Select(a => a.Label).Prepend(set.Title).ToList();
     }
 
     private void NewClient()

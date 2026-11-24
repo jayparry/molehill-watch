@@ -212,12 +212,12 @@ public sealed class AgreementWindow
 
     // Every tab's actions come from one list: Enter on a row shows them, F4 shows them plus the agreement-wide ones.
 
-    private (string Title, List<(string Label, Action Run)> Items) ContextActions()
+    private (MhActionSet Set, Dictionary<string, Action> Handlers) Context()
     {
         var tab = _tabs.SelectedTab;
         if (tab == _contactTab) return ContactList();
         if (tab == _ticketTab) return TicketList();
-        if (tab == _weeklyTab) return ("Weekly reports", new() { ("Log a weekly report sent", LogWeekly) });
+        if (tab == _weeklyTab) return (ActionRules.Weekly(), new() { ["weekly-log"] = LogWeekly });
         if (tab == _prepaidTab) return PrepaidList();
         if (tab == _onbTab) return OnboardingList();
         return InstanceList();
@@ -225,38 +225,46 @@ public sealed class AgreementWindow
 
     private void RowActions()
     {
-        var (title, items) = ContextActions();
-        Picker.Actions(title, items.ToArray());
+        var (set, handlers) = Context();
+        Picker.Actions(set, handlers);
     }
 
     /// <summary>F4: what can be done here, then the agreement-wide actions.</summary>
     private void ShowActions()
     {
-        var (title, items) = ContextActions();
-        items.Add(("Agreement actions (review, notice, pause, usage, quote, billing) ...", AgreementActions));
-        Picker.Actions(title, items.ToArray());
+        var (set, handlers) = Context();
+        handlers["agreement-more"] = AgreementActions;
+        Picker.Actions(set.Add(new MhAction("agreement-more", "Agreement actions (review, notice, pause, usage, quote, billing) ...")), handlers);
+    }
+
+    /// <summary>The actions for a tab, with nothing drawn (for the self-test).</summary>
+    internal (MhActionSet Set, Dictionary<string, Action> Handlers) ActionsOn(TabView.Tab? tab = null)
+    {
+        if (tab != null) _tabs.SelectedTab = tab;
+        return Context();
     }
 
     /// <summary>The F4 menu's labels for the tab showing (for the self-test).</summary>
     internal List<string> ActionLabels(TabView.Tab? tab = null)
     {
-        if (tab != null) _tabs.SelectedTab = tab;
-        var (title, items) = ContextActions();
-        return items.Select(i => i.Label).Prepend(title).ToList();
+        var set = ActionsOn(tab).Set;
+        return set.Available.Select(a => a.Label).Prepend(set.Title).ToList();
     }
 
     internal IEnumerable<TabView.Tab> Tabs => _tabs.Tabs;
 
-    private (string, List<(string, Action)>) InstanceList()
+    private (MhActionSet, Dictionary<string, Action>) InstanceList()
     {
         var name = SelectedInstance();
-        var add = ("Add an instance / Azure SQL server or pool", (Action)(() => Ui.Form(AdminForms.AddInstance(_db, _ref), Refresh)));
-        if (name == null) return ("Instances", new() { add });
-        return ($"Instance {name}", new()
+        var handlers = new Dictionary<string, Action>
         {
-            ("Update versions, database count, monitoring date, notes", () => Ui.Form(AdminForms.UpdateInstance(_db, _ref, name), Refresh)),
-            ("Log a weekly report sent", () => Ui.Form(AdminForms.WeeklyReport(_db, _ref, name), Refresh)),
-            ("Open a ticket for this instance", () =>
+            ["instance-add"] = () => Ui.Form(AdminForms.AddInstance(_db, _ref), Refresh)
+        };
+        if (name != null)
+        {
+            handlers["instance-update"] = () => Ui.Form(AdminForms.UpdateInstance(_db, _ref, name), Refresh);
+            handlers["instance-weekly"] = () => Ui.Form(AdminForms.WeeklyReport(_db, _ref, name), Refresh);
+            handlers["instance-ticket"] = () =>
             {
                 var spec = AdminForms.OpenTicket(_db, _ref);
                 Ui.Form(new FormSpec
@@ -264,78 +272,71 @@ public sealed class AgreementWindow
                     Title = spec.Title, Intro = spec.Intro, Submit = spec.Submit,
                     Fields = spec.Fields.Select(f => f.Name == "InstanceName" ? Field.Text("InstanceName", f.Label, def: name) : f).ToList()
                 }, Refresh);
-            }),
-            ("Record unsupported-version risk acceptance", () => Ui.Form(AdminForms.RiskAcceptance(_db, _ref, name), Refresh)),
-            ("Remove from cover", () => Ui.Form(AdminForms.RemoveInstance(_db, _ref, name), Refresh)),
-            add
-        });
+            };
+            handlers["instance-risk"] = () => Ui.Form(AdminForms.RiskAcceptance(_db, _ref, name), Refresh);
+            handlers["instance-remove"] = () => Ui.Form(AdminForms.RemoveInstance(_db, _ref, name), Refresh);
+        }
+        return (ActionRules.Instances(name), handlers);
     }
 
-    private (string, List<(string, Action)>) OnboardingList()
+    private (MhActionSet, Dictionary<string, Action>) OnboardingList()
     {
         var code = Grid.Selected(_onboarding, "Code");
-        var list = new List<(string, Action)>();
-        if (code != null) list.Add(($"Mark '{code}' done", CompleteOnboarding));
-        list.Add(("Checklist and version status", () => Ui.Try("Onboarding", () => Output.Show("Onboarding", _db.Proc("dbo.usp_Onboarding_Show", ("@Client", _ref))))));
-        return (code == null ? "Onboarding" : $"Onboarding {code}", list);
-    }
-
-    private (string, List<(string, Action)>) ContactList()
-    {
-        var add = ("Add a contact", (Action)(() => Ui.Form(AdminForms.AddContact(_db, _clientName), Refresh)));
-        var idText = Grid.Selected(_contacts, "Id");
-        if (idText == null || !int.TryParse(idText, out var id)) return ("Contacts", new() { add });
-        var name = Grid.Selected(_contacts, "Name") ?? "Contact";
-        var current = Grid.SelectedRow(_contacts)?["Status"] as string == "Current";
-        return ($"Contact {name}", new()
+        return (ActionRules.Onboarding(code), new Dictionary<string, Action>
         {
-            ("Edit details (name, e-mail, phone, raises tickets / receives invoices)", () => Ui.Form(AdminForms.EditContact(_db, id), Refresh)),
-            current ? ("Remove as a contact (kept in history)", () => Ui.Form(AdminForms.RemoveContact(_db, id), Refresh))
-                    : ("Add back as a contact", () => Ui.Form(AdminForms.ReaddContact(_db, id), Refresh)),
-            ("History (dates as a contact)", () => Ui.Try("History", () =>
-                Output.Text($"{name} - contact history", Output.TextTable(Queries.ContactPeriods(_db, id))))),
-            add
+            ["onboarding-done"] = CompleteOnboarding,
+            ["onboarding-show"] = ShowOnboarding
         });
     }
 
-    private (string, List<(string, Action)>) TicketList()
+    private (MhActionSet, Dictionary<string, Action>) ContactList()
     {
-        var open = ("Open a ticket", (Action)(() => Ui.Form(AdminForms.OpenTicket(_db, _ref), Refresh)));
-        var reference = Grid.Selected(_tickets, "Ticket");
-        if (reference == null) return ("Tickets", new() { open });
-        var list = TicketActions.List(_db, reference, Refresh);
-        list.Add(open);
-        return ($"Ticket {reference}", list);
+        var handlers = new Dictionary<string, Action>
+        {
+            ["contact-add"] = () => Ui.Form(AdminForms.AddContact(_db, _clientName), Refresh)
+        };
+        var idText = Grid.Selected(_contacts, "Id");
+        if (idText == null || !int.TryParse(idText, out var id)) return (ActionRules.Contact(null, null, false), handlers);
+        var name = Grid.Selected(_contacts, "Name") ?? "Contact";
+        handlers["contact-edit"] = () => Ui.Form(AdminForms.EditContact(_db, id), Refresh);
+        handlers["contact-remove"] = () => Ui.Form(AdminForms.RemoveContact(_db, id), Refresh);
+        handlers["contact-readd"] = () => Ui.Form(AdminForms.ReaddContact(_db, id), Refresh);
+        handlers["contact-history"] = () => Ui.Try("History", () =>
+            Output.Text($"{name} - contact history", Output.TextTable(Queries.ContactPeriods(_db, id))));
+        // current or removed comes from the raw Status, not from the word in the cell
+        return (ActionRules.Contact(id, name, Grid.SelectedRow(_contacts)?["Status"] as string == "Current"), handlers);
     }
 
-    private (string, List<(string, Action)>) PrepaidList()
+    private (MhActionSet, Dictionary<string, Action>) TicketList()
     {
-        var sell = ("Sell pre-paid hours", (Action)(() => Ui.Form(AdminForms.SellPrepaid(_db, _ref), Refresh)));
+        var reference = Grid.Selected(_tickets, "Ticket");
+        var handlers = reference == null
+            ? new Dictionary<string, Action>()
+            : TicketActions.Handlers(_db, reference, Refresh);
+        handlers["ticket-new"] = () => Ui.Form(AdminForms.OpenTicket(_db, _ref), Refresh);
+        return (ActionRules.Ticket(reference), handlers);
+    }
+
+    private (MhActionSet, Dictionary<string, Action>) PrepaidList()
+    {
         var reference = Grid.Selected(_prepaid, "Ref");
-        if (reference == null) return ("Pre-paid hours", new() { sell });
-        var row = Grid.SelectedRow(_prepaid);
-        var state = row?["State"] as string;
-        var list = new List<(string, Action)>
+        var handlers = new Dictionary<string, Action>
         {
-            ("Where the hours went", () => Ui.Try("Pre-paid hours", () =>
+            ["prepaid-sell"] = () => Ui.Form(AdminForms.SellPrepaid(_db, _ref), Refresh)
+        };
+        if (reference != null)
+        {
+            handlers["prepaid-usage"] = () => Ui.Try("Pre-paid hours", () =>
             {
                 var used = Queries.PrepaidUsage(_db, reference);
                 Output.Text($"{reference} - hours used", used.Rows.Count == 0 ? "None of these hours have been used yet." : Output.TextTable(used));
-            }))
-        };
-        if (state != "Cancelled")
-        {
-            list.Add(("Change expiry, how it is charged, notes", () => Ui.Form(AdminForms.UpdatePrepaid(_db, reference), Refresh)));
-            // both of these used to be decided from the formatted cell text, where an unused
-            // package reads as the string "0" and an uninvoiced one as an empty cell
-            if (row?["Invoice"] is null or DBNull)
-                list.Add(("Invoice it now, on its own", () => Ui.Form(AdminForms.InvoicePrepaid(_db, reference), Refresh)));
-            var used = row?["Used"];
-            if (used is null or DBNull || (used is decimal hours && hours == 0m))
-                list.Add(("Cancel (unused only)", () => Ui.Form(AdminForms.CancelPrepaid(_db, reference), Refresh)));
+            });
+            handlers["prepaid-update"] = () => Ui.Form(AdminForms.UpdatePrepaid(_db, reference), Refresh);
+            handlers["prepaid-invoice"] = () => Ui.Form(AdminForms.InvoicePrepaid(_db, reference), Refresh);
+            handlers["prepaid-cancel"] = () => Ui.Form(AdminForms.CancelPrepaid(_db, reference), Refresh);
         }
-        list.Add(sell);
-        return ($"Pre-paid hours {reference}", list);
+        var row = Grid.SelectedRow(_prepaid);
+        return (ActionRules.Prepaid(reference, row?["State"] as string, row?["Invoice"], row?["Used"]), handlers);
     }
 
     private void CompleteOnboarding()
@@ -354,24 +355,38 @@ public sealed class AgreementWindow
         if (name != null) Ui.Form(AdminForms.WeeklyReport(_db, _ref, name), Refresh);
     }
 
+    private void ShowOnboarding() =>
+        Ui.Try("Onboarding", () => Output.Show("Onboarding", _db.Proc("dbo.usp_Onboarding_Show", ("@Client", _ref))));
+
     private void AgreementActions()
     {
         var paused = Queries.Agreement(_db, _ref)?["SupportPausedFrom"] is not DBNull;
-        Picker.Actions($"Agreement {_ref}",
-            ("Record the initial review delivered", () => Ui.Form(AdminForms.RecordReview(_db, _ref), Refresh)),
-            ("Included hours used this cycle", () => Ui.Try("Usage", () => Output.Show("Usage", _db.Proc("dbo.usp_Agreement_Usage", ("@Client", _ref))))),
-            ("Onboarding checklist and version status", () => Ui.Try("Onboarding", () => Output.Show("Onboarding", _db.Proc("dbo.usp_Onboarding_Show", ("@Client", _ref))))),
-            ("Open a ticket", () => Ui.Form(AdminForms.OpenTicket(_db, _ref), Refresh)),
-            ("Project quote", () => Ui.Form(AdminForms.AddQuote(_db, _ref), Refresh)),
-            ("Sell pre-paid hours", () => Ui.Form(AdminForms.SellPrepaid(_db, _ref), Refresh)),
-            ("Notice: preview or record the end date", () => Ui.Form(AdminForms.GiveNotice(_db, _ref), Refresh)),
-            (paused ? "Resume support" : "Pause support (late payment)", () => Ui.Form(AdminForms.PauseSupport(_db, _ref, !paused), Refresh)),
-            ("Run billing for this agreement", () => Ui.Try("Billing", () =>
-            {
-                var r = _db.Proc("dbo.usp_Billing_Run", ("@Client", _ref));
-                if (r.First is { Rows.Count: 0 }) r.Messages.Add("Nothing new to invoice.");
-                Output.Show("Billing", r);
-                Refresh();
-            })));
+        Picker.Actions(ActionRules.AgreementWide(_ref, paused), new Dictionary<string, Action>
+        {
+            ["agreement-review"] = () => Ui.Form(AdminForms.RecordReview(_db, _ref), Refresh),
+            ["agreement-usage"] = () => Ui.Try("Usage", () => Output.Show("Usage", _db.Proc("dbo.usp_Agreement_Usage", ("@Client", _ref)))),
+            ["onboarding-show"] = ShowOnboarding,
+            ["ticket-new"] = () => Ui.Form(AdminForms.OpenTicket(_db, _ref), Refresh),
+            ["agreement-quote"] = () => Ui.Form(AdminForms.AddQuote(_db, _ref), Refresh),
+            ["prepaid-sell"] = () => Ui.Form(AdminForms.SellPrepaid(_db, _ref), Refresh),
+            ["agreement-notice"] = () => Ui.Form(AdminForms.GiveNotice(_db, _ref), Refresh),
+            ["agreement-pause"] = () => Ui.Form(AdminForms.PauseSupport(_db, _ref, !paused), Refresh),
+            ["billing-run"] = () => Ui.RunBilling(_db, _ref, Refresh)
+        });
     }
+
+    /// <summary>Selects one pre-paid package and returns what it offers (for the self-test).</summary>
+    internal MhActionSet PrepaidActions(string packageRef)
+    {
+        _tabs.SelectedTab = _prepaidTab;
+        var rows = _prepaid.Table.Rows.Cast<DataRow>().ToList();
+        var i = rows.FindIndex(r => (string)r["Ref"] == packageRef);
+        if (i < 0) throw new InvalidOperationException($"{packageRef} is not listed on the Pre-paid hours tab.");
+        _prepaid.SelectedRow = i;
+        return Context().Set;
+    }
+
+    /// <summary>The agreement-wide actions, with nothing drawn (for the self-test).</summary>
+    internal MhActionSet AgreementWideSet() =>
+        ActionRules.AgreementWide(_ref, Queries.Agreement(_db, _ref)?["SupportPausedFrom"] is not DBNull);
 }
