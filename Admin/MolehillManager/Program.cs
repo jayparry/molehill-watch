@@ -234,8 +234,8 @@ only saved if you tick "Remember it", and then encrypted for your Windows accoun
 
   MolehillManager                       start (first run asks for the settings)
   MolehillManager --tui                 start the terminal front end, whatever the default is
-  MolehillManager --gui                 start the window (Today and the client list so far;
-                                        the first run and the rest are still --tui)
+  MolehillManager --gui                 start the window: Today, the clients and the settings,
+                                        including the first run. Tickets and billing are --tui
   MolehillManager --setup               open the settings screen first
   MolehillManager --config D:\x.json    use a different config file (one per environment)
   MolehillManager --install             create / install / upgrade the configured database without

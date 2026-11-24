@@ -156,10 +156,15 @@ everything being billed, with a tick box for finished work and a line underneath
 unusual about the row selected. Double-clicking a row, and clicking its node in the tree, go to the
 same place.
 
-The terminal front end stays, and is still what you get by default - the window cannot ask for a
-server yet, so a genuine first run needs `--tui` once. Everything else about it is already shared:
-the 41 forms are laid out from the same `FormSpec`s, cells are formatted by the same code, and both
-front ends ask the start-up questions through one interface.
+**Settings** is the window's own screen, and a first run works here too: an empty config file opens
+it, the seven sign-in methods enable the fields they actually use and explain themselves, Test says
+what the server said, and a server that does not answer asks before saving rather than discarding
+what you typed. Installing MolehillAdmin reports its progress as it goes.
+
+The terminal front end stays, and is still what you get by default, because Tickets and Billing are
+not in the window yet - a default covering half the app would be worse than one covering all of it.
+Everything else is already shared: the 41 forms are laid out from the same `FormSpec`s, cells are
+formatted by the same code, and both front ends ask the start-up questions through one interface.
 
 ## Keys
 
