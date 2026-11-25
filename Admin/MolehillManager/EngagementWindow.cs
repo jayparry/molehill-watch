@@ -94,7 +94,7 @@ public sealed class EngagementWindow
         {
             var e = Queries.Engagement(_db, _ref) ?? throw new InvalidOperationException($"Engagement {_ref} not found.");
             _clientName = (string)e["ClientName"];
-            _summary.Text = Summary(_db, _ref, includeWork: false);
+            _summary.Text = Detail.EngagementSummary(_db, _ref, includeWork: false);
             Grid.Bind(_work, Queries.ConsultancyWork(_db, _ref));
             Grid.Bind(_entries, Queries.WorkEntries(_db, _ref));
             Grid.Bind(_invoices, Queries.EngagementInvoices(_db, _ref));
@@ -105,55 +105,6 @@ public sealed class EngagementWindow
 
     /// <summary>Contacts are the client's, so look them up through any agreement they have; the client name works too.</summary>
     private string ClientContactsRef() => _ref;
-
-    /// <summary>How many instances a per-instance price covers; blank on the engagement means the one.</summary>
-    private static int UnitCount(DataRow e) => e["UnitCount"] is int c ? c : 1;
-
-    /// <summary>The engagement in a few lines; with the work and invoices for the Clients tab preview.</summary>
-    public static string Summary(AdminDb db, string engagementRef, bool includeWork)
-    {
-        var e = Queries.Engagement(db, engagementRef);
-        if (e == null) return $"{engagementRef} not found.";
-        string F(string c) => Output.Format(e[c]);
-        var mode = (string)e["BillingMode"];
-        var rate = mode switch
-        {
-            "DayRate" => $"£{e["DayRate"]:N2} a day",
-            "Hourly" => $"£{e["HourlyRate"]:N2} an hour",
-            "FixedPrice" => $"£{e["FixedPrice"]:N2} fixed price",
-            "PerInstance" => $"£{e["UnitTotal"]:N2} for {UnitCount(e)} instance(s)"
-                             + $" (£{e["FirstUnitPrice"]:N2} first"
-                             + (e["ExtraUnitPrice"] is decimal x && x > 0 ? $", then £{x:N2} each" : ", the rest included")
-                             + (e["PriceCap"] is decimal cap ? $", capped at £{cap:N2}" : "") + ")",
-            _ => "per the agreement"
-        };
-        var sb = new StringBuilder();
-        sb.AppendLine($"{F("ClientName")}  ({F("EngagementRef")})   {F("Name")}");
-        sb.AppendLine($"{rate}" + (e["OutOfHoursRate"] is decimal ooh ? $", out of hours £{ooh:N2}/h" : "")
-                      + $"   Status: {F("Status")}   Started {F("StartDate")}"
-                      + (e["EndDate"] is DBNull ? "" : $", to {F("EndDate")}")
-                      + (e["CompletedOn"] is DBNull ? "" : $", finished {F("CompletedOn")}"));
-        sb.AppendLine($"Worked {e["TotalDays"]:N2} days in total; {e["UnbilledDays"]:N2} days (£{e["UnbilledValue"]:N2}) not invoiced yet"
-                      + (e["LastWorked"] is DBNull ? "" : $"; last worked {F("LastWorked")}"));
-        sb.AppendLine($"Invoiced so far: £{e["Invoiced"]:N2}"
-                      + (e["PurchaseOrder"] is DBNull ? "" : $"   PO: {F("PurchaseOrder")}")
-                      + (mode is "FixedPrice" or "PerInstance" ? "   Invoiced when you mark it finished"
-                         : e["PeriodEndsOn"] is DateTime ends
-                           ? $"   Billed every {e["BillingEveryDays"]} days from the start: this period ends {ends:dd MMM yyyy}" : ""));
-        sb.AppendLine($"Invoices to: {(e["InvoicesTo"] is DBNull ? "NO ONE - add a contact that receives invoices" : F("InvoicesTo"))}");
-        if (e["Notes"] is not DBNull) sb.AppendLine($"Notes: {F("Notes")}");
-
-        if (includeWork)
-        {
-            var work = Queries.ConsultancyWork(db, engagementRef);
-            sb.AppendLine().AppendLine("Days worked:");
-            sb.Append(work.Rows.Count == 0 ? "(nothing logged yet - open it and press F2)\n" : Output.TextTable(work));
-            var invoices = Queries.EngagementInvoices(db, engagementRef);
-            sb.AppendLine().AppendLine("Invoices:");
-            sb.Append(invoices.Rows.Count == 0 ? "(none yet)\n" : Output.TextTable(invoices));
-        }
-        return sb.ToString();
-    }
 
     // ------------------------------------------------------------------ actions
 

@@ -114,7 +114,7 @@ public sealed class AgreementWindow
         {
             var a = Queries.Agreement(_db, _ref) ?? throw new InvalidOperationException($"Agreement {_ref} not found.");
             _clientName = (string)a["ClientName"];
-            _summary.Text = Summary(_db, _ref, includeInstances: false);
+            _summary.Text = Detail.AgreementSummary(_db, _ref, includeInstances: false);
             Grid.Bind(_instances, Queries.Instances(_db, _ref));
             Grid.Bind(_onboarding, Queries.Onboarding(_db, _ref));
             RefreshContacts();
@@ -136,63 +136,10 @@ public sealed class AgreementWindow
         Ui.Try("Contacts", () =>
         {
             var all = Queries.Contacts(_db, _ref, includeRemoved: true);
-            var removed = all.Rows.Cast<DataRow>().Count(r => (string)r["Status"] == "Removed");
-            if (_showRemoved.Checked)
-            {
-                Grid.Bind(_contacts, all);
-                _removedNote.Text = removed == 0 ? "" : $"{removed} removed - Enter on one to add them back";
-            }
-            else
-            {
-                var view = all.DefaultView;
-                view.RowFilter = "Status = 'Current'";
-                Grid.Bind(_contacts, view.ToTable());
-                _removedNote.Text = removed == 0 ? "" : $"{removed} removed contact{(removed == 1 ? "" : "s")} hidden - tick to see or add back";
-            }
+            var showing = _showRemoved.Checked;
+            Grid.Bind(_contacts, showing ? all : Detail.CurrentContacts(all));
+            _removedNote.Text = Detail.RemovedContactsNote(Detail.RemovedCount(all), showing, "Enter on one to add them back");
         });
-    }
-
-    /// <summary>The agreement in a few lines; with the instances and contacts for the Clients tab preview.</summary>
-    public static string Summary(AdminDb db, string agreementRef, bool includeInstances)
-    {
-        var a = Queries.Agreement(db, agreementRef);
-        if (a == null) return $"{agreementRef} not found.";
-        string F(string c) => Output.Format(a[c]);
-        var sb = new StringBuilder();
-        sb.AppendLine($"{F("ClientName")}  ({F("AgreementRef")})   Status: {F("Status")}   Price list: {F("PriceList")}");
-        sb.AppendLine($"Started {F("StartDate")}, signed {(a["SignedDate"] is DBNull ? "NOT RECORDED" : F("SignedDate"))}; " +
-                      $"initial term {F("InitialTermMonths")} months to {F("InitialTermEnds")}" +
-                      (a["EndDate"] is DBNull ? "" : $"; ENDS {F("EndDate")} (notice {F("NoticeGivenDate")} by {F("NoticeGivenBy")})"));
-        sb.AppendLine($"Initial review: {(a["InitialReviewDoneDate"] is DBNull ? "not yet delivered" : F("InitialReviewDoneDate"))}" +
-                      (a["SupportPausedFrom"] is DBNull ? "" : $"   SUPPORT PAUSED from {F("SupportPausedFrom")} (late payment)"));
-        sb.AppendLine($"Tickets via: {F("TicketChannel")}");
-        sb.AppendLine($"Invoices to: {(a["InvoicesTo"] is DBNull ? "NO ONE - add a contact that receives invoices (Contacts tab)" : F("InvoicesTo"))}" +
-                      (a["Address"] is DBNull ? "" : $"   {F("Address")}"));
-
-        var usage = Queries.AgreementUsage(db, agreementRef);
-        if (usage.First is { Rows.Count: > 0 } u)
-        {
-            var r = u.Rows[0];
-            sb.AppendLine($"This cycle ({Output.Format(r["CycleStart"])} - {Output.Format(r["CycleEnd"])}): " +
-                          $"{Output.Format(r["BusinessHoursLogged"])} of {Output.Format(r["IncludedHours"])} included hours used, " +
-                          $"{Output.Format(r["IncludedHoursRemaining"])} left; {Output.Format(r["OutOfHoursLogged"])} h out of hours"
-                          + (r.Table.Columns.Contains("PrepaidHoursLeft") && r["PrepaidHoursLeft"] is decimal left ? $"; pre-paid hours left: {Output.Format(left)}" : "")
-                          + (r.Table.Columns.Contains("UnbilledHours") && r["UnbilledHours"] is decimal unbilled && unbilled > 0
-                             ? $"; {Output.Format(unbilled)} h logged but not yet billed" : ""));
-        }
-        else sb.AppendLine(usage.Messages.FirstOrDefault() ?? "");
-
-        if (includeInstances)
-        {
-            var inst = Queries.Instances(db, agreementRef);
-            // the database works the monthly fee out for the Clients tab and the dashboard; one figure, one place
-            sb.AppendLine().AppendLine($"Instances (monthly fee £{Queries.AgreementMonthlyFee(db, agreementRef):N2}):");
-            sb.Append(inst.Rows.Count == 0 ? "(none yet - open the agreement and press F2)\n" : Output.TextTable(inst));
-            var contacts = Queries.Contacts(db, agreementRef).DefaultView.ToTable(false, "Name", "Email", "Phone", "Tickets", "Invoices", "From");
-            sb.AppendLine().AppendLine("Contacts:");
-            sb.Append(contacts.Rows.Count == 0 ? "(none)\n" : Output.TextTable(contacts));
-        }
-        return sb.ToString();
     }
 
     // ------------------------------------------------------------------ actions
@@ -264,15 +211,7 @@ public sealed class AgreementWindow
         {
             handlers["instance-update"] = () => Ui.Form(AdminForms.UpdateInstance(_db, _ref, name), Refresh);
             handlers["instance-weekly"] = () => Ui.Form(AdminForms.WeeklyReport(_db, _ref, name), Refresh);
-            handlers["instance-ticket"] = () =>
-            {
-                var spec = AdminForms.OpenTicket(_db, _ref);
-                Ui.Form(new FormSpec
-                {
-                    Title = spec.Title, Intro = spec.Intro, Submit = spec.Submit,
-                    Fields = spec.Fields.Select(f => f.Name == "InstanceName" ? Field.Text("InstanceName", f.Label, def: name) : f).ToList()
-                }, Refresh);
-            };
+            handlers["instance-ticket"] = () => Ui.Form(AdminForms.OpenTicketFor(_db, _ref, name), Refresh);
             handlers["instance-risk"] = () => Ui.Form(AdminForms.RiskAcceptance(_db, _ref, name), Refresh);
             handlers["instance-remove"] = () => Ui.Form(AdminForms.RemoveInstance(_db, _ref, name), Refresh);
         }
@@ -350,8 +289,9 @@ public sealed class AgreementWindow
     private void LogWeekly()
     {
         var names = Queries.InstanceNames(_db, _ref);
-        if (names.Count == 0) { MessageBox.Query("Weekly report", "Add an instance first.", "Ok"); return; }
-        var name = names.Count == 1 ? names[0] : Picker.Choose("Which instance?", names, SelectedInstance());
+        var (step, only) = Detail.WeeklyStepFor(names);
+        if (step == WeeklyStep.NoInstances) { MessageBox.Query("Weekly report", Detail.NoInstancesYet, "Ok"); return; }
+        var name = step == WeeklyStep.TheOnlyOne ? only : Picker.Choose("Which instance?", names, SelectedInstance());
         if (name != null) Ui.Form(AdminForms.WeeklyReport(_db, _ref, name), Refresh);
     }
 

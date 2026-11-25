@@ -213,6 +213,10 @@ public static partial class SelfTest
         Section("the password prompt", () => CheckSecret(watcher));
         Section("the Today page", () => CheckToday(watcher));
         Section("the client list", () => CheckClients(watcher));
+        Section("what each node opens", CheckWhatOpens);
+        Section("the detail rules", CheckDetailRules);
+        Section("the agreement page", () => CheckAgreementPage(watcher));
+        Section("the engagement page", () => CheckEngagementPage(watcher));
         return Finish();
     }
 
@@ -523,6 +527,12 @@ public static partial class SelfTest
         // today, so a row where they do not is the only way to check which one is being read.
         t.Rows.Add("C-0033", "Zeta Ltd", "Molehill Watch", "Health check", "Active",
             "£700/day", null, "Consultancy", 0, 0);
+        // A consultancy project called "Molehill Watch" - rolling the product out, say - which is
+        // the other way the same confusion bites: here it is the tree's own label that reads as a
+        // support agreement while the work is nothing of the sort. Deciding from the label rather
+        // than the raw type would send this one to the wrong page.
+        t.Rows.Add("C-0041", "Zeta Ltd", "Consultancy", "Molehill Watch", "Active",
+            "£400/day", null, "Consultancy", 0, 0);
         return t;
     }
 
@@ -740,7 +750,7 @@ public static partial class SelfTest
         if (page == null) return;
         Check("no binding warnings from the client list", watcher.Lines.Count == 0, string.Join(" | ", watcher.Lines.Take(2)));
 
-        Check("every piece of work is on it", page.Work.Table == work && work.Rows.Count == 4,
+        Check("every piece of work is on it", page.Work.Table == work && work.Rows.Count == 5,
             $"{work.Rows.Count} rows");
         var empty = new ClientsPage(work.Clone(), false, _ => { }, (_, _) => { }, handlers);
         Layout(empty, 1000);

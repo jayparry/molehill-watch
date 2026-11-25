@@ -170,28 +170,5 @@ public static class TicketActions
             ("Remove it", () => Ui.Form(AdminForms.DeleteTimeEntry(db, id), refresh)));
     }
 
-    public static string Describe(AdminDb db, string ticketRef)
-    {
-        var t = Queries.Ticket(db, ticketRef);
-        if (t == null) return $"{ticketRef} not found.";
-        var sb = new StringBuilder();
-        sb.AppendLine($"{t["TicketRef"]}  {t["Title"]}");
-        sb.AppendLine($"{t["ClientName"]} ({t["AgreementRef"]})   {t["Severity"]} {t["WorkType"]}   Status: {t["Status"]}   "
-                      + $"Charged: {AdminForms.RateLabel(t["RateType"] as string).ToLowerInvariant()}");
-        if (t["InstanceName"] is string inst) sb.AppendLine($"Instance: {inst}");
-        if (t["Contact"] is string contact) sb.AppendLine($"Raised by: {contact} via {t["Channel"]}");
-        sb.AppendLine($"Raised {Output.Format(t["RaisedAt"])}   response due {Output.Format(t["ResponseDueAt"])}   " +
-                      (t["FirstResponseAt"] is DBNull ? "NOT RESPONDED" : $"responded {Output.Format(t["FirstResponseAt"])}"));
-        if (t["EstimateHours"] is not DBNull)
-            sb.AppendLine($"Estimate: {Output.Format(t["EstimateHours"])} h, " +
-                          (t["EstimateApprovedAt"] is DBNull ? "awaiting approval" : $"approved {Output.Format(t["EstimateApprovedAt"])}"));
-        if (t["Description"] is string d) sb.AppendLine().AppendLine(d);
-        if (t["Resolution"] is string r) sb.AppendLine().AppendLine($"Resolution ({Output.Format(t["ResolvedAt"])}):").AppendLine(r);
-        var time = Queries.TimeEntries(db, ticketRef);
-        sb.AppendLine().AppendLine("Time logged:");
-        sb.Append(time.Rows.Count == 0 ? "(none)\n" : Output.TextTable(time));
-        return sb.ToString();
-    }
-
-    public static void Details(AdminDb db, string ticketRef) => Output.Text(ticketRef, Describe(db, ticketRef));
+    public static void Details(AdminDb db, string ticketRef) => Output.Text(ticketRef, Detail.TicketSummary(db, ticketRef));
 }

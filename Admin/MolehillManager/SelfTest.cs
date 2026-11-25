@@ -865,12 +865,12 @@ public static partial class SelfTest
             if ((string)a["Type"] == "Consultancy")
             {
                 Step($"engagement window {reference}", () => new EngagementWindow(db, reference).Build());
-                Step($"summary {reference}", () => EngagementWindow.Summary(db, reference, includeWork: true), s => s.Contains("not found") ? s : null);
+                Step($"summary {reference}", () => Detail.EngagementSummary(db, reference, includeWork: true), s => s.Contains("not found") ? s : null);
             }
             else
             {
                 Step($"agreement window {reference}", () => new AgreementWindow(db, reference).Build());
-                Step($"summary {reference}", () => AgreementWindow.Summary(db, reference, includeInstances: true), s => s.Contains("not found") ? s : null);
+                Step($"summary {reference}", () => Detail.AgreementSummary(db, reference, includeInstances: true), s => s.Contains("not found") ? s : null);
             }
         }
 
@@ -941,7 +941,7 @@ public static partial class SelfTest
                 Step($"form '{spec.Title}' builds", () => { using var d = FormDialog.Create(spec, out _); return 0; });
         }
 
-        if (tickets.Rows.Count > 0) Step($"ticket detail {anyTicket}", () => TicketActions.Describe(db, anyTicket));
+        if (tickets.Rows.Count > 0) Step($"ticket detail {anyTicket}", () => Detail.TicketSummary(db, anyTicket));
         if (invoices.Rows.Count > 0) Step($"invoice lines {anyInvoice}", () => Queries.InvoiceLines(db, anyInvoice));
 
         // MM_SCREENS=<file>: render the screens into the fake console and write them out as text, for checking layout
@@ -1098,10 +1098,10 @@ public static partial class SelfTest
 
         Step("first contact raises tickets, doesn't receive invoices", () => Queries.Contacts(db, reference),
             t => t.Rows.Cast<DataRow>().Any(r => (string)r["Name"] == "Pat Tester" && (string)r["Tickets"] == "Yes" && (string)r["Invoices"] == "") ? null : "flags wrong");
-        Step("summary says nobody receives invoices yet", () => AgreementWindow.Summary(db, reference, false), s => s.Contains("Invoices to: NO ONE") ? null : "not flagged");
+        Step("summary says nobody receives invoices yet", () => Detail.AgreementSummary(db, reference, false), s => s.Contains("Invoices to: NO ONE") ? null : "not flagged");
         Step("shared accounts address: receives invoices only", () => Submit(AdminForms.AddContact(db, name), ("FullName", "Accounts"),
             ("Email", "accounts@selftest.example"), ("IsBillingContact", "1"), ("StartDate", D(start))));
-        Step("it doesn't raise tickets, and the summary shows where invoices go", () => AgreementWindow.Summary(db, reference, false),
+        Step("it doesn't raise tickets, and the summary shows where invoices go", () => Detail.AgreementSummary(db, reference, false),
             s => s.Contains("Invoices to: Accounts <accounts@selftest.example>") ? null : s.Split('\n').FirstOrDefault(l => l.StartsWith("Invoices")) ?? "no line");
         Step("add contact from a start date", () => Submit(AdminForms.AddContact(db, name), ("FullName", "Sam Second"), ("Email", "sam@selftest.exmaple"),
             ("Phone", "01234 567890"), ("StartDate", D(start))));
@@ -1213,13 +1213,13 @@ public static partial class SelfTest
         Step("correct the date", () => Submit(AdminForms.EditTimeEntry(db, strayId), ("WorkStart", raised.AddDays(1).ToString("yyyy-MM-dd HH:mm"))));
         Step("now waiting for the next billing run", () => Queries.TimeEntries(db, strayRef),
             t => (string)t.Rows[0]["Invoiced"] == "at the next billing run" ? null : (string)t.Rows[0]["Invoiced"]);
-        Step("summary shows time not yet billed", () => AgreementWindow.Summary(db, reference, false),
+        Step("summary shows time not yet billed", () => Detail.AgreementSummary(db, reference, false),
             s2 => s2.Contains("logged but not yet billed") ? null : "not shown");
         Step("remove the entry again", () => Submit(AdminForms.DeleteTimeEntry(db, strayId)));
         Step("it is gone", () => Queries.TimeEntries(db, strayRef), t => t.Rows.Count == 0 ? null : $"{t.Rows.Count} left");
         Step("close that ticket", () => Submit(AdminForms.CloseTicket(db, strayRef), ("Resolution", "Logged in error"), ("Status", "Closed")));
         Step("close", () => Submit(AdminForms.CloseTicket(db, ticket), ("Resolution", "Added two indexes")));
-        Step("ticket detail", () => TicketActions.Describe(db, ticket), s => s.Contains("Added two indexes") && s.Contains("Index review") ? null : "detail incomplete");
+        Step("ticket detail", () => Detail.TicketSummary(db, ticket), s => s.Contains("Added two indexes") && s.Contains("Index review") ? null : "detail incomplete");
         Step("project quote", () => Submit(AdminForms.AddQuote(db, reference), ("Title", "Upgrade to 2022"), ("EstimatedHours", "12"), ("TicketRef", ticket)));
 
         // pre-paid hours, bought at the start; more business-hours work so some of it goes beyond the included hours
@@ -1271,7 +1271,7 @@ public static partial class SelfTest
         ExpectError("changing how an invoiced package is charged is refused",
             () => Submit(AdminForms.UpdatePrepaid(db, package), ("BillWith", "Not at all - already paid for")), "already on invoice");
         ExpectError("cancel a package in use refused", () => Submit(AdminForms.CancelPrepaid(db, package)), "already been used");
-        Step("summary shows pre-paid hours left", () => AgreementWindow.Summary(db, reference, false), s => s.Contains("pre-paid hours left: 4") ? null : "not shown");
+        Step("summary shows pre-paid hours left", () => Detail.AgreementSummary(db, reference, false), s => s.Contains("pre-paid hours left: 4") ? null : "not shown");
         Step("billing again creates nothing", () => Submit(AdminForms.RunBilling(db),
                 ("Client", Queries.EngagementChoices(db, consultancyOnly: false).First(c => Queries.RefFromChoice(c) == reference))),
             r => r.First is { Rows.Count: 0 } ? null : $"{r.First?.Rows.Count} more invoice(s)");
@@ -1308,7 +1308,7 @@ public static partial class SelfTest
                  : string.Join(", ", t.Rows.Cast<DataRow>().Select(r => $"{Output.Format(r["Date"])} {r["Days"]}")));
         Step("non-billable work is logged but not charged", () => Submit(AdminForms.LogWork(db, conRef),
             ("WorkDate", D(lastMonth.AddDays(4))), ("Hours", "1"), ("Description", "Internal write-up"), ("IsBillable", "0")));
-        Step("summary counts 2.5 days waiting to be invoiced", () => EngagementWindow.Summary(db, conRef, includeWork: false),
+        Step("summary counts 2.5 days waiting to be invoiced", () => Detail.EngagementSummary(db, conRef, includeWork: false),
             s2 => s2.Contains("2.50 days (£1,500.00) not invoiced") ? null : s2.Split('\n').FirstOrDefault(l => l.Contains("not invoiced")) ?? "no line");
         var conChoice = Queries.EngagementChoices(db).First(c => Queries.RefFromChoice(c) == conRef);
         var conBilled = Step("run billing for the engagement", () => Submit(AdminForms.RunBilling(db), ("Client", conChoice)),
@@ -1364,7 +1364,7 @@ public static partial class SelfTest
             r => r.First is { Rows.Count: 1 } t2 && (string)t2.Rows[0]["EngagementRef"] == piRef ? null : "engagement not returned");
         Step("three instances price at 1450 + 2 x 350", () => Queries.Engagement(db, piRef)!,
             r => (decimal)r["UnitTotal"] == 2150m ? null : $"£{r["UnitTotal"]}");
-        Step("the summary shows how the price is built", () => EngagementWindow.Summary(db, piRef, includeWork: false),
+        Step("the summary shows how the price is built", () => Detail.EngagementSummary(db, piRef, includeWork: false),
             s2 => s2.Contains("£2,150.00 for 3 instance(s)") && s2.Contains("£1,450.00 first, then £350.00 each")
                   && s2.Contains("capped at £3,500.00") && s2.Contains("Invoiced when you mark it finished")
                   ? null : s2.Split('\n').Skip(1).FirstOrDefault() ?? "no line");
@@ -1431,7 +1431,7 @@ public static partial class SelfTest
 
         // agreement lifecycle
         Step("pause support", () => Submit(AdminForms.PauseSupport(db, reference, true)));
-        Step("summary shows paused", () => AgreementWindow.Summary(db, reference, false), s => s.Contains("SUPPORT PAUSED") ? null : "not shown");
+        Step("summary shows paused", () => Detail.AgreementSummary(db, reference, false), s => s.Contains("SUPPORT PAUSED") ? null : "not shown");
         Step("resume support", () => Submit(AdminForms.PauseSupport(db, reference, false)));
         Step("notice preview records nothing", () => Submit(AdminForms.GiveNotice(db, reference)),
             r => r.First?.Rows[0]["Recorded"] as string == "No (WhatIf)" && Queries.Agreement(db, reference)!["EndDate"] is DBNull ? null : "notice was recorded");
@@ -1550,7 +1550,7 @@ public static partial class SelfTest
         }
 
         Console.WriteLine();
-        Console.WriteLine(AgreementWindow.Summary(db, reference, includeInstances: true));
+        Console.WriteLine(Detail.AgreementSummary(db, reference, includeInstances: true));
         return Finish();
     }
 }

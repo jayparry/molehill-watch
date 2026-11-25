@@ -572,6 +572,25 @@ public static class AdminForms
 
     // ------------------------------------------------------------------ tickets
 
+    /// <summary>
+    ///   The same form with the instance already filled in - what the Instances tab offers, where
+    ///   the instance is the thing you have in front of you. Rebuilt from the real spec rather than
+    ///   written out again, so a field added to one is not quietly missing from the other.
+    /// </summary>
+    public static FormSpec OpenTicketFor(AdminDb db, string agreementRef, string instanceName)
+    {
+        var spec = OpenTicket(db, agreementRef);
+        return new FormSpec
+        {
+            Title = spec.Title,
+            Intro = spec.Intro,
+            Submit = spec.Submit,
+            Fields = spec.Fields
+                .Select(f => f.Name == "InstanceName" ? Field.Text("InstanceName", f.Label, def: instanceName) : f)
+                .ToList()
+        };
+    }
+
     public static FormSpec OpenTicket(AdminDb db, string? agreementRef = null)
     {
         var choices = Queries.AgreementChoices(db);

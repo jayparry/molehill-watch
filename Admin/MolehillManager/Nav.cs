@@ -25,8 +25,33 @@ public sealed record NavNode(NavKind Kind, string Label, string? Key = null)
     public string? EngagementType { get; init; }
 }
 
+/// <summary>
+///   Which page a node in the tree opens. Separate from <see cref="NavKind"/> because one kind of
+///   node opens two different pages: a support agreement and a piece of consultancy work are both
+///   engagements in the tree and share nothing but a client.
+/// </summary>
+public enum Opens { Today, Clients, Agreement, Engagement, Settings, NotBuilt }
+
 public static class Nav
 {
+    /// <summary>
+    ///   What clicking a node should open. This is the most load-bearing branch in the app - it
+    ///   picks the whole screen - and it lived inside the window, where it needed a database and a
+    ///   message loop to reach and so was never tested at all. A mutation pass noticed: sending
+    ///   every agreement to the consultancy page broke nothing. It is a function of the node now.
+    ///
+    ///   The consultancy test is on the raw EngagementType the query carries, never on the words
+    ///   in the Type cell, which read "Molehill Watch" for a health check.
+    /// </summary>
+    public static Opens Opening(NavNode node) => node.Kind switch
+    {
+        NavKind.Today => Opens.Today,
+        NavKind.Clients or NavKind.Client => Opens.Clients,
+        NavKind.Settings => Opens.Settings,
+        NavKind.Engagement when node.Key != null =>
+            node.EngagementType == "Consultancy" ? Opens.Engagement : Opens.Agreement,
+        _ => Opens.NotBuilt
+    };
     /// <summary>The breadcrumb separator. One place, so the window does not spell it twice.</summary>
     public const string Separator = " › ";
 

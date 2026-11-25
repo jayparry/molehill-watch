@@ -265,7 +265,8 @@ public static class Queries
         SELECT TOP (500) i.InvoiceNo AS Invoice, i.ClientName AS Client, ISNULL(i.EngagementRef, 'free-text') AS [For],
                i.InvoiceDate AS Dated, i.DueDate AS Due,
                i.Total, CASE WHEN i.Status = 'Sent' AND i.DueDate < @Today THEN 'OVERDUE' ELSE i.Status END AS Status,
-               i.SentAt AS Sent, i.PaidAt AS Paid
+               i.SentAt AS Sent, i.PaidAt AS Paid,
+               CAST(CASE WHEN i.Status = 'Draft' THEN 1 ELSE 0 END AS bit) AS _IsDraft
         FROM dbo.vw_Invoice i
         WHERE @Filter = 'All' OR (@Filter = 'Outstanding' AND i.Status IN ('Draft', 'Sent'))
         ORDER BY i.InvoiceDate DESC, i.InvoiceNo DESC;
@@ -375,7 +376,10 @@ public static class Queries
         DECLARE @Today date = CAST(dbo.fn_UkNow() AS date);
         SELECT i.InvoiceNo AS Invoice, i.InvoiceDate AS Dated, i.DueDate AS Due, i.Total,
                CASE WHEN i.Status = 'Sent' AND i.DueDate < @Today THEN 'OVERDUE' ELSE i.Status END AS Status,
-               i.SentAt AS Sent, i.PaidAt AS Paid
+               i.SentAt AS Sent, i.PaidAt AS Paid,
+               -- the rule is "only a draft can be changed", and the Status column above is not it:
+               -- an overdue invoice reads OVERDUE rather than Sent, and it is formatted besides
+               CAST(CASE WHEN i.Status = 'Draft' THEN 1 ELSE 0 END AS bit) AS _IsDraft
         FROM dbo.vw_Invoice i WHERE i.EngagementRef = @Ref ORDER BY i.InvoiceDate DESC, i.InvoiceNo DESC;
         """, ("@Ref", engagementRef));
 

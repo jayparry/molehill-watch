@@ -21,6 +21,15 @@ internal interface IShellPage
     MhActionSet Actions { get; }
     IReadOnlyDictionary<string, Action> Handlers { get; }
 
+    /// <summary>
+    ///   What can be done to the thing the page is about, rather than to the row selected on it -
+    ///   an agreement or an engagement as a whole. The terminal puts these behind a second menu
+    ///   reached from the first, which is as deep as the hiding gets in this app and the hardest
+    ///   part of it to find. Here they are a second group on the same toolbar: still visible,
+    ///   still one press, and plainly a different scope.
+    /// </summary>
+    MhActionSet? WideActions => null;
+
     /// <summary>The selection moved: offer the actions again.</summary>
     event Action? Changed;
 }
@@ -227,6 +236,6 @@ internal sealed class Shell : UserControl
     /// </summary>
     private void Offer()
     {
-        if (_page != null) _toolbar.Show(_page.Actions, _page.Handlers);
+        if (_page != null) _toolbar.Show(_page.Actions, _page.WideActions, _page.Handlers);
     }
 }

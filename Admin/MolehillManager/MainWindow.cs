@@ -243,8 +243,8 @@ public sealed class MainWindow
         var reference = Grid.Selected(_agreements, "Ref");
         if (reference == null) { _clientDetail.Text = "Nothing here yet. F2 (or Clients > New client) adds a client."; return; }
         Ui.Try("Client", () => _clientDetail.Text = IsConsultancy()
-            ? EngagementWindow.Summary(_db, reference, includeWork: true)
-            : AgreementWindow.Summary(_db, reference, includeInstances: true));
+            ? Detail.EngagementSummary(_db, reference, includeWork: true)
+            : Detail.AgreementSummary(_db, reference, includeInstances: true));
     }
 
     /// <summary>
@@ -257,7 +257,7 @@ public sealed class MainWindow
     private void ShowTicketDetail()
     {
         var reference = Grid.Selected(_tickets, "Ticket");
-        _ticketDetail.Text = reference == null ? "No tickets." : TicketActions.Describe(_db, reference);
+        _ticketDetail.Text = reference == null ? "No tickets." : Detail.TicketSummary(_db, reference);
     }
 
     private void ShowInvoiceDetail()

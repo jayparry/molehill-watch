@@ -39,14 +39,36 @@ internal sealed class Toolbar : UserControl
     ///   not something a person can do anything about, and the self-test walks every action set to
     ///   catch it.
     /// </summary>
-    public void Show(MhActionSet set, IReadOnlyDictionary<string, Action> handlers)
+    public void Show(MhActionSet set, IReadOnlyDictionary<string, Action> handlers) =>
+        Show(set, null, handlers);
+
+    /// <summary>
+    ///   The selected row's actions, then - after a divider - the ones for the whole agreement or
+    ///   engagement. Two scopes, both on show. The terminal reaches the second group through a
+    ///   menu item on the first menu, so "record the initial review" is two unlabelled key presses
+    ///   away from anywhere; here it is a button you can see from across the room.
+    /// </summary>
+    public void Show(MhActionSet set, MhActionSet? wide, IReadOnlyDictionary<string, Action> handlers)
+    {
+        _buttons.Children.Clear();
+        Add(set, handlers);
+        if (wide == null || wide.Actions.Count == 0) return;
+        _buttons.Children.Add(new Border
+        {
+            Width = 1,
+            Margin = new Thickness(6, 2, 12, 2),
+            Background = AppResources.Resource<Brush>("LineStrong")
+        });
+        Add(wide, handlers);
+    }
+
+    private void Add(MhActionSet set, IReadOnlyDictionary<string, Action> handlers)
     {
         var missing = set.Actions.Where(a => a.Enabled && !handlers.ContainsKey(a.Id)).Select(a => a.Id).ToList();
         if (missing.Count > 0)
             throw new InvalidOperationException(
                 $"'{set.Title}' offers {string.Join(", ", missing)} with nothing to run.");
 
-        _buttons.Children.Clear();
         foreach (var action in set.Actions)
         {
             var button = new Button

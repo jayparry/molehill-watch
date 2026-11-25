@@ -56,6 +56,10 @@ internal sealed class MhGrid : DataGrid
         Background = AppResources.Resource<System.Windows.Media.Brush>("Paper");
         Foreground = AppResources.Resource<System.Windows.Media.Brush>("Ink");
         HorizontalGridLinesBrush = AppResources.Resource<System.Windows.Media.Brush>("Line");
+        // a DataGrid draws its own border in the system theme's blue, which is the one colour in
+        // the window belonging to no palette at all - and it frames every grid on every page
+        BorderBrush = AppResources.Resource<System.Windows.Media.Brush>("Line");
+        BorderThickness = new Thickness(1);
         FontFamily = AppResources.Resource<System.Windows.Media.FontFamily>("BodyFont");
         AutoGeneratingColumn += (s, e) => OnAutoGeneratingColumn(this, e);
     }
