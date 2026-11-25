@@ -335,7 +335,7 @@ public sealed class MainWindow
         var handlers = new Dictionary<string, Action>
         {
             ["client-new"] = NewClient,
-            ["client-new-project"] = NewClientForProject,
+            ["quote-new"] = () => Ui.Form(AdminForms.AddQuote(_db), RefreshAll),
             ["agreement-new"] = () => Ui.Form(AdminForms.NewAgreement(_db), RefreshAll),
             ["engagement-new"] = () => Ui.Form(AdminForms.NewEngagement(_db, name), RefreshAll)
         };
@@ -390,24 +390,19 @@ public sealed class MainWindow
 
     private void NewClient()
     {
-        var spec = AdminForms.NewClient(_db);
-        var result = FormDialog.Show(spec);
+        var result = FormDialog.Show(AdminForms.NewClient(_db));
         if (result == null) return;
         RefreshAll();
-        var created = AdminForms.CreatedAgreementRef(result);
-        if (created != null && MessageBox.Query("New client", $"Agreement {created} created. Open it now to add the instances?", "Open", "Later") == 0)
-            new AgreementWindow(_db, created).Run();
-        RefreshAll();
-    }
-
-    private void NewClientForProject()
-    {
-        var result = FormDialog.Show(AdminForms.NewClientForProject(_db));
-        if (result == null) return;
-        RefreshAll();
-        var created = AdminForms.CreatedEngagementRef(result);
-        if (created != null && MessageBox.Query("New client", $"Engagement {created} created. Open it now to log work or quote?", "Open", "Later") == 0)
-            new EngagementWindow(_db, created).Run();
+        var client = AdminForms.CreatedClientName(result);
+        if (client == null) return;
+        // a client on their own has no row on the Clients tab, so what they are for is offered here
+        switch (MessageBox.Query("New client", $"{client} created, with nothing agreed. What are they for?",
+                    "Molehill Watch", "Project", "Quote", "Later"))
+        {
+            case 0: Ui.Form(AdminForms.NewAgreement(_db), RefreshAll); break;
+            case 1: Ui.Form(AdminForms.NewEngagement(_db, client), RefreshAll); break;
+            case 2: Ui.Form(AdminForms.AddQuote(_db, client), RefreshAll); break;
+        }
         RefreshAll();
     }
 

@@ -186,7 +186,7 @@ EXEC dbo.usp_Engagement_Add @Client = N'Contoso Ltd', @Name = N'SQL Server healt
      @FirstUnitPrice = 1450, @ExtraUnitPrice = 350, @UnitCount = 3, @PriceCap = 3500;
 ```
 
-In Molehill Manager that is **New client (with a consultancy engagement)** on Clients, which does all three in one submission. The other new-client form creates a support agreement as well, which is wrong for a client who has only bought a project.
+In Molehill Manager that is three steps on Clients, in the order they actually happen: **New client**, then **Project quote**, then **New consultancy engagement** once they say yes. Adding a client agrees nothing, so a client who only ever buys project work never carries a support agreement.
 
 | Step | Command |
 |---|---|

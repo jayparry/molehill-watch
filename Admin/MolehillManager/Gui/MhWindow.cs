@@ -620,7 +620,7 @@ internal sealed class MhWindow : Window
             new Dictionary<string, Action>
             {
                 ["client-new"] = NewClient,
-                ["client-new-project"] = NewClientForProject,
+                ["quote-new"] = () => Form(AdminForms.AddQuote(_db)),
                 ["agreement-new"] = () => Form(AdminForms.NewAgreement(_db)),
                 ["engagement-new"] = () => Form(AdminForms.NewEngagement(_db, node.Kind == NavKind.Client ? node.Key : null))
             });
@@ -643,36 +643,27 @@ internal sealed class MhWindow : Window
             Dialogs.Read(this, spec.Title, new ResultView(result));
     }
 
+    /// <summary>
+    ///   A client on their own has no agreement and no engagement, so no row in the list and no node
+    ///   in the tree: there is nowhere to send you afterwards. What they are for is the next thing
+    ///   you want, so it is offered rather than left to be found. The follow-on forms ask which
+    ///   client, and the one just created is in their list.
+    /// </summary>
     private void NewClient()
     {
         var result = Dialogs.Form(this, AdminForms.NewClient(_db));
         if (result == null) return;
-        Created(result, "New client", AdminForms.CreatedAgreementRef(result),
-            "Open it now to add the instances?");
-    }
-
-    private void NewClientForProject()
-    {
-        var result = Dialogs.Form(this, AdminForms.NewClientForProject(_db));
-        if (result == null) return;
-        Created(result, "New client", AdminForms.CreatedEngagementRef(result),
-            "Open it now to log work or quote?");
-    }
-
-    /// <summary>
-    ///   What the procedures said, and then the offer to open what they made. An agreement or an
-    ///   engagement with nothing on it yet is the commonest half-finished state in the database, so
-    ///   the thing just created is put in front of you rather than left to be found in the tree.
-    ///   Both references hang off the same node kind, and which page opens is decided from the
-    ///   reference by <see cref="Nav.Opening"/> rather than from which form was filled in.
-    /// </summary>
-    private void Created(ProcResult result, string title, string? reference, string offer)
-    {
         Reload();
-        Dialogs.Read(this, title, new ResultView(result));
-        if (reference == null) return;
-        if (Dialogs.Ask(this, title, $"{reference} created. {offer}", "Open", "Later") == 0)
-            _shell.Go(NavKind.Engagement, reference);
+        Dialogs.Read(this, "New client", new ResultView(result));
+        var client = AdminForms.CreatedClientName(result);
+        if (client == null) return;
+        switch (Dialogs.Ask(this, "New client", $"{client} created, with nothing agreed. What are they for?",
+                    "Molehill Watch", "Project", "Quote", "Later"))
+        {
+            case 0: Form(AdminForms.NewAgreement(_db)); break;
+            case 1: Form(AdminForms.NewEngagement(_db, client)); break;
+            case 2: Form(AdminForms.AddQuote(_db, client)); break;
+        }
     }
 
     private void SaveDashboard() =>

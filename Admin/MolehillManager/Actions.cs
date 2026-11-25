@@ -119,13 +119,16 @@ public static class ActionRules
 
     /// <summary>F2 on the Clients tab, and the whole tab's actions when nothing is selected.</summary>
     public static MhActionSet NewOnClients() => Set("Clients",
-        new MhAction("client-new", "New client (with their Molehill Watch agreement)"),
-        // Project work is not a Molehill Watch sale, and until this existed the only way into the
-        // database was a client with a support agreement attached whether they had bought one or
-        // not: the engagement form picks a client from a list and cannot create one.
-        new MhAction("client-new-project", "New client (with a consultancy engagement)"),
+        // A client is a client: adding one says nothing about how we are engaged with them. The
+        // work is a separate step, because at the point of adding a client there often is none -
+        // you are quoting, and a quote needs the client and nothing else.
+        new MhAction("client-new", "New client"),
+        new MhAction("agreement-new", "New Molehill Watch agreement"),
         new MhAction("engagement-new", "New consultancy engagement"),
-        new MhAction("agreement-new", "New Molehill Watch agreement for an existing client"));
+        // Quoting needs no work to exist, so it belongs here as well as on the two pages. The client
+        // being quoted usually has no agreement and no engagement, so no row in this list and no
+        // node in the tree: the form asks who it is for rather than reading the selection.
+        new MhAction("quote-new", "Project quote"));
 
     /// <summary>
     ///   The Clients tab. Support agreements and consultancy work have different actions, and which

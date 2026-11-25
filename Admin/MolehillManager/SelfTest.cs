@@ -771,11 +771,14 @@ public static partial class SelfTest
         Check("and still offered once the work is finished, which is when the next one gets quoted",
             On(finishedWork, "engagement-quote"), Ids(finishedWork));
 
-        // the two ways to start a client, and the one that does not sell them support
+        // adding a client says nothing about how we are engaged with them: one way in, and the
+        // work and the quote are separate steps that need no row in the list to start from
         var starting = ActionRules.NewOnClients();
-        Check("a client can be started with a support agreement or with a consultancy engagement",
-            On(starting, "client-new") && On(starting, "client-new-project")
-            && On(starting, "engagement-new") && On(starting, "agreement-new"), Ids(starting));
+        Check("there is one way to add a client, and the work is a step of its own",
+            On(starting, "client-new") && On(starting, "agreement-new") && On(starting, "engagement-new")
+            && starting.Actions.Count(a => a.Id.StartsWith("client-new")) == 1, Ids(starting));
+        Check("and a quote can be started from there, needing no work to exist",
+            On(starting, "quote-new"), Ids(starting));
 
         // only a draft invoice can have its lines changed
         var draft = ActionRules.BillingTab("INV-1", isDraft: true);
@@ -1060,7 +1063,7 @@ public static partial class SelfTest
             : new[] { AdminForms.EditContact(db, contact), AdminForms.RemoveContact(db, contact), AdminForms.ReaddContact(db, contact) };
         return contactForms.Concat(new[]
     {
-        AdminForms.NewClient(db), AdminForms.NewClientForProject(db), AdminForms.NewAgreement(db), AdminForms.AddContact(db, client),
+        AdminForms.NewClient(db), AdminForms.NewAgreement(db), AdminForms.AddQuote(db), AdminForms.AddContact(db, client),
         AdminForms.AddInstance(db, reference), AdminForms.UpdateInstance(db, reference, instance), AdminForms.RemoveInstance(db, reference, instance),
         AdminForms.RiskAcceptance(db, reference, instance), AdminForms.WeeklyReport(db, reference, instance),
         AdminForms.CompleteOnboarding(db, reference, "REMOTE_ACCESS", "Remote access"), AdminForms.RecordReview(db, reference),
@@ -1098,22 +1101,47 @@ public static partial class SelfTest
         Console.WriteLine($"Writing test data as '{name}' ({reference}).");
         Console.WriteLine();
 
-        Step("new client + contact + agreement", () => Submit(AdminForms.NewClient(db),
+        // A client is a client: adding one agrees nothing. This is the whole of it, and the window
+        // reads the name back out to offer what comes next, there being no row in any list yet.
+        Step("new client + contact, and nothing else", () => Submit(AdminForms.NewClient(db),
                 ("ClientName", name), ("ContactName", "Pat Tester"),
-                ("ContactEmail", "pat@selftest.example"), ("ContactReceivesInvoices", "0"), ("StartDate", D(start)),
-                ("SignedDate", D(start.AddDays(-7))), ("AgreementRef", reference)),
-            r => r.Tables.Any(t => t.Columns.Contains("AgreementRef") && t.Rows.Count == 1 && (string)t.Rows[0]["AgreementRef"] == reference) ? null : "agreement not returned");
-        // what the main window reads back to offer "open it now and add the instances"
-        Step("the agreement it created can be picked out of what it said", () => Submit(AdminForms.NewClient(db),
-                ("ClientName", name + " II"), ("StartDate", D(start)), ("AgreementRef", reference + "-II")),
-            r => AdminForms.CreatedAgreementRef(r) != reference + "-II" ? AdminForms.CreatedAgreementRef(r) ?? "(nothing)"
-                 // one set names it, so which one is picked cannot matter. Say so here: if a
-                 // procedure ever reports the reference twice, this is where someone decides.
-                 : r.Tables.Count(t => t.Columns.Contains("AgreementRef")) is var named && named != 1
-                   ? $"{named} result sets name an agreement, so which one is read now matters" : null);
+                ("ContactEmail", "pat@selftest.example"), ("ContactReceivesInvoices", "0")),
+            r => AdminForms.CreatedClientName(r) == name ? null : AdminForms.CreatedClientName(r) ?? "(nothing)");
+        Step("adding a client creates no agreement and no engagement",
+            () => db.Query("SELECT Agreements = (SELECT COUNT(*) FROM dbo.Agreement a WHERE a.ClientId = c.ClientId), "
+                           + "Engagements = (SELECT COUNT(*) FROM dbo.Engagement e WHERE e.ClientId = c.ClientId) "
+                           + "FROM dbo.Client c WHERE c.ClientName = @n", ("@n", name)),
+            t => t.Rows.Count == 1 && (int)t.Rows[0]["Agreements"] == 0 && (int)t.Rows[0]["Engagements"] == 0
+                 ? null : $"{t.Rows[0]["Agreements"]} agreement(s), {t.Rows[0]["Engagements"]} engagement(s)");
+        // they can be quoted on that alone, which is why the client form asks for nothing more
+        Step("and they can be quoted on that alone",
+            () => Submit(AdminForms.AddQuote(db, name), ("Title", "Estate health check"), ("Price", "2500")),
+            r => r.First is { Rows.Count: 1 } t && (string)t.Rows[0]["Title"] == "Estate health check" ? null : "quote not returned");
+        // against the client chosen, not whoever the chooser happened to be sitting on. A quote on
+        // the wrong client is invisible until it is sent, so the returned row is checked, not just
+        // that a row came back - which is what a mutation pass found this step could not tell.
+        Step("quoted from the Clients tab, where the form asks who it is for",
+            () => Submit(AdminForms.AddQuote(db), ("Client", name), ("Title", "Phase two"), ("Price", "4000")),
+            r => r.First is { Rows.Count: 1 } t && t.Rows[0]["ClientId"] is int quoted
+                 && quoted == (int)db.Scalar("SELECT ClientId FROM dbo.Client WHERE ClientName = @n", ("@n", name))!
+                 ? null : "the quote went to a client other than the one chosen");
+
+        // the work is a second, separate step - and this is where an agreement gets the initial
+        // term the old combined form had no field for
+        Step("then the agreement, as its own step", () => Submit(AdminForms.NewAgreement(db),
+                ("ClientName", name), ("StartDate", D(start)), ("SignedDate", D(start.AddDays(-7))),
+                ("AgreementRef", reference), ("InitialTermMonths", "6")),
+            r => AdminForms.CreatedAgreementRef(r) == reference ? null : AdminForms.CreatedAgreementRef(r) ?? "(nothing)");
+        Step("the initial term it was given is the one on the agreement",
+            () => db.Scalar("SELECT InitialTermMonths FROM dbo.Agreement WHERE AgreementRef = @r", ("@r", reference)),
+            n => n is 6 ? null : $"{n}");
 
         ExpectError("duplicate client is refused before touching the database",
-            () => Submit(AdminForms.NewClient(db), ("ClientName", name), ("StartDate", D(start))), "already exists");
+            () => Submit(AdminForms.NewClient(db), ("ClientName", name)), "already exists");
+        ExpectError("and says to give the existing one work instead of starting them again",
+            () => Submit(AdminForms.NewClient(db), ("ClientName", name)), "New consultancy engagement");
+        ExpectError("a quote with no client is refused rather than guessing one",
+            () => Submit(AdminForms.AddQuote(db), ("Title", "Nobody's")), "Client is required");
         ExpectError("required field is enforced", () => Submit(AdminForms.AddInstance(db, reference)), "Name is required");
         ExpectError("bad number is caught", () => Submit(AdminForms.AddInstance(db, reference), ("InstanceName", "X"), ("DatabaseCount", "lots")), "not a whole number");
 
@@ -1324,34 +1352,36 @@ public static partial class SelfTest
         Step("new consultancy engagement", () => Submit(AdminForms.NewEngagement(db, name), ("ClientName", name), ("Name", "Warehouse migration"),
                 ("BillingMode", "Day rate"), ("DayRate", "600"), ("StartDate", D(lastMonth)), ("PurchaseOrder", "PO-1234"), ("EngagementRef", conRef)),
             r => r.First is { Rows.Count: 1 } t && (string)t.Rows[0]["EngagementRef"] == conRef ? null : "engagement not returned");
-        // the other way in: a client who has bought a project and no support at all
+        // the whole path for project work: a client, a quote, and only then the engagement - the
+        // order it actually happens in, and none of it needing a support agreement to exist
         var projectName = $"Selftest Projects Ltd {stamp}";
         var projectRef = $"CSTP-{stamp}";
-        Step("new client for project work, in one submission", () => Submit(AdminForms.NewClientForProject(db),
+        Step("a client for project work is the same client form", () => Submit(AdminForms.NewClient(db),
                 ("ClientName", projectName), ("ContactName", "Sam Buyer"), ("ContactEmail", "sam@selftest.example"),
-                ("ClientNotes", "Came in through the health check"), ("Name", "Estate health check"),
+                ("Notes", "Came in through the health check")),
+            r => AdminForms.CreatedClientName(r) == projectName ? null : AdminForms.CreatedClientName(r) ?? "(nothing)");
+        Step("quoted before any work exists, which is the order it happens in",
+            () => Submit(AdminForms.AddQuote(db, projectName), ("Title", "Estate health check"),
+                         ("Scope", "4 instances"), ("Price", "2500")),
+            r => r.First is { Rows.Count: 1 } ? null : "quote not returned");
+        Step("and only then the engagement, once they have said yes", () => Submit(AdminForms.NewEngagement(db, projectName),
+                ("ClientName", projectName), ("Name", "Estate health check"),
                 ("BillingMode", "Per instance"), ("FirstUnitPrice", "1450"), ("ExtraUnitPrice", "350"),
                 ("UnitCount", "4"), ("PriceCap", "3500"), ("StartDate", D(DateTime.Today)), ("EngagementRef", projectRef)),
             r => AdminForms.CreatedEngagementRef(r) == projectRef ? null : AdminForms.CreatedEngagementRef(r) ?? "(nothing)");
-        Step("they exist, with the contact and the notes that came in on the same form",
+        Step("they still have no Molehill Watch agreement, having never bought one",
+            () => db.Scalar("SELECT COUNT(*) FROM dbo.Agreement a JOIN dbo.Client c ON c.ClientId = a.ClientId "
+                            + "WHERE c.ClientName = @n", ("@n", projectName)),
+            n => (int)n! == 0 ? null : $"{n} agreement(s) created");
+        Step("the client's notes and contact came through the client form",
             () => db.Query("SELECT c.Notes, ContactCount = (SELECT COUNT(*) FROM dbo.Contact ct WHERE ct.ClientId = c.ClientId) "
                            + "FROM dbo.Client c WHERE c.ClientName = @n", ("@n", projectName)),
             t => t.Rows.Count == 1 && (string)t.Rows[0]["Notes"] == "Came in through the health check"
                  && (int)t.Rows[0]["ContactCount"] == 1 ? null : "client, notes or contact missing");
-        Step("and no Molehill Watch agreement was created for them, which is the whole point",
-            () => db.Scalar("SELECT COUNT(*) FROM dbo.Agreement a JOIN dbo.Client c ON c.ClientId = a.ClientId "
-                            + "WHERE c.ClientName = @n", ("@n", projectName)),
-            n => (int)n! == 0 ? null : $"{n} agreement(s) created");
-        Step("the per-instance price came through the engagement half of the form",
+        Step("and the per-instance price is the one the database works out",
             () => db.Query("SELECT UnitTotal, PriceCap FROM dbo.Engagement WHERE EngagementRef = @r", ("@r", projectRef)),
             t => t.Rows.Count == 1 && (decimal)t.Rows[0]["UnitTotal"] == 2500m && (decimal)t.Rows[0]["PriceCap"] == 3500m
                  ? null : $"UnitTotal {t.Rows[0]["UnitTotal"]}, cap {t.Rows[0]["PriceCap"]}");
-        Step("and they can be quoted, having no agreement to quote against",
-            () => Submit(AdminForms.AddQuote(db, projectName), ("Title", "Phase two"), ("Price", "4000")),
-            r => r.First is { Rows.Count: 1 } ? null : "quote not returned");
-        ExpectError("starting them a second time is refused, and points at the engagement form",
-            () => Submit(AdminForms.NewClientForProject(db), ("ClientName", projectName), ("Name", "Again")),
-            "New consultancy engagement");
 
         Step("log a full day", () => Submit(AdminForms.LogWork(db, conRef), ("WorkDate", D(lastMonth.AddDays(1))), ("Days", "1"), ("Description", "Discovery")));
         Step("log three hours the next day", () => Submit(AdminForms.LogWork(db, conRef), ("WorkDate", D(lastMonth.AddDays(2))), ("Hours", "3"), ("Description", "Schema review")));
