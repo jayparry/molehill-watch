@@ -232,8 +232,7 @@ Just run it. Settings are kept in {ConfigStore.FileName}:
 Anything missing is asked for on start-up and saved. Passwords and client secrets are
 only saved if you tick "Remember it", and then encrypted for your Windows account.
 
-  MolehillManager                       start (first run asks for the settings)
-  MolehillManager                       start the window
+  MolehillManager                       start the window (first run asks for the settings)
   MolehillManager --tui                 start the terminal front end instead: the one that works
                                         over a remote session with no desktop
   MolehillManager --gui                 start the window, whatever the default is
