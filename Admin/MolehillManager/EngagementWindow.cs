@@ -168,7 +168,7 @@ public sealed class EngagementWindow
     {
         var (set, handlers) = Context();
         handlers["engagement-more"] = EngagementActions;
-        Picker.Actions(set.Add(new MhAction("engagement-more", "Engagement actions (change, finish, invoice, billing) ...")), handlers);
+        Picker.Actions(set.Add(new MhAction("engagement-more", "Engagement actions (change, quote, finish, invoice, billing) ...")), handlers);
     }
 
     /// <summary>The actions for a tab, with nothing drawn (for the self-test).</summary>
@@ -192,6 +192,9 @@ public sealed class EngagementWindow
         {
             ["work-log"] = LogWork,
             ["engagement-edit"] = () => Ui.Form(AdminForms.EditEngagement(_db, _ref), Refresh),
+            // the client's name: a quote is against the client, and usp_Quote_Add cannot resolve
+            // an engagement reference
+            ["engagement-quote"] = () => Ui.Form(AdminForms.AddQuote(_db, _clientName), Refresh),
             ["engagement-complete"] = () => Ui.Form(AdminForms.CompleteEngagement(_db, _ref), Refresh),
             ["engagement-cancel"] = () => Ui.Form(AdminForms.CancelEngagement(_db, _ref), Refresh),
             ["invoice-new"] = () => Ui.Form(AdminForms.NewInvoice(_db, _ref), Refresh),

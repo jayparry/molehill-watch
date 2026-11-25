@@ -335,6 +335,7 @@ public sealed class MainWindow
         var handlers = new Dictionary<string, Action>
         {
             ["client-new"] = NewClient,
+            ["client-new-project"] = NewClientForProject,
             ["agreement-new"] = () => Ui.Form(AdminForms.NewAgreement(_db), RefreshAll),
             ["engagement-new"] = () => Ui.Form(AdminForms.NewEngagement(_db, name), RefreshAll)
         };
@@ -396,6 +397,17 @@ public sealed class MainWindow
         var created = AdminForms.CreatedAgreementRef(result);
         if (created != null && MessageBox.Query("New client", $"Agreement {created} created. Open it now to add the instances?", "Open", "Later") == 0)
             new AgreementWindow(_db, created).Run();
+        RefreshAll();
+    }
+
+    private void NewClientForProject()
+    {
+        var result = FormDialog.Show(AdminForms.NewClientForProject(_db));
+        if (result == null) return;
+        RefreshAll();
+        var created = AdminForms.CreatedEngagementRef(result);
+        if (created != null && MessageBox.Query("New client", $"Engagement {created} created. Open it now to log work or quote?", "Open", "Later") == 0)
+            new EngagementWindow(_db, created).Run();
         RefreshAll();
     }
 

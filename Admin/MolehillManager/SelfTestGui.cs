@@ -737,6 +737,7 @@ public static partial class SelfTest
         var handlers = new Dictionary<string, Action>
         {
             ["client-new"] = () => ran.Add("client-new"),
+            ["client-new-project"] = () => ran.Add("client-new-project"),
             ["agreement-new"] = () => ran.Add("agreement-new"),
             ["engagement-new"] = () => ran.Add("engagement-new")
         };
@@ -759,8 +760,14 @@ public static partial class SelfTest
         Layout(empty, 1000);
         Check("an empty list says so, and says where to start",
             empty.Summary.Contains("No work to show") && empty.Summary.Contains("New client"), empty.Summary);
-        Check("and offers exactly the three ways to start something new",
-            empty.Actions.Actions.Count == 3 && empty.Actions.Available.Count == 3,
+        Check("and offers exactly the four ways to start something new",
+            empty.Actions.Actions.Count == 4 && empty.Actions.Available.Count == 4,
+            string.Join(", ", empty.Actions.Actions.Select(a => a.Id)));
+        // a client whose work is a project is not a Molehill Watch sale, and was unreachable until
+        // this route existed: the engagement form can only pick a client that already exists
+        Check("one of them starts a client whose work is a project, with no support agreement",
+            empty.Actions.ById("client-new-project")?.Enabled == true
+            && empty.Actions.ById("client-new")?.Id != empty.Actions.ById("client-new-project")?.Id,
             string.Join(", ", empty.Actions.Actions.Select(a => a.Id)));
         Check("a list with work in it starts on its first row",
             page.Work.SelectedIndex == 0 && page.Summary.Contains("open ticket(s)"), page.Summary);

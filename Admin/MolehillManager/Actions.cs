@@ -120,6 +120,10 @@ public static class ActionRules
     /// <summary>F2 on the Clients tab, and the whole tab's actions when nothing is selected.</summary>
     public static MhActionSet NewOnClients() => Set("Clients",
         new MhAction("client-new", "New client (with their Molehill Watch agreement)"),
+        // Project work is not a Molehill Watch sale, and until this existed the only way into the
+        // database was a client with a support agreement attached whether they had bought one or
+        // not: the engagement form picks a client from a list and cannot create one.
+        new MhAction("client-new-project", "New client (with a consultancy engagement)"),
         new MhAction("engagement-new", "New consultancy engagement"),
         new MhAction("agreement-new", "New Molehill Watch agreement for an existing client"));
 
@@ -283,6 +287,11 @@ public static class ActionRules
         return Set($"Engagement {engagementRef}",
             new MhAction("work-log", "Log work"),
             new MhAction("engagement-edit", "Change it (rate, name, PO, dates, on hold)"),
+            // Offered finished or not: quoting the next piece of work for a client whose last
+            // project has just ended is the ordinary case rather than an edge one. A quote belongs
+            // to the client and not to the engagement, which is why the engagement page passes the
+            // client's name where the agreement page passes its own reference.
+            new MhAction("engagement-quote", "Project quote"),
             MhAction.If(!finished, "engagement-complete", "Finished - invoice what is left", why),
             MhAction.If(!finished, "engagement-cancel", "Cancel (nothing invoiced)", why),
             new MhAction("invoice-new", "New invoice typed by hand"),

@@ -444,6 +444,9 @@ internal sealed class MhWindow : Window
             case "contact-readd": Form(AdminForms.ReaddContact(_db, SelectedId(grid)!.Value)); break;
 
             case "invoice-new": Form(AdminForms.NewInvoice(_db, reference)); break;
+            // the client's name, not the engagement reference: usp_Quote_Add resolves an agreement
+            // or a client and would read CON-0000 as a client that does not exist
+            case "engagement-quote": Form(AdminForms.AddQuote(_db, clientName)); break;
             case "engagement-edit": Form(AdminForms.EditEngagement(_db, reference)); break;
             case "engagement-complete": Form(AdminForms.CompleteEngagement(_db, reference)); break;
             case "engagement-cancel": Form(AdminForms.CancelEngagement(_db, reference)); break;
@@ -617,6 +620,7 @@ internal sealed class MhWindow : Window
             new Dictionary<string, Action>
             {
                 ["client-new"] = NewClient,
+                ["client-new-project"] = NewClientForProject,
                 ["agreement-new"] = () => Form(AdminForms.NewAgreement(_db)),
                 ["engagement-new"] = () => Form(AdminForms.NewEngagement(_db, node.Kind == NavKind.Client ? node.Key : null))
             });
@@ -643,12 +647,32 @@ internal sealed class MhWindow : Window
     {
         var result = Dialogs.Form(this, AdminForms.NewClient(_db));
         if (result == null) return;
+        Created(result, "New client", AdminForms.CreatedAgreementRef(result),
+            "Open it now to add the instances?");
+    }
+
+    private void NewClientForProject()
+    {
+        var result = Dialogs.Form(this, AdminForms.NewClientForProject(_db));
+        if (result == null) return;
+        Created(result, "New client", AdminForms.CreatedEngagementRef(result),
+            "Open it now to log work or quote?");
+    }
+
+    /// <summary>
+    ///   What the procedures said, and then the offer to open what they made. An agreement or an
+    ///   engagement with nothing on it yet is the commonest half-finished state in the database, so
+    ///   the thing just created is put in front of you rather than left to be found in the tree.
+    ///   Both references hang off the same node kind, and which page opens is decided from the
+    ///   reference by <see cref="Nav.Opening"/> rather than from which form was filled in.
+    /// </summary>
+    private void Created(ProcResult result, string title, string? reference, string offer)
+    {
         Reload();
-        // The terminal offers to open the new agreement at once here, because an agreement with no
-        // instances on it is the commonest half-finished state in the database. That offer needs the
-        // agreement page, which is Phase 2; until then this says what the procedures said, which is
-        // where the new reference appears, rather than opening a door onto a placeholder.
-        Dialogs.Read(this, "New client", new ResultView(result));
+        Dialogs.Read(this, title, new ResultView(result));
+        if (reference == null) return;
+        if (Dialogs.Ask(this, title, $"{reference} created. {offer}", "Open", "Later") == 0)
+            _shell.Go(NavKind.Engagement, reference);
     }
 
     private void SaveDashboard() =>

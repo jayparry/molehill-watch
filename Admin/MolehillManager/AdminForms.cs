@@ -131,47 +131,78 @@ public static class AdminForms
     ///   to that, so there is nothing here to choose between. Should one ever report it twice, the
     ///   later one is the one made last.
     /// </summary>
-    public static string? CreatedAgreementRef(ProcResult result) =>
+    public static string? CreatedAgreementRef(ProcResult result) => Created(result, "AgreementRef");
+
+    /// <summary>
+    ///   The same for a consultancy engagement. <c>usp_Engagement_Add</c> makes up the CON-0000
+    ///   reference when the form leaves it blank and names it in the result set it returns.
+    /// </summary>
+    public static string? CreatedEngagementRef(ProcResult result) => Created(result, "EngagementRef");
+
+    private static string? Created(ProcResult result, string column) =>
         result.Tables.SelectMany(t => t.Rows.Cast<DataRow>())
-            .Select(r => r.Table.Columns.Contains("AgreementRef") ? r["AgreementRef"] as string : null)
+            .Select(r => r.Table.Columns.Contains(column) ? r[column] as string : null)
             .LastOrDefault(r => r != null);
+
+    /// <summary>
+    ///   The client and their first contact: the fields both "new client" forms begin with. Shared
+    ///   so a contact flag added to one is not quietly missing from the other. The client's own
+    ///   notes field is named by the caller, because the form that also creates an engagement holds
+    ///   the engagement's Notes field too, and two fields of one name is the one thing a FormSpec
+    ///   cannot carry.
+    /// </summary>
+    private static IEnumerable<Field> ClientAndContactFields(string notesField, string notesLabel) => new[]
+    {
+        Field.Text("ClientName", "Client name", required: true),
+        Field.Text("Address", "Address"),
+        Field.Memo(notesField, notesLabel),
+        Field.Text("ContactName", "First contact", help: "leave blank to add later"),
+        Field.Text("ContactEmail", "Contact e-mail"),
+        Field.Text("ContactPhone", "Contact phone"),
+        Field.Bool("ContactRaisesTickets", "Raises tickets", def: true, help: "named point of contact"),
+        Field.Bool("ContactReceivesInvoices", "Receives invoices", def: true)
+    };
+
+    /// <summary>
+    ///   Creates the client and, where one was given, their first contact - the half both "new
+    ///   client" forms do before going on to create the thing the client is actually for. The
+    ///   duplicate check runs before anything is written, so a name already in use costs nothing.
+    /// </summary>
+    private static (ProcResult Client, ProcResult? Contact, string Name) CreateClientAndContact(
+        AdminDb db, FormValues v, string notesField, string insteadUse)
+    {
+        var name = v.Str("ClientName")!;
+        if (db.Scalar("SELECT 1 FROM dbo.Client WHERE ClientName = @n", ("@n", name)) != null)
+            throw new FormatException($"'{name}' already exists. To start more work for them, use '{insteadUse}'.");
+
+        var client = db.Proc("dbo.usp_Client_Add", ("@ClientName", name), ("@Address", v.Str("Address")), ("@Notes", v.Str(notesField)));
+        ProcResult? contact = null;
+        if (v.Str("ContactName") != null)
+            contact = db.Proc("dbo.usp_Contact_Add", ("@ClientName", name), ("@FullName", v.Str("ContactName")),
+                ("@Email", v.Str("ContactEmail")), ("@Phone", v.Str("ContactPhone")),
+                ("@IsNamedContact", v.Bool("ContactRaisesTickets")), ("@IsBillingContact", v.Bool("ContactReceivesInvoices")));
+        return (client, contact, name);
+    }
 
     public static FormSpec NewClient(AdminDb db)
     {
         var priceLists = new[] { LatestStandard }.Concat(Queries.PriceLists(db)).ToArray();
-        return new FormSpec
+        var spec = new FormSpec
         {
             Title = "New client",
             Intro = "Creates the client, a first contact and the agreement (with its onboarding checklist). Add more contacts, and the " +
                     "instances, from the agreement afterwards - a shared accounts address can be a contact that only receives invoices.",
             Fields =
             {
-                Field.Text("ClientName", "Client name", required: true),
-                Field.Text("Address", "Address"),
-                Field.Text("ContactName", "First contact", help: "leave blank to add later"),
-                Field.Text("ContactEmail", "Contact e-mail"),
-                Field.Text("ContactPhone", "Contact phone"),
-                Field.Bool("ContactRaisesTickets", "Raises tickets", def: true, help: "named point of contact"),
-                Field.Bool("ContactReceivesInvoices", "Receives invoices", def: true),
                 Field.Date("StartDate", "Agreement start", required: true, def: DateTime.Today.ToString("yyyy-MM-dd"), help: "billing cycles run from here"),
                 Field.Date("SignedDate", "Signed on"),
                 Field.Text("TicketChannel", "Ticket channel", help: "blank = the standard e-mail address"),
                 Field.Text("AgreementRef", "Agreement ref", help: "blank = next MWA-0000 number"),
-                Field.Choice("PriceListName", "Price list", priceLists),
-                Field.Memo("Notes", "Client notes")
+                Field.Choice("PriceListName", "Price list", priceLists)
             },
             Submit = v =>
             {
-                var name = v.Str("ClientName")!;
-                if (db.Scalar("SELECT 1 FROM dbo.Client WHERE ClientName = @n", ("@n", name)) != null)
-                    throw new FormatException($"'{name}' already exists. To start another agreement for them, use 'New agreement for an existing client'.");
-
-                var client = db.Proc("dbo.usp_Client_Add", ("@ClientName", name), ("@Address", v.Str("Address")), ("@Notes", v.Str("Notes")));
-                ProcResult? contact = null;
-                if (v.Str("ContactName") != null)
-                    contact = db.Proc("dbo.usp_Contact_Add", ("@ClientName", name), ("@FullName", v.Str("ContactName")),
-                        ("@Email", v.Str("ContactEmail")), ("@Phone", v.Str("ContactPhone")),
-                        ("@IsNamedContact", v.Bool("ContactRaisesTickets")), ("@IsBillingContact", v.Bool("ContactReceivesInvoices")));
+                var (client, contact, name) = CreateClientAndContact(db, v, "Notes", "New agreement for an existing client");
                 ProcResult agreement;
                 try
                 {
@@ -185,6 +216,51 @@ public static class AdminForms
                 return Merge(client, contact, agreement);
             }
         };
+        // the client's own fields lead, where they were written out before they were shared
+        spec.Fields.InsertRange(0, ClientAndContactFields("Notes", "Client notes"));
+        return spec;
+    }
+
+    /// <summary>
+    ///   A client whose work is a project rather than Molehill Watch support: the client, a first
+    ///   contact and one consultancy engagement, in a single submission. Without it the only way
+    ///   into the database was a client with a support agreement attached whether they had bought
+    ///   one or not, because the engagement form picks a client from the list of those that already
+    ///   exist and cannot create one.
+    ///
+    ///   The engagement half is taken from the real <see cref="NewEngagement"/> spec rather than
+    ///   written out again - its fields, less the chooser that picks an existing client, and its own
+    ///   Submit, which reads the client's name out of the values exactly as the required ClientName
+    ///   field here supplies it. So a field or a procedure parameter added there arrives here too.
+    /// </summary>
+    public static FormSpec NewClientForProject(AdminDb db)
+    {
+        var engagement = NewEngagement(db);
+        var spec = new FormSpec
+        {
+            Title = "New client for project work",
+            Intro = "Creates the client, a first contact and one consultancy engagement - a project, a review, a health check across an " +
+                    "estate. No Molehill Watch agreement is created, so there is no support cycle and no onboarding checklist. Add one " +
+                    "later with 'New Molehill Watch agreement for an existing client' if they buy support as well.",
+            Submit = v =>
+            {
+                var (client, contact, _) = CreateClientAndContact(db, v, "ClientNotes", "New consultancy engagement");
+                ProcResult work;
+                try
+                {
+                    work = engagement.Submit(v);
+                }
+                catch (Exception ex)
+                {
+                    throw new InvalidOperationException(
+                        $"The client was created, but the engagement was not:\n{AdminDb.Describe(ex)}\n\nFix it and use 'New consultancy engagement'.");
+                }
+                return Merge(client, contact, work);
+            }
+        };
+        spec.Fields.AddRange(ClientAndContactFields("ClientNotes", "Client notes"));
+        spec.Fields.AddRange(engagement.Fields.Where(f => f.Name != "ClientName"));
+        return spec;
     }
 
     private static ProcResult CreateAgreement(AdminDb db, string clientName, FormValues v)
@@ -555,9 +631,16 @@ public static class AdminForms
         };
     }
 
-    public static FormSpec AddQuote(AdminDb db, string agreementRef) => new()
+    /// <summary>
+    ///   A quote for project work. <c>usp_Quote_Add</c> resolves either an agreement reference or a
+    ///   client name, and never an engagement reference - <c>fn_AgreementId</c> knows nothing of
+    ///   CON-0000 - so the agreement page passes its own reference while the engagement page passes
+    ///   the client's name. The quote belongs to the client either way: <c>dbo.Quote</c> is keyed on
+    ///   the client and optionally a ticket, never on the engagement.
+    /// </summary>
+    public static FormSpec AddQuote(AdminDb db, string clientOrAgreement) => new()
     {
-        Title = $"Project quote - {agreementRef}",
+        Title = $"Project quote - {clientOrAgreement}",
         Fields =
         {
             Field.Text("Title", "Title", required: true),
@@ -566,7 +649,7 @@ public static class AdminForms
             Field.Decimal("Price", "Price"),
             Field.Text("TicketRef", "Ticket", help: "MW-00001, optional")
         },
-        Submit = v => db.Proc("dbo.usp_Quote_Add", ("@Client", agreementRef), ("@Title", v.Str("Title")), ("@Scope", v.Str("Scope")),
+        Submit = v => db.Proc("dbo.usp_Quote_Add", ("@Client", clientOrAgreement), ("@Title", v.Str("Title")), ("@Scope", v.Str("Scope")),
             ("@EstimatedHours", v.Dec("EstimatedHours")), ("@Price", v.Dec("Price")), ("@TicketRef", v.Str("TicketRef")))
     };
 

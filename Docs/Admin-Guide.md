@@ -177,9 +177,21 @@ If a client's Molehill Watch lives in their own DBA database, add `-Database <na
 
 Work that isn't Molehill Watch support - a migration, a review, a few days of advice - is a **consultancy engagement**. You agree a day rate (or an hourly rate, a fixed price, or a price per instance), log the days as you work, and the billing run invoices **every two weeks**, counted from the day the work started.
 
+**A brand-new client whose work is a project.** They need no Molehill Watch agreement, so don't create one: a client exists on their own, and an engagement hangs off the client rather than off an agreement.
+
+```sql
+EXEC dbo.usp_Client_Add  @ClientName = N'Contoso Ltd', @Address = N'...';
+EXEC dbo.usp_Contact_Add @ClientName = N'Contoso Ltd', @FullName = N'Sam Smith', @Email = N'sam@contoso.co.uk', @IsBillingContact = 1;
+EXEC dbo.usp_Engagement_Add @Client = N'Contoso Ltd', @Name = N'SQL Server health check', @BillingMode = 'PerInstance',
+     @FirstUnitPrice = 1450, @ExtraUnitPrice = 350, @UnitCount = 3, @PriceCap = 3500;
+```
+
+In Molehill Manager that is **New client (with a consultancy engagement)** on Clients, which does all three in one submission. The other new-client form creates a support agreement as well, which is wrong for a client who has only bought a project.
+
 | Step | Command |
 |---|---|
 | Start one | `EXEC dbo.usp_Engagement_Add @Client = N'Contoso Ltd', @Name = N'Data warehouse migration', @DayRate = 650, @PurchaseOrder = N'PO-4471';` |
+| Record a quote for one | `EXEC dbo.usp_Quote_Add @Client = N'Contoso Ltd', @Title = N'SQL Server health check', @Price = 2500, @EstimatedHours = 12;` |
 | Start a per-instance one | `EXEC dbo.usp_Engagement_Add @Client = N'Contoso Ltd', @Name = N'SQL Server health check', @BillingMode = 'PerInstance', @FirstUnitPrice = 1450, @ExtraUnitPrice = 350, @UnitCount = 3, @PriceCap = 3500;` |
 | Correct the instance count | `EXEC dbo.usp_Engagement_Update @Engagement = 'CON-0003', @UnitCount = 7;` |
 | Log a day | `EXEC dbo.usp_Work_Log @Engagement = 'CON-0001', @Days = 1, @Description = N'Discovery workshop';` |
@@ -191,6 +203,8 @@ Work that isn't Molehill Watch support - a migration, a review, a few days of ad
 | Put it on hold | `EXEC dbo.usp_Engagement_Update @Engagement = 'CON-0001', @Status = 'OnHold';` |
 | Finish it (invoices what's left) | `EXEC dbo.usp_Engagement_Complete @Engagement = 'CON-0001';` - with no date it finishes on the engagement's end date, or today if it hasn't got one |
 | Cancel one that never happened | `EXEC dbo.usp_Engagement_Cancel @Engagement = 'CON-0002', @Reason = N'Client pulled the project';` |
+
+**Quotes are a record, not a document.** `usp_Quote_Add` files what you quoted so the figure isn't lost, and **Project quote** on the agreement or engagement page does the same. Nothing reads `dbo.Quote` back out yet and nothing renders it, so the quote you send the client is still written by hand - unlike an invoice, which `usp_Invoice_Html` produces. `Quote.Status`, `SentDate` and `DecisionDate` exist but nothing writes them, so every quote stays `Draft`.
 
 **How days are worked out.** A day is 7.5 hours (`DayHours`) and each day worked rounds up to the nearest half day (`DayRateRounding`: `HalfDay`, `WholeDay` or `Exact`; an engagement can override it). Everything logged on the same date counts together, so 2 hours in the morning and 3 in the afternoon is one day, not two half days. Each day worked becomes one invoice line, with what you did on it.
 

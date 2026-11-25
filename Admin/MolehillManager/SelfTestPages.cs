@@ -563,6 +563,12 @@ public static partial class SelfTest
             done.WideActions?.ById("engagement-complete")?.DisabledReason ?? "(enabled)");
         Check("though work can still be logged against it",
             done.WideActions?.ById("work-log")?.Enabled == true || done.Actions.ById("work-log")?.Enabled == true);
+        // quoting the next piece of work for a client whose last project has just ended is the
+        // ordinary case, so this one is offered either way rather than greyed when it finishes
+        Check("and a project quote is offered whether the work is finished or not",
+            page.WideActions?.ById("engagement-quote")?.Enabled == true
+            && done.WideActions?.ById("engagement-quote")?.Enabled == true,
+            done.WideActions?.ById("engagement-quote")?.DisabledReason ?? "(missing)");
 
         Layout(page, 1200, 820);
         NothingAdrift(page, "the engagement page");
@@ -577,6 +583,17 @@ public static partial class SelfTest
             Check("every action the engagement page offers has a case in the window",
                 lost.Count == 0, string.Join(" | ", lost.Take(4)));
         }
+
+        // The quote is the one engagement action that must not be run against the engagement's own
+        // reference: usp_Quote_Add resolves an agreement reference or a client name, and would read
+        // CON-0000 as a client that does not exist. Nothing headless reaches inside the window's
+        // switch, where both are in scope, so the rule is read off its source as the wiring is.
+        // A mutation pass found this the only new rule with nothing watching it.
+        var windowSource = RepoFile("Gui/MhWindow.cs");
+        if (windowSource == null) Console.WriteLine("SKIP  what the window quotes against (no source beside the exe)");
+        else Check("and the quote is run against the client, never the engagement reference",
+            windowSource.Contains("case \"engagement-quote\": Form(AdminForms.AddQuote(_db, clientName));"),
+            "the engagement-quote case in the window does not pass clientName");
     }
 
 

@@ -761,6 +761,22 @@ public static partial class SelfTest
             On(consultancy, "engagement-open") && On(consultancy, "work-log") && On(consultancy, "engagement-complete")
             && consultancy.ById("ticket-new") == null && consultancy.ById("prepaid-sell") == null, Ids(consultancy));
 
+        // a quote is reachable from consultancy work, not only from a support agreement. It used to
+        // hang off the agreement alone, so a client with no agreement could not be quoted at all
+        var engagementWide = ActionRules.EngagementWide("CST-1", finished: false);
+        var finishedWork = ActionRules.EngagementWide("CST-1", finished: true);
+        Check("a project quote is offered on consultancy work as well as on an agreement",
+            On(engagementWide, "engagement-quote") && On(ActionRules.AgreementWide("ST-1", false), "agreement-quote"),
+            Ids(engagementWide));
+        Check("and still offered once the work is finished, which is when the next one gets quoted",
+            On(finishedWork, "engagement-quote"), Ids(finishedWork));
+
+        // the two ways to start a client, and the one that does not sell them support
+        var starting = ActionRules.NewOnClients();
+        Check("a client can be started with a support agreement or with a consultancy engagement",
+            On(starting, "client-new") && On(starting, "client-new-project")
+            && On(starting, "engagement-new") && On(starting, "agreement-new"), Ids(starting));
+
         // only a draft invoice can have its lines changed
         var draft = ActionRules.BillingTab("INV-1", isDraft: true);
         var sent = ActionRules.BillingTab("INV-1", isDraft: false);
@@ -1044,7 +1060,7 @@ public static partial class SelfTest
             : new[] { AdminForms.EditContact(db, contact), AdminForms.RemoveContact(db, contact), AdminForms.ReaddContact(db, contact) };
         return contactForms.Concat(new[]
     {
-        AdminForms.NewClient(db), AdminForms.NewAgreement(db), AdminForms.AddContact(db, client),
+        AdminForms.NewClient(db), AdminForms.NewClientForProject(db), AdminForms.NewAgreement(db), AdminForms.AddContact(db, client),
         AdminForms.AddInstance(db, reference), AdminForms.UpdateInstance(db, reference, instance), AdminForms.RemoveInstance(db, reference, instance),
         AdminForms.RiskAcceptance(db, reference, instance), AdminForms.WeeklyReport(db, reference, instance),
         AdminForms.CompleteOnboarding(db, reference, "REMOTE_ACCESS", "Remote access"), AdminForms.RecordReview(db, reference),
@@ -1226,6 +1242,13 @@ public static partial class SelfTest
         Step("close", () => Submit(AdminForms.CloseTicket(db, ticket), ("Resolution", "Added two indexes")));
         Step("ticket detail", () => Detail.TicketSummary(db, ticket), s => s.Contains("Added two indexes") && s.Contains("Index review") ? null : "detail incomplete");
         Step("project quote", () => Submit(AdminForms.AddQuote(db, reference), ("Title", "Upgrade to 2022"), ("EstimatedHours", "12"), ("TicketRef", ticket)));
+        // the engagement page has no agreement reference to pass and hands over the client's name
+        // instead. usp_Quote_Add resolves either; what it cannot resolve is a CON-0000 reference
+        Step("and one quoted by client name, as the engagement page quotes it",
+            () => Submit(AdminForms.AddQuote(db, name), ("Title", "Health check"), ("Price", "1450")),
+            r => r.First is { Rows.Count: 1 } t && (string)t.Rows[0]["Title"] == "Health check" ? null : "quote not returned");
+        ExpectError("an engagement reference is not something a quote can be hung on",
+            () => Submit(AdminForms.AddQuote(db, "CON-9999"), ("Title", "Nothing")), "not found");
 
         // pre-paid hours, bought at the start; more business-hours work so some of it goes beyond the included hours
         var more = raised.Date.AddDays(1).AddHours(10);
@@ -1301,6 +1324,35 @@ public static partial class SelfTest
         Step("new consultancy engagement", () => Submit(AdminForms.NewEngagement(db, name), ("ClientName", name), ("Name", "Warehouse migration"),
                 ("BillingMode", "Day rate"), ("DayRate", "600"), ("StartDate", D(lastMonth)), ("PurchaseOrder", "PO-1234"), ("EngagementRef", conRef)),
             r => r.First is { Rows.Count: 1 } t && (string)t.Rows[0]["EngagementRef"] == conRef ? null : "engagement not returned");
+        // the other way in: a client who has bought a project and no support at all
+        var projectName = $"Selftest Projects Ltd {stamp}";
+        var projectRef = $"CSTP-{stamp}";
+        Step("new client for project work, in one submission", () => Submit(AdminForms.NewClientForProject(db),
+                ("ClientName", projectName), ("ContactName", "Sam Buyer"), ("ContactEmail", "sam@selftest.example"),
+                ("ClientNotes", "Came in through the health check"), ("Name", "Estate health check"),
+                ("BillingMode", "Per instance"), ("FirstUnitPrice", "1450"), ("ExtraUnitPrice", "350"),
+                ("UnitCount", "4"), ("PriceCap", "3500"), ("StartDate", D(DateTime.Today)), ("EngagementRef", projectRef)),
+            r => AdminForms.CreatedEngagementRef(r) == projectRef ? null : AdminForms.CreatedEngagementRef(r) ?? "(nothing)");
+        Step("they exist, with the contact and the notes that came in on the same form",
+            () => db.Query("SELECT c.Notes, ContactCount = (SELECT COUNT(*) FROM dbo.Contact ct WHERE ct.ClientId = c.ClientId) "
+                           + "FROM dbo.Client c WHERE c.ClientName = @n", ("@n", projectName)),
+            t => t.Rows.Count == 1 && (string)t.Rows[0]["Notes"] == "Came in through the health check"
+                 && (int)t.Rows[0]["ContactCount"] == 1 ? null : "client, notes or contact missing");
+        Step("and no Molehill Watch agreement was created for them, which is the whole point",
+            () => db.Scalar("SELECT COUNT(*) FROM dbo.Agreement a JOIN dbo.Client c ON c.ClientId = a.ClientId "
+                            + "WHERE c.ClientName = @n", ("@n", projectName)),
+            n => (int)n! == 0 ? null : $"{n} agreement(s) created");
+        Step("the per-instance price came through the engagement half of the form",
+            () => db.Query("SELECT UnitTotal, PriceCap FROM dbo.Engagement WHERE EngagementRef = @r", ("@r", projectRef)),
+            t => t.Rows.Count == 1 && (decimal)t.Rows[0]["UnitTotal"] == 2500m && (decimal)t.Rows[0]["PriceCap"] == 3500m
+                 ? null : $"UnitTotal {t.Rows[0]["UnitTotal"]}, cap {t.Rows[0]["PriceCap"]}");
+        Step("and they can be quoted, having no agreement to quote against",
+            () => Submit(AdminForms.AddQuote(db, projectName), ("Title", "Phase two"), ("Price", "4000")),
+            r => r.First is { Rows.Count: 1 } ? null : "quote not returned");
+        ExpectError("starting them a second time is refused, and points at the engagement form",
+            () => Submit(AdminForms.NewClientForProject(db), ("ClientName", projectName), ("Name", "Again")),
+            "New consultancy engagement");
+
         Step("log a full day", () => Submit(AdminForms.LogWork(db, conRef), ("WorkDate", D(lastMonth.AddDays(1))), ("Days", "1"), ("Description", "Discovery")));
         Step("log three hours the next day", () => Submit(AdminForms.LogWork(db, conRef), ("WorkDate", D(lastMonth.AddDays(2))), ("Hours", "3"), ("Description", "Schema review")));
         Step("log two hours and three more the day after", () =>
