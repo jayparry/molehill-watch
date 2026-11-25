@@ -1,7 +1,7 @@
 /*
 ===============================================================================
  Molehill Watch - SQL Server Support Package
- Molehill Admin: clients, engagements, tickets, time and billing  Version 2.7.1
+ Molehill Admin: clients, engagements, tickets, time and billing  Version 2.8.0
  Molehill Data Services  -  jay@jayparry.co.uk  -  molehilldataservices.com
 -------------------------------------------------------------------------------
  Runs on YOUR OWN SQL Server (Express is fine), not on client servers.
@@ -405,6 +405,70 @@ CREATE TABLE dbo.Quote (
     CreatedAt      datetime2(0)  NOT NULL CONSTRAINT DF_Quote_CreatedAt DEFAULT SYSDATETIME());
 GO
 
+-- 2.8.0: an instance is the CLIENT'S server, and an agreement or a piece of work COVERS some of
+-- them. Before this, dbo.Instance required an AgreementId, so a health check sold per instance had
+-- nowhere to name the instances it checked and stored a bare UnitCount instead - which is why the
+-- health-check credit on the price sheet ("provided the agreement covers the same instances") could
+-- not be computed at all. These two tables are what make it expressible.
+
+-- What one support agreement covers, and on what terms. PricedAsFullInstance and AgreedMonthlyFee
+-- live here rather than on dbo.Instance because they are terms of a coverage, not facts about the
+-- server: "this busy readable secondary is quoted as a full instance" is something an agreement
+-- says, and the same server re-covered later is free to say something else.
+--
+-- Append-only on the pricing columns: repricing closes the row and opens a new one
+-- (usp_Agreement_RepriceInstance), so a past billing cycle always re-derives the fee it charged.
+IF OBJECT_ID(N'dbo.AgreementInstance') IS NULL
+BEGIN
+    CREATE TABLE dbo.AgreementInstance (
+        AgreementInstanceId  int IDENTITY(1,1) CONSTRAINT PK_AgreementInstance PRIMARY KEY,
+        AgreementId          int          NOT NULL CONSTRAINT FK_AgreementInstance_Agreement REFERENCES dbo.Agreement (AgreementId),
+        InstanceId           int          NOT NULL CONSTRAINT FK_AgreementInstance_Instance REFERENCES dbo.Instance (InstanceId),
+        CoveredFrom          date         NOT NULL,
+        CoveredTo            date         NULL,      -- last day covered; NULL = still covered
+        PricedAsFullInstance bit          NOT NULL CONSTRAINT DF_AgreementInstance_Full DEFAULT 0,
+        AgreedMonthlyFee     decimal(9,2) NULL,      -- bespoke price; required for non-production
+        CONSTRAINT CK_AgreementInstance_Dates CHECK (CoveredTo IS NULL OR CoveredTo >= CoveredFrom));
+    CREATE INDEX IX_AgreementInstance_Agreement ON dbo.AgreementInstance (AgreementId);
+    CREATE INDEX IX_AgreementInstance_Instance ON dbo.AgreementInstance (InstanceId);
+END
+GO
+
+-- Which instances a piece of work looked at. A health check priced per instance derives its unit
+-- count from this rather than being told a number, and the health-check credit is the intersection
+-- of this and what the agreement covers.
+IF OBJECT_ID(N'dbo.EngagementInstance') IS NULL
+CREATE TABLE dbo.EngagementInstance (
+    EngagementId int NOT NULL CONSTRAINT FK_EngagementInstance_Engagement REFERENCES dbo.Engagement (EngagementId),
+    InstanceId   int NOT NULL CONSTRAINT FK_EngagementInstance_Instance REFERENCES dbo.Instance (InstanceId),
+    CONSTRAINT PK_EngagementInstance PRIMARY KEY (EngagementId, InstanceId));
+GO
+
+-- What a quote is made of. usp_Quote_Add still takes a single title and price for the simple case;
+-- lines are for a quote that itemises, and they are what usp_Quote_Html prints.
+IF OBJECT_ID(N'dbo.QuoteLine') IS NULL
+CREATE TABLE dbo.QuoteLine (
+    QuoteLineId int IDENTITY(1,1) CONSTRAINT PK_QuoteLine PRIMARY KEY,
+    QuoteId     int           NOT NULL CONSTRAINT FK_QuoteLine_Quote REFERENCES dbo.Quote (QuoteId),
+    SortOrder   int           NOT NULL CONSTRAINT DF_QuoteLine_Sort DEFAULT 0,
+    Description nvarchar(400) NOT NULL,
+    Quantity    decimal(9,2)  NULL,
+    UnitPrice   decimal(10,2) NULL,
+    Amount      decimal(10,2) NULL);
+GO
+
+-- When work is done, and what that multiplies the rate by. Rows rather than columns so the bands
+-- and their multipliers are changeable without a schema change; the clock boundaries that decide
+-- which band a time falls in are settings, beside BusinessHoursStart and BusinessHoursEnd.
+IF OBJECT_ID(N'dbo.RateBand') IS NULL
+CREATE TABLE dbo.RateBand (
+    Band               varchar(20)   NOT NULL CONSTRAINT PK_RateBand PRIMARY KEY,
+    Description        nvarchar(200) NOT NULL,
+    Multiplier         decimal(5,2)  NOT NULL CONSTRAINT CK_RateBand_Multiplier CHECK (Multiplier > 0),
+    CountsAsOutOfHours bit           NOT NULL,
+    SortOrder          int           NOT NULL);
+GO
+
 -- 1.4.0: pre-paid support hours, bought as an add-on at a negotiated rate.
 -- They cover business-hours support only; out-of-hours work is always billed at the out-of-hours rate.
 IF OBJECT_ID(N'dbo.PrepaidPackage') IS NULL
@@ -630,6 +694,230 @@ IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.TimeEntry
     ALTER TABLE dbo.TimeEntry ALTER COLUMN TicketId int NULL;
 GO
 
+/*-----------------------------------------------------------------------------
+  2.8.0: instances and tickets move from the agreement to the client.
+
+  An instance is the client's server. An agreement covers some of them
+  (dbo.AgreementInstance) and a piece of work looks at some of them
+  (dbo.EngagementInstance). A ticket belongs to the client and names the piece of
+  work that bills it.
+
+  Two things to know before reading the rest.
+
+  First, the pre-flight below cannot stop the script. Deciding which of two
+  agreements owns a duplicated instance needs a person, and an installer that
+  runs as one file has no way to stop, ask and carry on. The only hard stop in
+  this script is the RAISERROR WITH LOG at the top, which kills the connection
+  and needs sysadmin, and would leave a half-applied upgrade with nothing said
+  about why. So a failed check records itself in #MhBlock, prints loudly, and
+  the steps that cannot be undone are skipped.
+
+  Second, and because of the first: the half-migrated shape - both AgreementId
+  and ClientId present, AgreementInstance filled in - has to be a shape the
+  whole application works in, because somebody could be sitting in it for a
+  while. Everything from here on reads the new columns and never needs the old
+  ones to be gone.
+-----------------------------------------------------------------------------*/
+
+IF OBJECT_ID(N'tempdb..#MhBlock') IS NOT NULL DROP TABLE #MhBlock;
+CREATE TABLE #MhBlock (Reason nvarchar(200), Detail nvarchar(1000));
+GO
+
+-- 1. Two live instances of the same name for one client, which the unique index below cannot hold.
+--    Checked case-INSENSITIVELY on purpose: the default collation means ST-SQL01 and st-sql01 are
+--    not duplicates today, because they sit on different agreements and are never compared, but
+--    they will collide the moment the index is created. Reported separately or it reads as a
+--    false positive.
+IF COL_LENGTH(N'dbo.Instance', N'AgreementId') IS NOT NULL
+EXEC(N'
+INSERT #MhBlock (Reason, Detail)
+SELECT N''Same instance name covered twice for one client'',
+       c.ClientName + N'': "'' + MIN(i.InstanceName) + N''" on '' + CONVERT(nvarchar(10), COUNT(*)) + N'' agreements ('' +
+       STUFF((SELECT N'', '' + a2.AgreementRef FROM dbo.Instance i2
+              JOIN dbo.Agreement a2 ON a2.AgreementId = i2.AgreementId
+              WHERE a2.ClientId = c.ClientId AND i2.InstanceName = MIN(i.InstanceName) AND i2.CoveredTo IS NULL
+              ORDER BY a2.AgreementRef FOR XML PATH(N''''), TYPE).value(N''.'', N''nvarchar(max)''), 1, 2, N'''') + N'')''
+FROM dbo.Instance i
+JOIN dbo.Agreement a ON a.AgreementId = i.AgreementId
+JOIN dbo.Client c ON c.ClientId = a.ClientId
+WHERE i.CoveredTo IS NULL
+GROUP BY c.ClientId, c.ClientName, UPPER(i.InstanceName)
+HAVING COUNT(DISTINCT i.AgreementId) > 1;');
+GO
+
+-- 2. An instance that would end up covered by two agreements at once. The filtered index catches
+--    the open case; this also reports ranges that overlapped in the PAST, which the index cannot
+--    see and which mean one server''s monthly fee was on two agreements'' invoices for those
+--    months. That is a warning about data that already exists, not something this change causes.
+IF COL_LENGTH(N'dbo.Instance', N'AgreementId') IS NOT NULL
+EXEC(N'
+INSERT #MhBlock (Reason, Detail)
+SELECT DISTINCT N''Instance covered by two agreements over the same dates'',
+       c.ClientName + N'': "'' + i.InstanceName + N''" on '' + a.AgreementRef + N'' and '' + a2.AgreementRef
+FROM dbo.Instance i
+JOIN dbo.Agreement a ON a.AgreementId = i.AgreementId
+JOIN dbo.Client c ON c.ClientId = a.ClientId
+JOIN dbo.Instance i2 ON i2.InstanceName = i.InstanceName AND i2.InstanceId > i.InstanceId
+JOIN dbo.Agreement a2 ON a2.AgreementId = i2.AgreementId AND a2.ClientId = a.ClientId AND a2.AgreementId <> a.AgreementId
+WHERE i.CoveredFrom <= ISNULL(i2.CoveredTo, ''9999-12-31'')
+  AND i2.CoveredFrom <= ISNULL(i.CoveredTo, ''9999-12-31'');');
+GO
+
+-- 3. A ticket whose agreement has no engagement to point it at. Should be impossible - the 2.0.0
+--    block made Agreement.EngagementId NOT NULL - but it only did so when every agreement already
+--    had one, so a database that failed that backfill is still legal and still nullable. Without
+--    this check the NOT NULL below would quietly skip and leave tickets no billing path can find.
+IF COL_LENGTH(N'dbo.Ticket', N'AgreementId') IS NOT NULL
+EXEC(N'
+INSERT #MhBlock (Reason, Detail)
+SELECT N''Ticket on an agreement with no engagement'', t.TicketRef + N'' on '' + a.AgreementRef
+FROM dbo.Ticket t JOIN dbo.Agreement a ON a.AgreementId = t.AgreementId
+WHERE a.EngagementId IS NULL;');
+GO
+
+-- 4. Time whose engagement disagrees with its ticket''s. usp_Time_Log derives one from the other,
+--    so this should be empty; it matters because after this change the ticket carries the
+--    engagement, so a row that disagrees today would change which engagement bills that work -
+--    and for time already invoiced, which engagement a past invoice looks like it belongs to.
+IF COL_LENGTH(N'dbo.Ticket', N'AgreementId') IS NOT NULL
+EXEC(N'
+INSERT #MhBlock (Reason, Detail)
+SELECT N''Time entry disagrees with its ticket about the engagement'',
+       N''TimeEntry '' + CONVERT(nvarchar(10), e.TimeEntryId) + N'' on '' + t.TicketRef
+FROM dbo.TimeEntry e
+JOIN dbo.Ticket t ON t.TicketId = e.TicketId
+JOIN dbo.Agreement a ON a.AgreementId = t.AgreementId
+WHERE e.EngagementId <> a.EngagementId;');
+GO
+
+-- 5. Invoice lines pointing at instances or tickets that are not there. InvoiceLine.InstanceId and
+--    .TicketId are plain ints with no foreign key, so this can already be true. Reported, never
+--    blocking, and NO foreign keys are added here: doing that would turn old bad data into a
+--    failed upgrade.
+INSERT #MhBlock (Reason, Detail)
+SELECT N'Invoice line points at an instance that is gone (reported only)',
+       N'Invoice line ' + CONVERT(nvarchar(10), l.InvoiceLineId)
+FROM dbo.InvoiceLine l
+WHERE l.InstanceId IS NOT NULL AND NOT EXISTS (SELECT 1 FROM dbo.Instance i WHERE i.InstanceId = l.InstanceId);
+
+INSERT #MhBlock (Reason, Detail)
+SELECT N'Invoice line points at a ticket that is gone (reported only)',
+       N'Invoice line ' + CONVERT(nvarchar(10), l.InvoiceLineId)
+FROM dbo.InvoiceLine l
+WHERE l.TicketId IS NOT NULL AND NOT EXISTS (SELECT 1 FROM dbo.Ticket t WHERE t.TicketId = l.TicketId);
+GO
+
+-- say what was found, loudly, because nothing else will
+IF EXISTS (SELECT 1 FROM #MhBlock)
+BEGIN
+    PRINT N'';
+    PRINT N'*** 2.8.0 upgrade: the data needs tidying before instances and tickets can finish moving.';
+    PRINT N'*** Everything below that cannot be undone has been SKIPPED. Nothing is lost and the';
+    PRINT N'*** application works as it is; fix these and run the upgrade again.';
+    PRINT N'';
+    DECLARE @r nvarchar(200), @d nvarchar(1000), @last nvarchar(200) = N'';
+    DECLARE mh CURSOR LOCAL FAST_FORWARD FOR SELECT Reason, Detail FROM #MhBlock ORDER BY Reason, Detail;
+    OPEN mh; FETCH NEXT FROM mh INTO @r, @d;
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        IF @r <> @last BEGIN PRINT N'  ' + @r + N':'; SET @last = @r; END
+        PRINT N'      ' + @d;
+        FETCH NEXT FROM mh INTO @r, @d;
+    END
+    CLOSE mh; DEALLOCATE mh;
+    PRINT N'';
+END
+GO
+
+-- reported-only rows must not block anything
+DELETE FROM #MhBlock WHERE Reason LIKE N'%(reported only)';
+GO
+
+/*--- add, all nullable first, exactly as Invoice.ClientId was in 2.0.0 ---*/
+
+IF COL_LENGTH(N'dbo.Instance', N'ClientId') IS NULL
+    ALTER TABLE dbo.Instance ADD ClientId int NULL CONSTRAINT FK_Instance_Client REFERENCES dbo.Client (ClientId);
+
+IF COL_LENGTH(N'dbo.Ticket', N'ClientId') IS NULL
+    ALTER TABLE dbo.Ticket ADD ClientId int NULL CONSTRAINT FK_Ticket_Client REFERENCES dbo.Client (ClientId),
+                               EngagementId int NULL CONSTRAINT FK_Ticket_Engagement REFERENCES dbo.Engagement (EngagementId);
+
+-- a rate this client gets instead of the house one, because what we charge is ours to decide.
+-- NULL means "whatever the price list or the settings say".
+IF COL_LENGTH(N'dbo.Client', N'DayRate') IS NULL
+    ALTER TABLE dbo.Client ADD DayRate           decimal(9,2) NULL,
+                               HourlyRate        decimal(9,2) NULL,
+                               BusinessHoursRate decimal(9,2) NULL,
+                               OutOfHoursRate    decimal(9,2) NULL;
+
+-- what this piece of time was actually charged at, decided when it was logged. ChargeRate is
+-- stored rather than worked out again later, so changing how a rate is resolved - or how the
+-- multiplier rounds - can never move a figure on an invoice already sent.
+IF COL_LENGTH(N'dbo.TimeEntry', N'ChargeRate') IS NULL
+    ALTER TABLE dbo.TimeEntry ADD RateBand       varchar(20)  NULL,
+                                  BaseRate       decimal(9,2) NULL,
+                                  RateMultiplier decimal(5,2) NULL,
+                                  ChargeRate     decimal(9,2) NULL,
+                                  RateSource     varchar(20)  NULL;   -- which rule gave the rate, for explaining an old invoice
+
+IF COL_LENGTH(N'dbo.Quote', N'EngagementId') IS NULL
+    ALTER TABLE dbo.Quote ADD EngagementId  int           NULL CONSTRAINT FK_Quote_Engagement REFERENCES dbo.Engagement (EngagementId),
+                              ExpiresOn     date          NULL,
+                              DeclineReason nvarchar(400) NULL;
+GO
+
+-- the old column stops being required, so an instance can be added for a client who has no
+-- agreement at all. It is dropped further down once everything is across.
+IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.Instance') AND name = N'AgreementId' AND is_nullable = 0)
+    ALTER TABLE dbo.Instance ALTER COLUMN AgreementId int NULL;
+
+IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.Ticket') AND name = N'AgreementId' AND is_nullable = 0)
+    ALTER TABLE dbo.Ticket ALTER COLUMN AgreementId int NULL;
+GO
+
+/*--- backfill. Wrapped in EXEC where it names a column a later batch drops, as 2.0.0 does. ---*/
+
+IF COL_LENGTH(N'dbo.Instance', N'AgreementId') IS NOT NULL
+    EXEC(N'UPDATE i SET i.ClientId = a.ClientId
+           FROM dbo.Instance i JOIN dbo.Agreement a ON a.AgreementId = i.AgreementId
+           WHERE i.ClientId IS NULL;');
+
+IF COL_LENGTH(N'dbo.Ticket', N'AgreementId') IS NOT NULL
+    EXEC(N'UPDATE t SET t.ClientId = a.ClientId, t.EngagementId = a.EngagementId
+           FROM dbo.Ticket t JOIN dbo.Agreement a ON a.AgreementId = t.AgreementId
+           WHERE t.ClientId IS NULL;');
+GO
+
+-- every instance''s existing coverage becomes a row. Inserted in (AgreementId, CoveredFrom,
+-- InstanceId) order so that even AgreementInstanceId comes out aligned with InstanceId - nothing
+-- orders by it, and nothing should, but if anything ever does it will be right.
+IF COL_LENGTH(N'dbo.Instance', N'AgreementId') IS NOT NULL
+    EXEC(N'INSERT dbo.AgreementInstance (AgreementId, InstanceId, CoveredFrom, CoveredTo, PricedAsFullInstance, AgreedMonthlyFee)
+           SELECT i.AgreementId, i.InstanceId, i.CoveredFrom, i.CoveredTo, i.PricedAsFullInstance, i.AgreedMonthlyFee
+           FROM dbo.Instance i
+           WHERE i.AgreementId IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM dbo.AgreementInstance ai
+                             WHERE ai.AgreementId = i.AgreementId AND ai.InstanceId = i.InstanceId)
+           ORDER BY i.AgreementId, i.CoveredFrom, i.InstanceId;');
+GO
+
+-- a monitoring engagement looks at everything its agreement covers. Consultancy engagements get
+-- nothing: there is no record of what an old health check examined, and inventing one would create
+-- health-check credit out of nothing.
+INSERT dbo.EngagementInstance (EngagementId, InstanceId)
+SELECT a.EngagementId, ai.InstanceId
+FROM dbo.AgreementInstance ai
+JOIN dbo.Agreement a ON a.AgreementId = ai.AgreementId
+WHERE a.EngagementId IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM dbo.EngagementInstance ei
+                  WHERE ei.EngagementId = a.EngagementId AND ei.InstanceId = ai.InstanceId);
+GO
+
+-- a consultancy day is 8 hours, which is what the price sheet sells. Only touched where it is still
+-- the old 7.5, so a figure somebody has deliberately set is left alone.
+UPDATE dbo.Setting SET Value = N'8' WHERE Name = 'DayHours' AND Value IN (N'7.5', N'7.50');
+GO
+
 /*=============================================================================
   2. REFERENCE DATA
 =============================================================================*/
@@ -656,7 +944,7 @@ FROM (VALUES
     ('VatRatePct',          N'20',                             N'VAT rate applied when VatRegistered = 1.'),
     ('BusinessHoursStart',  N'09:00',                          N'UK local time.'),
     ('BusinessHoursEnd',    N'17:30',                          N'UK local time.'),
-    ('DayHours',            N'7.5',                            N'Hours in a consultancy day. Used to turn logged time into days and back.'),
+    ('DayHours',            N'8',                              N'Hours in a consultancy day. Used to turn logged time into days and back.'),
     ('ConsultancyBillingDays', N'14',                          N'How often consultancy work is invoiced, counted from the engagement''s start date. 14 = every two weeks.'),
     ('DayRateRounding',     N'HalfDay',                        N'How a day-rate engagement rounds each day worked: HalfDay, WholeDay or Exact.'),
     ('ConsultancyRefPrefix',N'CON',                            N'Consultancy engagement references look like CON-0001.'),
@@ -836,7 +1124,7 @@ CREATE OR ALTER FUNCTION dbo.fn_DayHours ()
 RETURNS decimal(5,2)
 AS
 BEGIN
-    RETURN ISNULL(NULLIF(TRY_CONVERT(decimal(5,2), dbo.fn_Setting('DayHours')), 0), 7.5);
+    RETURN ISNULL(NULLIF(TRY_CONVERT(decimal(5,2), dbo.fn_Setting('DayHours')), 0), 8);
 END
 GO
 
@@ -1357,8 +1645,15 @@ BEGIN
     SET NOCOUNT, XACT_ABORT ON;
     DECLARE @AgreementId int = dbo.fn_AgreementId(@Client);
     IF @AgreementId IS NULL BEGIN RAISERROR(N'Agreement or client "%s" not found.', 16, 1, @Client); RETURN; END
+    DECLARE @OwningClientId int = (SELECT ClientId FROM dbo.Agreement WHERE AgreementId = @AgreementId);
     IF EXISTS (SELECT 1 FROM dbo.Instance WHERE AgreementId = @AgreementId AND InstanceName = @InstanceName AND CoveredTo IS NULL)
     BEGIN RAISERROR(N'Instance "%s" is already covered on this agreement.', 16, 1, @InstanceName); RETURN; END
+    -- 2.8.0: an instance is the client's, so the name has to be free across the whole client and not
+    -- just this agreement. Checked case-insensitively, because the unique index that will enforce
+    -- it is: ST-SQL01 and st-sql01 on two agreements do not collide today, and will.
+    IF EXISTS (SELECT 1 FROM dbo.Instance
+               WHERE ClientId = @OwningClientId AND UPPER(InstanceName) = UPPER(@InstanceName) AND CoveredTo IS NULL)
+    BEGIN RAISERROR(N'This client already has a covered instance called "%s".', 16, 1, @InstanceName); RETURN; END
 
     IF @Platform NOT IN ('SqlServer', 'AzureSqlManagedInstance', 'AzureSqlDatabaseServer', 'AzureSqlDatabaseElasticPool')
     BEGIN RAISERROR(N'@Platform must be SqlServer, AzureSqlManagedInstance, AzureSqlDatabaseServer or AzureSqlDatabaseElasticPool.', 16, 1); RETURN; END
@@ -1384,10 +1679,15 @@ BEGIN
     IF @PrimaryInstanceName IS NOT NULL AND @PrimaryId IS NULL
         PRINT N'Note: primary instance "' + @PrimaryInstanceName + N'" not found on this agreement; add it first to link the secondary.';
 
-    INSERT dbo.Instance (AgreementId, InstanceName, Environment, Role, Platform, DatabaseCount, PricedAsFullInstance, AgreedMonthlyFee, AvailabilityGroup, PrimaryInstanceId,
+    INSERT dbo.Instance (ClientId, AgreementId, InstanceName, Environment, Role, Platform, DatabaseCount, PricedAsFullInstance, AgreedMonthlyFee, AvailabilityGroup, PrimaryInstanceId,
                          FciNodes, SqlVersion, Edition, OsVersion, CoveredFrom)
-    VALUES (@AgreementId, @InstanceName, @Environment, @Role, @Platform, @DatabaseCount, @PricedAsFullInstance, @AgreedMonthlyFee, @AvailabilityGroup, @PrimaryId,
+    VALUES (@OwningClientId, @AgreementId, @InstanceName, @Environment, @Role, @Platform, @DatabaseCount, @PricedAsFullInstance, @AgreedMonthlyFee, @AvailabilityGroup, @PrimaryId,
             @FciNodes, @SqlVersion, @Edition, @OsVersion, @CoveredFrom);
+    -- and the coverage row it is covered under. The old columns are written above as well, because
+    -- every read path is still on them until the second half of 2.8.0.
+    DECLARE @NewInstanceId int = CONVERT(int, SCOPE_IDENTITY());
+    INSERT dbo.AgreementInstance (AgreementId, InstanceId, CoveredFrom, PricedAsFullInstance, AgreedMonthlyFee)
+    VALUES (@AgreementId, @NewInstanceId, @CoveredFrom, @PricedAsFullInstance, @AgreedMonthlyFee);
     IF @Platform = 'AzureSqlManagedInstance'
         PRINT N'Azure SQL Managed Instance: priced as a standard production instance and counts towards the multi-server tiers.';
     IF @Platform IN ('AzureSqlDatabaseServer', 'AzureSqlDatabaseElasticPool') AND @Role = 'GeoReplica'
@@ -1418,10 +1718,23 @@ AS
 BEGIN
     SET NOCOUNT ON;
     DECLARE @AgreementId int = dbo.fn_AgreementId(@Client);
-    UPDATE dbo.Instance SET CoveredTo = ISNULL(@CoveredTo, CAST(dbo.fn_UkNow() AS date))
+    DECLARE @Ends date = ISNULL(@CoveredTo, CAST(dbo.fn_UkNow() AS date));
+    -- the instances this ended, so the coverage rows can be ended too. @@ROWCOUNT cannot be used
+    -- for that here: the second UPDATE would overwrite it before it was read.
+    DECLARE @Ended TABLE (InstanceId int);
+    UPDATE dbo.Instance SET CoveredTo = @Ends
+    OUTPUT inserted.InstanceId INTO @Ended
     WHERE AgreementId = @AgreementId AND InstanceName = @InstanceName AND CoveredTo IS NULL;
-    IF @@ROWCOUNT = 0 RAISERROR(N'Covered instance "%s" not found.', 16, 1, @InstanceName);
-    ELSE PRINT N'Coverage ended for ' + @InstanceName + N'. Remember: the monthly fee for a cycle is set by what is covered at the cycle start.';
+    IF NOT EXISTS (SELECT 1 FROM @Ended)
+        RAISERROR(N'Covered instance "%s" not found.', 16, 1, @InstanceName);
+    ELSE
+    BEGIN
+        UPDATE ai SET ai.CoveredTo = @Ends
+        FROM dbo.AgreementInstance ai
+        WHERE ai.AgreementId = @AgreementId AND ai.CoveredTo IS NULL
+          AND ai.InstanceId IN (SELECT InstanceId FROM @Ended);
+        PRINT N'Coverage ended for ' + @InstanceName + N'. Remember: the monthly fee for a cycle is set by what is covered at the cycle start.';
+    END
 END
 GO
 
@@ -1929,8 +2242,12 @@ BEGIN
     IF @RateType NOT IN ('BusinessHours', 'OutOfHours', 'ByTimeOfWork')
     BEGIN RAISERROR(N'@RateType must be BusinessHours, OutOfHours or ByTimeOfWork.', 16, 1); RETURN; END
 
-    INSERT dbo.Ticket (AgreementId, InstanceId, ContactId, Severity, WorkType, Title, Description, Channel, RaisedAt, ResponseDueAt, Status, RateType)
-    VALUES (@AgreementId, @InstanceId, @ContactId, @Severity, @WorkType, @Title, @Description, @Channel, @RaisedAt,
+    -- 2.8.0: a ticket belongs to the client and names the piece of work that bills it. Every
+    -- agreement has exactly one engagement (UQ_Agreement_Engagement), so there is nothing to
+    -- choose between here. AgreementId is still written: the read paths are on it until G2.
+    DECLARE @TicketEngagementId int = (SELECT EngagementId FROM dbo.Agreement WHERE AgreementId = @AgreementId);
+    INSERT dbo.Ticket (ClientId, EngagementId, AgreementId, InstanceId, ContactId, Severity, WorkType, Title, Description, Channel, RaisedAt, ResponseDueAt, Status, RateType)
+    VALUES (@ClientId, @TicketEngagementId, @AgreementId, @InstanceId, @ContactId, @Severity, @WorkType, @Title, @Description, @Channel, @RaisedAt,
             dbo.fn_ResponseDue(@RaisedAt, @Severity), 'Open', @RateType);
     IF @RateType = 'OutOfHours' PRINT N'Time on this ticket is charged at the out-of-hours rate.';
     ELSE IF @RateType = 'ByTimeOfWork' PRINT N'Time on this ticket is charged by when the work is done (out of hours outside Mon-Fri 09:00-17:30).';
@@ -3913,6 +4230,6 @@ DECLARE @Logo nvarchar(max) = CONVERT(nvarchar(max), N'data:image/png;base64,') 
 UPDATE dbo.Setting SET Value = @Logo WHERE Name = 'LogoDataUri' AND ISNULL(Value, N'') = N'';
 GO
 
-INSERT dbo.InstallHistory (Version) VALUES ('2.7.1');   -- bump with every schema change: Molehill Manager offers the upgrade
-PRINT N'Molehill Admin 2.7.1 installed.';
+INSERT dbo.InstallHistory (Version) VALUES ('2.8.0');   -- bump with every schema change: Molehill Manager offers the upgrade
+PRINT N'Molehill Admin 2.8.0 installed.';
 GO

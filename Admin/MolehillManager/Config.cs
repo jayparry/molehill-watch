@@ -294,6 +294,10 @@ public static class ConfigStore
                 return "Connected, but this database has no MolehillAdmin objects. Start Molehill Manager normally and it will offer to install it.";
             if (db.Scalar("SELECT COL_LENGTH(N'dbo.Instance', N'Platform')") == null)
                 return "This MolehillAdmin is from before the Azure SQL update. Start Molehill Manager normally and it will offer to upgrade it (your data is kept).";
+            // 2.8.0 moved instances and tickets onto the client. Probed by the table rather than by
+            // a column, because the column the old probe looked at is the one that moved.
+            if (db.Scalar("SELECT OBJECT_ID(N'dbo.AgreementInstance')") == null)
+                return "This MolehillAdmin is from before instances moved to the client. Start Molehill Manager normally and it will offer to upgrade it (your data is kept).";
             return null;
         }
         catch (Exception ex)

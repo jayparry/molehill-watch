@@ -22,8 +22,9 @@ public static class AdminInstaller
     // tables MolehillAdmin creates in dbo: a database already holding any of these (without being MolehillAdmin) is left alone
     private static readonly string[] OwnTables =
     {
-        "InstallHistory", "Setting", "BankHoliday", "ProductLifecycle", "PriceList", "Client", "Contact", "Agreement", "Instance",
-        "OnboardingItem", "PriceChange", "Ticket", "Invoice", "BillingCycle", "InvoiceLine", "TimeEntry", "WeeklyReportLog", "Quote"
+        "InstallHistory", "Setting", "BankHoliday", "ProductLifecycle", "PriceList", "RateBand", "Client", "Contact", "ContactPeriod",
+        "Agreement", "Engagement", "Instance", "AgreementInstance", "EngagementInstance", "OnboardingItem", "PriceChange", "Ticket",
+        "Invoice", "BillingCycle", "InvoiceLine", "TimeEntry", "WeeklyReportLog", "Quote", "QuoteLine", "PrepaidPackage", "PrepaidUsage"
     };
 
     public static string Script
@@ -61,7 +62,8 @@ public static class AdminInstaller
             using var cmd = conn.CreateCommand();
             cmd.CommandText = $"""
                 SELECT IsInstalled = CASE WHEN OBJECT_ID(N'dbo.usp_Dashboard') IS NOT NULL AND OBJECT_ID(N'dbo.Agreement') IS NOT NULL THEN 1 ELSE 0 END,
-                       IsCurrent = CASE WHEN COL_LENGTH(N'dbo.Instance', N'Platform') IS NOT NULL THEN 1 ELSE 0 END,
+                       IsCurrent = CASE WHEN OBJECT_ID(N'dbo.AgreementInstance') IS NOT NULL
+                                             AND COL_LENGTH(N'dbo.Instance', N'Platform') IS NOT NULL THEN 1 ELSE 0 END,
                        Clashes   = STUFF((SELECT N', dbo.' + name FROM sys.tables WHERE schema_id = SCHEMA_ID(N'dbo')
                                           AND name IN ({string.Join(", ", OwnTables.Select(t => $"N'{t}'"))}) ORDER BY name
                                           FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N''),

@@ -1203,6 +1203,57 @@ public static partial class SelfTest
         Check("AG secondary at the secondary rate", Fee("ST-SQL03") == (decimal)price["SecondaryReplicaFee"], $"£{Fee("ST-SQL03")}");
         Check("agreed fee used for non-production", Fee("ST-DEV01") == 95.50m, $"£{Fee("ST-DEV01")}");
 
+        // ---- 2.8.0: an instance is the client's, and an agreement covers it. Both halves are
+        // written while the read paths are still on the old column, so both are checked.
+        Step("a new instance is the client's, not the agreement's",
+            () => db.Query(@"SELECT i.ClientId, a.ClientId AS AgreementClientId
+                             FROM dbo.Instance i JOIN dbo.Agreement a ON a.AgreementRef = @r
+                             WHERE i.AgreementId = a.AgreementId AND i.InstanceName = 'ST-SQL01'", ("@r", reference)),
+            t => t.Rows.Count == 1 && t.Rows[0]["ClientId"] is int c && c == (int)t.Rows[0]["AgreementClientId"]
+                 ? null : "ClientId missing or not the agreement's client");
+        Step("and the agreement has a coverage row saying so, matching the instance exactly",
+            () => db.Query(@"SELECT Mismatched = COUNT(*)
+                             FROM dbo.Instance i
+                             JOIN dbo.Agreement a ON a.AgreementId = i.AgreementId AND a.AgreementRef = @r
+                             LEFT JOIN dbo.AgreementInstance ai ON ai.InstanceId = i.InstanceId AND ai.AgreementId = i.AgreementId
+                             WHERE ai.AgreementInstanceId IS NULL
+                                OR ai.CoveredFrom <> i.CoveredFrom
+                                OR ISNULL(CONVERT(varchar(10), ai.CoveredTo), 'x') <> ISNULL(CONVERT(varchar(10), i.CoveredTo), 'x')
+                                OR ai.PricedAsFullInstance <> i.PricedAsFullInstance
+                                OR ISNULL(CONVERT(varchar(20), ai.AgreedMonthlyFee), 'x') <> ISNULL(CONVERT(varchar(20), i.AgreedMonthlyFee), 'x')",
+                           ("@r", reference)),
+            t => (int)t.Rows[0]["Mismatched"] == 0 ? null : $"{t.Rows[0]["Mismatched"]} coverage row(s) disagree with their instance");
+        // the commercial terms of a coverage - what it is priced as, and any agreed fee - belong to
+        // the coverage, so check the ones that are not simply NULL came across
+        Step("the agreed fee is on the coverage, not just the instance",
+            () => db.Query(@"SELECT ai.AgreedMonthlyFee FROM dbo.AgreementInstance ai
+                             JOIN dbo.Instance i ON i.InstanceId = ai.InstanceId
+                             JOIN dbo.Agreement a ON a.AgreementId = ai.AgreementId AND a.AgreementRef = @r
+                             WHERE i.InstanceName = 'ST-DEV01'", ("@r", reference)),
+            t => t.Rows.Count == 1 && (decimal)t.Rows[0]["AgreedMonthlyFee"] == 95.50m
+                 ? null : $"{(t.Rows.Count == 0 ? "no coverage row" : t.Rows[0]["AgreedMonthlyFee"].ToString())}");
+        // the name has to be free across the client now, not just the agreement, because that is
+        // what the unique index will enforce - and case-insensitively, which is the trap
+        ExpectError("the same instance name twice on one agreement is refused",
+            () => Submit(AdminForms.AddInstance(db, reference), ("InstanceName", "ST-SQL01"), ("SqlVersion", "2019")),
+            "already covered on this agreement");
+        Step("ending coverage ends the coverage row too, not just the instance",
+            () =>
+            {
+                Submit(AdminForms.AddInstance(db, reference), ("InstanceName", "ST-GOING"), ("SqlVersion", "2022"),
+                       // covered from today, so it is not covered at the billed cycle's start and
+                       // cannot add a fee line the billing assertions below are counting
+                       ("CoveredFrom", D(DateTime.Today)));
+                Submit(AdminForms.RemoveInstance(db, reference, "ST-GOING"));
+                return db.Query(@"SELECT i.CoveredTo, ai.CoveredTo AS CoverEnds
+                                  FROM dbo.Instance i
+                                  JOIN dbo.Agreement a ON a.AgreementId = i.AgreementId AND a.AgreementRef = @r
+                                  JOIN dbo.AgreementInstance ai ON ai.InstanceId = i.InstanceId
+                                  WHERE i.InstanceName = 'ST-GOING'", ("@r", reference));
+            },
+            t => t.Rows.Count == 1 && t.Rows[0]["CoveredTo"] is DateTime ended && t.Rows[0]["CoverEnds"] is DateTime cover && cover == ended
+                 ? null : "the instance and its coverage row do not agree about when cover ended");
+
         Step("onboarding item done", () => Submit(AdminForms.CompleteOnboarding(db, reference, "REMOTE_ACCESS", ""), ("Notes", "VPN")));
         Step("onboarding recorded", () => Queries.Onboarding(db, reference),
             t => t.Rows.Cast<DataRow>().Any(r => (string)r["Code"] == "REMOTE_ACCESS" && r["Done"] is DateTime) ? null : "not marked done");
@@ -1220,6 +1271,15 @@ public static partial class SelfTest
             ("Title", "Slow queries"), ("Severity", "Critical"), ("InstanceName", "ST-SQL01"), ("RaisedAt", raised.ToString("yyyy-MM-dd HH:mm")),
             ("Description", "Reports timing out")), r => r.First is { Rows.Count: 1 } ? null : "no ticket returned");
         var ticket = opened?.First?.Rows[0]["TicketRef"] as string ?? "MW-?";
+        // a ticket belongs to the client and names the work that bills it
+        Step("a ticket knows its client and the work that bills it",
+            () => db.Query(@"SELECT t.ClientId, t.EngagementId, a.ClientId AS AgreementClientId, a.EngagementId AS AgreementEngagementId
+                             FROM dbo.Ticket t JOIN dbo.Agreement a ON a.AgreementId = t.AgreementId
+                             WHERE a.AgreementRef = @r", ("@r", reference)),
+            t => t.Rows.Count > 0 && t.Rows.Cast<DataRow>().All(r =>
+                     r["ClientId"] is int tc && tc == (int)r["AgreementClientId"]
+                     && r["EngagementId"] is int te && te == (int)r["AgreementEngagementId"])
+                 ? null : "a ticket is missing its client or its engagement");
         Step("respond", () => Submit(AdminForms.RespondTicket(db, ticket), ("RespondedAt", raised.AddMinutes(30).ToString("yyyy-MM-dd HH:mm"))));
         Step("estimate sent", () => Submit(AdminForms.EstimateTicket(db, ticket), ("EstimateHours", "3")));
         Step("estimate approved", () => Submit(AdminForms.EstimateTicket(db, ticket), ("Approved", "1")));
@@ -1526,6 +1586,20 @@ public static partial class SelfTest
         Step("removed instance keeps its history", () => Queries.Instances(db, reference),
             t => t.Rows.Cast<DataRow>().Any(r => (string)r["Instance"] == "ST-DEV01" && ((string)r["Cover"]).StartsWith("Ends")) ? null : "cover not ended");
         Step("new agreement for the existing client", () => Submit(AdminForms.NewAgreement(db), ("ClientName", name), ("StartDate", D(DateTime.Today.AddMonths(2))), ("AgreementRef", reference + "b")));
+
+        // A second agreement for the same client is the only way to reach the client-wide name
+        // check: on one agreement the older per-agreement check fires first and says something
+        // different, so asserting on the wording is what tells the two apart. A mutation pass
+        // found both of these passing for the wrong reason when they were written against one
+        // agreement and matched on the word "already".
+        ExpectError("the same instance name on the client's other agreement is refused",
+            () => Submit(AdminForms.AddInstance(db, reference + "b"), ("InstanceName", "ST-SQL01"), ("SqlVersion", "2019")),
+            "This client already has");
+        ExpectError("and refused whatever case it is typed in",
+            () => Submit(AdminForms.AddInstance(db, reference + "b"), ("InstanceName", "st-sql01"), ("SqlVersion", "2019")),
+            "This client already has");
+        Step("a name the client is not using is still accepted on the other agreement",
+            () => Submit(AdminForms.AddInstance(db, reference + "b"), ("InstanceName", "ST-SQL99"), ("SqlVersion", "2022")));
 
         // the screens over the new data
         Application.Init(new FakeDriver(), null);
