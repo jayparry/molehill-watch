@@ -1254,6 +1254,70 @@ public static partial class SelfTest
             t => t.Rows.Count == 1 && t.Rows[0]["CoveredTo"] is DateTime ended && t.Rows[0]["CoverEnds"] is DateTime cover && cover == ended
                  ? null : "the instance and its coverage row do not agree about when cover ended");
 
+        // ---- 2.8.0 G2b: the instance procedures find their row by client, and refuse to guess.
+        // The three UPDATEs behind these used to key on (AgreementId, InstanceName) and check only
+        // for no rows, never for too many: pointed at the client they could match two and would
+        // silently have changed both. The only way to make that shape now is a direct INSERT.
+        Step("an ambiguous instance name is refused rather than guessed at", () =>
+        {
+            db.Execute(@"INSERT dbo.Instance (ClientId, AgreementId, InstanceName, Environment, Role, Platform, CoveredFrom)
+                         SELECT i.ClientId, i.AgreementId, i.InstanceName, i.Environment, i.Role, i.Platform, i.CoveredFrom
+                         FROM dbo.Instance i JOIN dbo.Agreement a ON a.AgreementId = i.AgreementId
+                         WHERE a.AgreementRef = @r AND i.InstanceName = 'ST-SQL02' AND i.CoveredTo IS NULL", ("@r", reference));
+            var refused = 0;
+            try { Submit(AdminForms.UpdateInstance(db, reference, "ST-SQL02"), ("Notes", "which one?")); }
+            catch (Exception ex) when (ex.Message.Contains("More than one")) { refused++; }
+            try { Submit(AdminForms.RiskAcceptance(db, reference, "ST-SQL02"), ("AcceptedBy", "Pat")); }
+            catch (Exception ex) when (ex.Message.Contains("More than one")) { refused++; }
+            try { Submit(AdminForms.RemoveInstance(db, reference, "ST-SQL02")); }
+            catch (Exception ex) when (ex.Message.Contains("More than one")) { refused++; }
+            // tidy up, so nothing after this sees a shape the guards forbid
+            db.Execute(@"DELETE FROM dbo.Instance WHERE InstanceId = (SELECT MAX(i.InstanceId) FROM dbo.Instance i
+                         JOIN dbo.Agreement a ON a.AgreementId = i.AgreementId
+                         WHERE a.AgreementRef = @r AND i.InstanceName = 'ST-SQL02')", ("@r", reference));
+            return refused;
+        }, n => (int)n! == 3 ? null : $"only {n} of 3 procedures refused");
+
+        // coverage is a row, so a price change closes it and opens another. That is what keeps a
+        // cycle that has already been billed able to re-derive the fee it charged - and it is the
+        // only way an agreed fee can be changed, which usp_Instance_Update has never allowed.
+        Step("repricing a server closes its cover and opens a new one", () =>
+        {
+            db.Proc("dbo.usp_Agreement_RepriceInstance", ("@Agreement", reference), ("@InstanceName", "ST-DEV01"),
+                    ("@AgreedMonthlyFee", 125.00m), ("@From", DateTime.Today));
+            return db.Query(@"SELECT ai.CoveredFrom, ai.CoveredTo, ai.AgreedMonthlyFee
+                              FROM dbo.AgreementInstance ai
+                              JOIN dbo.Instance i ON i.InstanceId = ai.InstanceId
+                              JOIN dbo.Agreement a ON a.AgreementId = ai.AgreementId AND a.AgreementRef = @r
+                              WHERE i.InstanceName = 'ST-DEV01' ORDER BY ai.CoveredFrom", ("@r", reference));
+        }, t => t.Rows.Count == 2
+                && (decimal)t.Rows[0]["AgreedMonthlyFee"] == 95.50m && t.Rows[0]["CoveredTo"] is DateTime
+                && (decimal)t.Rows[1]["AgreedMonthlyFee"] == 125.00m && t.Rows[1]["CoveredTo"] is DBNull
+                ? null : $"{t.Rows.Count} coverage row(s), not an old closed one and a new open one");
+        Step("the old fee is what it charged before, and the new one from the day it changed",
+            () => db.Query(@"SELECT Was = (SELECT MonthlyFee FROM dbo.fn_AgreementFees(a.AgreementId, DATEADD(day, -1, CAST(@today AS date))) f
+                                           WHERE f.InstanceName = 'ST-DEV01'),
+                                    Now = (SELECT MonthlyFee FROM dbo.fn_AgreementFees(a.AgreementId, CAST(@today AS date)) f
+                                           WHERE f.InstanceName = 'ST-DEV01')
+                             FROM dbo.Agreement a WHERE a.AgreementRef = @r", ("@r", reference), ("@today", DateTime.Today)),
+            t => (decimal)t.Rows[0]["Was"] == 95.50m && (decimal)t.Rows[0]["Now"] == 125.00m
+                 ? null : $"was {t.Rows[0]["Was"]}, now {t.Rows[0]["Now"]}");
+        ExpectError("and a non-production server cannot have its agreed fee taken away",
+            () => db.Proc("dbo.usp_Agreement_RepriceInstance", ("@Agreement", reference), ("@InstanceName", "ST-DEV01"),
+                          ("@ClearAgreedFee", true), ("@From", DateTime.Today.AddDays(1))), "agreed fee");
+        ExpectError("repricing from a date inside the current cover is refused",
+            () => db.Proc("dbo.usp_Agreement_RepriceInstance", ("@Agreement", reference), ("@InstanceName", "ST-SQL01"),
+                          ("@PricedAsFullInstance", true), ("@From", D(start))), "must start after");
+
+        // a server can only be covered by one agreement at a time, or its monthly fee lands on two
+        // invoices for the same months with nothing saying so
+        ExpectError("covering a server that another agreement already covers is refused",
+            () => db.Proc("dbo.usp_Agreement_CoverInstance", ("@Agreement", reference), ("@InstanceName", "ST-SQL01")),
+            "already covered");
+        ExpectError("and covering a server the client has never had is refused",
+            () => db.Proc("dbo.usp_Agreement_CoverInstance", ("@Agreement", reference), ("@InstanceName", "ST-NOSUCH")),
+            "no server called");
+
         Step("onboarding item done", () => Submit(AdminForms.CompleteOnboarding(db, reference, "REMOTE_ACCESS", ""), ("Notes", "VPN")));
         Step("onboarding recorded", () => Queries.Onboarding(db, reference),
             t => t.Rows.Cast<DataRow>().Any(r => (string)r["Code"] == "REMOTE_ACCESS" && r["Done"] is DateTime) ? null : "not marked done");
@@ -1617,6 +1681,65 @@ public static partial class SelfTest
             "This client already has");
         Step("a name the client is not using is still accepted on the other agreement",
             () => Submit(AdminForms.AddInstance(db, reference + "b"), ("InstanceName", "ST-SQL99"), ("SqlVersion", "2022")));
+
+        // a server comes back into scope when another agreement picks it up, and only stops being
+        // a live record when nothing covers it at all
+        Step("a server whose cover ended can be covered again, and is live once more", () =>
+        {
+            Submit(AdminForms.AddInstance(db, reference), ("InstanceName", "ST-MOVED"), ("SqlVersion", "2022"),
+                   ("CoveredFrom", D(DateTime.Today)));
+            Submit(AdminForms.RemoveInstance(db, reference, "ST-MOVED"));
+            var afterRemoval = db.Scalar(@"SELECT CONVERT(varchar(10), i.CoveredTo) FROM dbo.Instance i
+                                           JOIN dbo.Agreement a ON a.AgreementId = i.AgreementId AND a.AgreementRef = @r
+                                           WHERE i.InstanceName = 'ST-MOVED'", ("@r", reference)) as string;
+            db.Proc("dbo.usp_Agreement_CoverInstance", ("@Agreement", reference + "b"), ("@InstanceName", "ST-MOVED"));
+            var afterRecover = db.Scalar(@"SELECT CONVERT(varchar(10), i.CoveredTo) FROM dbo.Instance i
+                                           WHERE i.InstanceName = 'ST-MOVED'") as string;
+            var covers = db.Scalar(@"SELECT COUNT(*) FROM dbo.AgreementInstance ai
+                                     JOIN dbo.Instance i ON i.InstanceId = ai.InstanceId
+                                     WHERE i.InstanceName = 'ST-MOVED'");
+            return $"{afterRemoval ?? "live"}/{afterRecover ?? "live"}/{covers}";
+        }, s => (string)s! is var v && v.EndsWith("/live/2") && !v.StartsWith("live/")
+                ? null : $"removal then re-cover gave {s} (want ended, then live, with 2 coverage rows)");
+
+        // Two live coverages cannot be made through the procedures - that is the point of the
+        // refusal above - so the guard that keeps the server live while something still covers it
+        // is only reachable by a direct INSERT. Which is exactly the case it exists for.
+        Step("a server stays live while any agreement still covers it", () =>
+        {
+            db.Execute(@"INSERT dbo.AgreementInstance (AgreementId, InstanceId, CoveredFrom)
+                         SELECT a.AgreementId, i.InstanceId, CAST(@today AS date)
+                         FROM dbo.Instance i, dbo.Agreement a
+                         WHERE i.InstanceName = 'ST-MOVED' AND a.AgreementRef = @r",
+                       ("@r", reference), ("@today", DateTime.Today));
+            // end the cover on the other agreement; the one just inserted is still open
+            db.Proc("dbo.usp_Instance_Remove", ("@Client", reference + "b"), ("@InstanceName", "ST-MOVED"));
+            var live = db.Scalar("SELECT CONVERT(varchar(10), CoveredTo) FROM dbo.Instance WHERE InstanceName = 'ST-MOVED'") as string;
+            db.Proc("dbo.usp_Instance_Remove", ("@Client", reference), ("@InstanceName", "ST-MOVED"));
+            var closed = db.Scalar("SELECT CONVERT(varchar(10), CoveredTo) FROM dbo.Instance WHERE InstanceName = 'ST-MOVED'") as string;
+            return $"{live ?? "live"}/{closed ?? "live"}";
+        }, s => (string)s! == "live/" + DateTime.Today.ToString("yyyy-MM-dd")
+                ? null : $"got {s}; wanted it live while one cover remained, then closed");
+
+        // the onboarding tick is scoped to what THIS agreement covers. Nothing asserted it before,
+        // which is how a mutation that widened it to every server the client has went unnoticed.
+        Step("the monitoring item ticks on what this agreement covers, not everything the client has", () =>
+        {
+            // the other agreement has ST-SQL99 with no monitoring date, so a tick that looked at
+            // the whole client would never fire
+            db.Execute(@"UPDATE i SET i.MonitoringInstalledDate = CAST(@today AS date)
+                         FROM dbo.Instance i
+                         JOIN dbo.AgreementInstance ai ON ai.InstanceId = i.InstanceId AND ai.CoveredTo IS NULL
+                         JOIN dbo.Agreement a ON a.AgreementId = ai.AgreementId AND a.AgreementRef = @r
+                         WHERE i.MonitoringInstalledDate IS NULL", ("@r", reference), ("@today", DateTime.Today));
+            db.Execute(@"UPDATE o SET o.CompletedDate = NULL FROM dbo.OnboardingItem o
+                         JOIN dbo.Agreement a ON a.AgreementId = o.AgreementId AND a.AgreementRef = @r
+                         WHERE o.ItemCode = 'MONITORING'", ("@r", reference));
+            Submit(AdminForms.UpdateInstance(db, reference, "ST-SQL01"), ("Notes", "monitoring in"));
+            return db.Scalar(@"SELECT CONVERT(varchar(10), o.CompletedDate) FROM dbo.OnboardingItem o
+                               JOIN dbo.Agreement a ON a.AgreementId = o.AgreementId AND a.AgreementRef = @r
+                               WHERE o.ItemCode = 'MONITORING'", ("@r", reference)) as string;
+        }, s => s != null ? null : "the monitoring item was not ticked even though every covered server has it");
 
         // the screens over the new data
         Application.Init(new FakeDriver(), null);

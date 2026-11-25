@@ -1361,6 +1361,25 @@ BEGIN
 END
 GO
 
+-- The one covered instance of that name for a client, or NULL when there is none. Returns -1 when
+-- there is more than one, which the callers refuse rather than guess at: the three UPDATEs that
+-- used to key on (AgreementId, InstanceName) checked only for no rows, never for too many, and
+-- would silently have changed both.
+CREATE OR ALTER FUNCTION dbo.fn_InstanceId (@Client nvarchar(200), @InstanceName nvarchar(128))
+RETURNS int
+AS
+BEGIN
+    DECLARE @ClientId int = dbo.fn_ClientId(@Client);
+    IF @ClientId IS NULL RETURN NULL;
+    DECLARE @n int = (SELECT COUNT(*) FROM dbo.Instance
+                      WHERE ClientId = @ClientId AND InstanceName = @InstanceName AND CoveredTo IS NULL);
+    IF @n = 0 RETURN NULL;
+    IF @n > 1 RETURN -1;
+    RETURN (SELECT InstanceId FROM dbo.Instance
+            WHERE ClientId = @ClientId AND InstanceName = @InstanceName AND CoveredTo IS NULL);
+END
+GO
+
 -- engagement ref, agreement ref, or a client name when that client has exactly one engagement
 CREATE OR ALTER FUNCTION dbo.fn_EngagementId (@Engagement nvarchar(200))
 RETURNS int
@@ -1754,22 +1773,19 @@ BEGIN
     SET NOCOUNT ON;
     DECLARE @AgreementId int = dbo.fn_AgreementId(@Client);
     DECLARE @Ends date = ISNULL(@CoveredTo, CAST(dbo.fn_UkNow() AS date));
-    -- the instances this ended, so the coverage rows can be ended too. @@ROWCOUNT cannot be used
-    -- for that here: the second UPDATE would overwrite it before it was read.
-    DECLARE @Ended TABLE (InstanceId int);
-    UPDATE dbo.Instance SET CoveredTo = @Ends
-    OUTPUT inserted.InstanceId INTO @Ended
-    WHERE AgreementId = @AgreementId AND InstanceName = @InstanceName AND CoveredTo IS NULL;
-    IF NOT EXISTS (SELECT 1 FROM @Ended)
-        RAISERROR(N'Covered instance "%s" not found.', 16, 1, @InstanceName);
-    ELSE
-    BEGIN
-        UPDATE ai SET ai.CoveredTo = @Ends
-        FROM dbo.AgreementInstance ai
-        WHERE ai.AgreementId = @AgreementId AND ai.CoveredTo IS NULL
-          AND ai.InstanceId IN (SELECT InstanceId FROM @Ended);
-        PRINT N'Coverage ended for ' + @InstanceName + N'. Remember: the monthly fee for a cycle is set by what is covered at the cycle start.';
-    END
+    DECLARE @InstanceId int = dbo.fn_InstanceId(@Client, @InstanceName);
+    IF @InstanceId IS NULL BEGIN RAISERROR(N'Covered instance "%s" not found.', 16, 1, @InstanceName); RETURN; END
+    IF @InstanceId = -1 BEGIN RAISERROR(N'More than one covered instance is called "%s" for this client; nothing was changed.', 16, 1, @InstanceName); RETURN; END
+
+    UPDATE dbo.AgreementInstance SET CoveredTo = @Ends
+    WHERE AgreementId = @AgreementId AND InstanceId = @InstanceId AND CoveredTo IS NULL;
+    IF @@ROWCOUNT = 0 BEGIN RAISERROR(N'"%s" is not covered by that agreement.', 16, 1, @InstanceName); RETURN; END
+
+    -- the server itself is only out of scope once nothing covers it any more: a client with two
+    -- agreements can stop covering it on one and still be paying for it on the other
+    IF NOT EXISTS (SELECT 1 FROM dbo.AgreementInstance ai WHERE ai.InstanceId = @InstanceId AND ai.CoveredTo IS NULL)
+        UPDATE dbo.Instance SET CoveredTo = @Ends WHERE InstanceId = @InstanceId AND CoveredTo IS NULL;
+    PRINT N'Coverage ended for ' + @InstanceName + N'. Remember: the monthly fee for a cycle is set by what is covered at the cycle start.';
 END
 GO
 
@@ -1786,18 +1802,24 @@ AS
 BEGIN
     SET NOCOUNT ON;
     DECLARE @AgreementId int = dbo.fn_AgreementId(@Client);
+    DECLARE @InstanceId int = dbo.fn_InstanceId(@Client, @InstanceName);
+    IF @InstanceId IS NULL BEGIN RAISERROR(N'Covered instance "%s" not found.', 16, 1, @InstanceName); RETURN; END
+    IF @InstanceId = -1 BEGIN RAISERROR(N'More than one covered instance is called "%s" for this client; nothing was changed.', 16, 1, @InstanceName); RETURN; END
+
     UPDATE dbo.Instance
     SET SqlVersion = ISNULL(@SqlVersion, SqlVersion), Edition = ISNULL(@Edition, Edition), OsVersion = ISNULL(@OsVersion, OsVersion),
         MonitoringInstalledDate = ISNULL(@MonitoringInstalledDate, MonitoringInstalledDate), Notes = ISNULL(@Notes, Notes),
         DatabaseCount = ISNULL(@DatabaseCount, DatabaseCount)
-    WHERE AgreementId = @AgreementId AND InstanceName = @InstanceName AND CoveredTo IS NULL;
-    IF @@ROWCOUNT = 0 BEGIN RAISERROR(N'Covered instance "%s" not found.', 16, 1, @InstanceName); RETURN; END
+    WHERE InstanceId = @InstanceId;
 
-    -- tick the onboarding item once every covered instance has monitoring installed
+    -- tick the onboarding item once every instance this agreement covers has monitoring installed
     UPDATE o SET CompletedDate = CAST(dbo.fn_UkNow() AS date)
     FROM dbo.OnboardingItem o
     WHERE o.AgreementId = @AgreementId AND o.ItemCode = 'MONITORING' AND o.CompletedDate IS NULL
-      AND NOT EXISTS (SELECT 1 FROM dbo.Instance i WHERE i.AgreementId = @AgreementId AND i.CoveredTo IS NULL AND i.MonitoringInstalledDate IS NULL);
+      AND EXISTS (SELECT 1 FROM dbo.AgreementInstance ai WHERE ai.AgreementId = @AgreementId AND ai.CoveredTo IS NULL)
+      AND NOT EXISTS (SELECT 1 FROM dbo.AgreementInstance ai
+                      JOIN dbo.Instance i ON i.InstanceId = ai.InstanceId
+                      WHERE ai.AgreementId = @AgreementId AND ai.CoveredTo IS NULL AND i.MonitoringInstalledDate IS NULL);
     PRINT N'Updated ' + @InstanceName;
 END
 GO
@@ -1811,15 +1833,108 @@ CREATE OR ALTER PROCEDURE dbo.usp_Instance_RecordRiskAcceptance
 AS
 BEGIN
     SET NOCOUNT ON;
-    DECLARE @AgreementId int = dbo.fn_AgreementId(@Client);
+    DECLARE @InstanceId int = dbo.fn_InstanceId(@Client, @InstanceName);
+    IF @InstanceId IS NULL BEGIN RAISERROR(N'Covered instance "%s" not found.', 16, 1, @InstanceName); RETURN; END
+    IF @InstanceId = -1 BEGIN RAISERROR(N'More than one covered instance is called "%s" for this client; nothing was changed.', 16, 1, @InstanceName); RETURN; END
     UPDATE dbo.Instance
     SET UnsupportedRiskAcceptedBy = @AcceptedBy, UnsupportedRiskAcceptedDate = ISNULL(@AcceptedDate, CAST(dbo.fn_UkNow() AS date)),
         HasExtendedSecurityUpdates = @HasExtendedSecurityUpdates
-    WHERE AgreementId = @AgreementId AND InstanceName = @InstanceName AND CoveredTo IS NULL;
-    IF @@ROWCOUNT = 0 BEGIN RAISERROR(N'Covered instance "%s" not found.', 16, 1, @InstanceName); RETURN; END
+    WHERE InstanceId = @InstanceId;
     PRINT N'Risk acceptance recorded. Also run this on the client server, in its Molehill Watch database, so it shows in weekly reports:';
     PRINT N'  EXEC mw.usp_Configure @UnsupportedRiskAccepted = N''' + REPLACE(@AcceptedBy, N'''', N'''''') + N', '
           + CONVERT(nvarchar(11), ISNULL(@AcceptedDate, CAST(dbo.fn_UkNow() AS date)), 106) + N''';';
+END
+GO
+
+-- Cover a server this client already has under an agreement. Used when a server moves between a
+-- client's agreements, or comes back into scope after cover was ended. usp_Instance_Add is for a
+-- server the client has never had.
+CREATE OR ALTER PROCEDURE dbo.usp_Agreement_CoverInstance
+    @Agreement    nvarchar(200),
+    @InstanceName nvarchar(128),
+    @CoveredFrom  date = NULL              -- default: today
+AS
+BEGIN
+    SET NOCOUNT, XACT_ABORT ON;
+    DECLARE @AgreementId int = dbo.fn_AgreementId(@Agreement);
+    IF @AgreementId IS NULL BEGIN RAISERROR(N'Agreement or client "%s" not found.', 16, 1, @Agreement); RETURN; END
+    DECLARE @ClientId int = (SELECT ClientId FROM dbo.Agreement WHERE AgreementId = @AgreementId);
+    SET @CoveredFrom = ISNULL(@CoveredFrom, CAST(dbo.fn_UkNow() AS date));
+
+    -- including servers whose cover has ended, which is the point of this procedure
+    DECLARE @n int = (SELECT COUNT(*) FROM dbo.Instance WHERE ClientId = @ClientId AND InstanceName = @InstanceName);
+    IF @n = 0 BEGIN RAISERROR(N'This client has no server called "%s". Add it with usp_Instance_Add.', 16, 1, @InstanceName); RETURN; END
+    IF @n > 1 BEGIN RAISERROR(N'This client has more than one server called "%s"; nothing was changed.', 16, 1, @InstanceName); RETURN; END
+    DECLARE @InstanceId int = (SELECT InstanceId FROM dbo.Instance WHERE ClientId = @ClientId AND InstanceName = @InstanceName);
+
+    -- one live coverage at a time, or the same server's monthly fee lands on two agreements'
+    -- invoices for the same months and nothing says so
+    DECLARE @Other varchar(30) = (SELECT TOP (1) a.AgreementRef FROM dbo.AgreementInstance ai
+                                  JOIN dbo.Agreement a ON a.AgreementId = ai.AgreementId
+                                  WHERE ai.InstanceId = @InstanceId AND ai.CoveredTo IS NULL);
+    IF @Other IS NOT NULL
+    BEGIN RAISERROR(N'"%s" is already covered by %s. End that cover first (usp_Instance_Remove).', 16, 1, @InstanceName, @Other); RETURN; END
+
+    INSERT dbo.AgreementInstance (AgreementId, InstanceId, CoveredFrom)
+    VALUES (@AgreementId, @InstanceId, @CoveredFrom);
+    -- back in scope, so the server stops being a closed record
+    UPDATE dbo.Instance SET CoveredTo = NULL WHERE InstanceId = @InstanceId AND CoveredTo IS NOT NULL;
+    DECLARE @Ref varchar(30) = (SELECT AgreementRef FROM dbo.Agreement WHERE AgreementId = @AgreementId);
+    PRINT N'"' + @InstanceName + N'" is covered by ' + @Ref
+        + N' from ' + CONVERT(nvarchar(11), @CoveredFrom, 106)
+        + N'. The monthly fee for a cycle is set by what is covered at the cycle start.';
+    SELECT InstanceName, PricingBasis, MonthlyFee FROM dbo.fn_AgreementFees(@AgreementId, @CoveredFrom) ORDER BY InstanceName;
+END
+GO
+
+-- Change what an agreement charges for a server. The old coverage is CLOSED and a new one opened
+-- rather than the figures being overwritten, so every billing cycle that has already run still
+-- re-derives the fee it actually charged. That is the whole reason coverage is a row and not a
+-- column, and it is also the only way an agreed fee can be changed at all - usp_Instance_Update
+-- has never been able to.
+CREATE OR ALTER PROCEDURE dbo.usp_Agreement_RepriceInstance
+    @Agreement            nvarchar(200),
+    @InstanceName         nvarchar(128),
+    @PricedAsFullInstance bit          = NULL,     -- NULL = leave as it is
+    @AgreedMonthlyFee     decimal(9,2) = NULL,     -- NULL = leave as it is
+    @ClearAgreedFee       bit          = 0,        -- 1 = back to the price list
+    @From                 date         = NULL      -- default: today
+AS
+BEGIN
+    SET NOCOUNT, XACT_ABORT ON;
+    DECLARE @AgreementId int = dbo.fn_AgreementId(@Agreement);
+    IF @AgreementId IS NULL BEGIN RAISERROR(N'Agreement or client "%s" not found.', 16, 1, @Agreement); RETURN; END
+    DECLARE @InstanceId int = dbo.fn_InstanceId(@Agreement, @InstanceName);
+    IF @InstanceId IS NULL BEGIN RAISERROR(N'Covered instance "%s" not found.', 16, 1, @InstanceName); RETURN; END
+    IF @InstanceId = -1 BEGIN RAISERROR(N'More than one covered instance is called "%s" for this client; nothing was changed.', 16, 1, @InstanceName); RETURN; END
+    SET @From = ISNULL(@From, CAST(dbo.fn_UkNow() AS date));
+
+    DECLARE @OldFrom date, @Full bit, @Fee decimal(9,2);
+    SELECT @OldFrom = CoveredFrom, @Full = PricedAsFullInstance, @Fee = AgreedMonthlyFee
+    FROM dbo.AgreementInstance
+    WHERE AgreementId = @AgreementId AND InstanceId = @InstanceId AND CoveredTo IS NULL;
+    IF @OldFrom IS NULL BEGIN RAISERROR(N'"%s" is not covered by that agreement.', 16, 1, @InstanceName); RETURN; END
+    IF @From <= @OldFrom
+    BEGIN
+        DECLARE @Began nvarchar(11) = CONVERT(nvarchar(11), @OldFrom, 106);
+        RAISERROR(N'The new price must start after the current cover began (%s). Covering it again from earlier would leave two coverages over the same days.', 16, 1, @Began);
+        RETURN;
+    END
+
+    DECLARE @NewFull bit = ISNULL(@PricedAsFullInstance, @Full);
+    DECLARE @NewFee decimal(9,2) = CASE WHEN @ClearAgreedFee = 1 THEN NULL ELSE ISNULL(@AgreedMonthlyFee, @Fee) END;
+    DECLARE @Env varchar(20) = (SELECT Environment FROM dbo.Instance WHERE InstanceId = @InstanceId);
+    IF @Env = 'NonProduction' AND @NewFee IS NULL
+    BEGIN RAISERROR(N'Non-production servers are included at an agreed fee, so it cannot be cleared.', 16, 1); RETURN; END
+
+    UPDATE dbo.AgreementInstance SET CoveredTo = DATEADD(day, -1, @From)
+    WHERE AgreementId = @AgreementId AND InstanceId = @InstanceId AND CoveredTo IS NULL;
+    INSERT dbo.AgreementInstance (AgreementId, InstanceId, CoveredFrom, PricedAsFullInstance, AgreedMonthlyFee)
+    VALUES (@AgreementId, @InstanceId, @From, @NewFull, @NewFee);
+
+    PRINT N'"' + @InstanceName + N'" repriced from ' + CONVERT(nvarchar(11), @From, 106)
+        + N'. What it charged before that date is unchanged.';
+    SELECT InstanceName, PricingBasis, MonthlyFee FROM dbo.fn_AgreementFees(@AgreementId, @From) ORDER BY InstanceName;
 END
 GO
 
@@ -1853,8 +1968,10 @@ BEGIN
     SELECT InstanceName, Role, SqlVersion, MonitoringInstalled = MonitoringInstalledDate,
            SupportStatus = CASE WHEN l.ExtendedEnd < CAST(dbo.fn_UkNow() AS date) THEN 'UNSUPPORTED' WHEN l.ExtendedEnd IS NULL THEN '?' ELSE 'Supported' END,
            RiskAccepted = CASE WHEN i.UnsupportedRiskAcceptedDate IS NOT NULL THEN i.UnsupportedRiskAcceptedBy + ' ' + CONVERT(varchar(11), i.UnsupportedRiskAcceptedDate, 106) END
-    FROM dbo.Instance i LEFT JOIN dbo.ProductLifecycle l ON l.VersionKey = i.SqlVersion
-    WHERE i.AgreementId = @AgreementId AND i.CoveredTo IS NULL
+    FROM dbo.AgreementInstance ai
+    JOIN dbo.Instance i ON i.InstanceId = ai.InstanceId
+    LEFT JOIN dbo.ProductLifecycle l ON l.VersionKey = i.SqlVersion
+    WHERE ai.AgreementId = @AgreementId AND ai.CoveredTo IS NULL
     ORDER BY i.InstanceName;
 END
 GO
