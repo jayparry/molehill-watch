@@ -1216,22 +1216,29 @@ public static partial class SelfTest
         // written while the read paths are still on the old column, so both are checked.
         Step("a new instance is the client's, not the agreement's",
             () => db.Query(@"SELECT i.ClientId, a.ClientId AS AgreementClientId
-                             FROM dbo.Instance i JOIN dbo.Agreement a ON a.AgreementRef = @r
-                             WHERE i.AgreementId = a.AgreementId AND i.InstanceName = 'ST-SQL01'", ("@r", reference)),
+                             FROM dbo.Instance i
+                             JOIN dbo.AgreementInstance ai ON ai.InstanceId = i.InstanceId
+                             JOIN dbo.Agreement a ON a.AgreementId = ai.AgreementId AND a.AgreementRef = @r
+                             WHERE i.InstanceName = 'ST-SQL01'", ("@r", reference)),
             t => t.Rows.Count == 1 && t.Rows[0]["ClientId"] is int c && c == (int)t.Rows[0]["AgreementClientId"]
                  ? null : "ClientId missing or not the agreement's client");
-        Step("and the agreement has a coverage row saying so, matching the instance exactly",
-            () => db.Query(@"SELECT Mismatched = COUNT(*)
-                             FROM dbo.Instance i
-                             JOIN dbo.Agreement a ON a.AgreementId = i.AgreementId AND a.AgreementRef = @r
-                             LEFT JOIN dbo.AgreementInstance ai ON ai.InstanceId = i.InstanceId AND ai.AgreementId = i.AgreementId
-                             WHERE ai.AgreementInstanceId IS NULL
-                                OR ai.CoveredFrom <> i.CoveredFrom
-                                OR ISNULL(CONVERT(varchar(10), ai.CoveredTo), 'x') <> ISNULL(CONVERT(varchar(10), i.CoveredTo), 'x')
-                                OR ai.PricedAsFullInstance <> i.PricedAsFullInstance
-                                OR ISNULL(CONVERT(varchar(20), ai.AgreedMonthlyFee), 'x') <> ISNULL(CONVERT(varchar(20), i.AgreedMonthlyFee), 'x')",
-                           ("@r", reference)),
-            t => (int)t.Rows[0]["Mismatched"] == 0 ? null : $"{t.Rows[0]["Mismatched"]} coverage row(s) disagree with their instance");
+        Step("every server the agreement covers has exactly one open coverage row",
+            () => db.Query(@"SELECT Servers = COUNT(DISTINCT i.InstanceId),
+                                    OpenCovers = SUM(CASE WHEN ai.CoveredTo IS NULL THEN 1 ELSE 0 END)
+                             FROM dbo.AgreementInstance ai
+                             JOIN dbo.Instance i ON i.InstanceId = ai.InstanceId
+                             JOIN dbo.Agreement a ON a.AgreementId = ai.AgreementId AND a.AgreementRef = @r
+                             WHERE i.CoveredTo IS NULL", ("@r", reference)),
+            t => (int)t.Rows[0]["Servers"] == (int)t.Rows[0]["OpenCovers"] && (int)t.Rows[0]["Servers"] > 0
+                 ? null : $"{t.Rows[0]["Servers"]} server(s) but {t.Rows[0]["OpenCovers"]} open coverage row(s)");
+        Step("and its dates are the ones the instance was added with",
+            () => db.Query(@"SELECT ai.CoveredFrom, ai.CoveredTo
+                             FROM dbo.AgreementInstance ai
+                             JOIN dbo.Instance i ON i.InstanceId = ai.InstanceId
+                             JOIN dbo.Agreement a ON a.AgreementId = ai.AgreementId AND a.AgreementRef = @r
+                             WHERE i.InstanceName = 'ST-SQL01'", ("@r", reference)),
+            t => t.Rows.Count == 1 && (DateTime)t.Rows[0]["CoveredFrom"] == start && t.Rows[0]["CoveredTo"] is DBNull
+                 ? null : $"covered from {t.Rows[0]["CoveredFrom"]} to {t.Rows[0]["CoveredTo"]}");
         // the commercial terms of a coverage - what it is priced as, and any agreed fee - belong to
         // the coverage, so check the ones that are not simply NULL came across
         Step("the agreed fee is on the coverage, not just the instance",
@@ -1256,8 +1263,8 @@ public static partial class SelfTest
                 Submit(AdminForms.RemoveInstance(db, reference, "ST-GOING"));
                 return db.Query(@"SELECT i.CoveredTo, ai.CoveredTo AS CoverEnds
                                   FROM dbo.Instance i
-                                  JOIN dbo.Agreement a ON a.AgreementId = i.AgreementId AND a.AgreementRef = @r
                                   JOIN dbo.AgreementInstance ai ON ai.InstanceId = i.InstanceId
+                                  JOIN dbo.Agreement a ON a.AgreementId = ai.AgreementId AND a.AgreementRef = @r
                                   WHERE i.InstanceName = 'ST-GOING'", ("@r", reference));
             },
             t => t.Rows.Count == 1 && t.Rows[0]["CoveredTo"] is DateTime ended && t.Rows[0]["CoverEnds"] is DateTime cover && cover == ended
@@ -1267,25 +1274,23 @@ public static partial class SelfTest
         // The three UPDATEs behind these used to key on (AgreementId, InstanceName) and check only
         // for no rows, never for too many: pointed at the client they could match two and would
         // silently have changed both. The only way to make that shape now is a direct INSERT.
-        Step("an ambiguous instance name is refused rather than guessed at", () =>
+        // The ambiguity that fn_InstanceId's "-1" answer guards against can no longer be created:
+        // UQ_Instance_Open forbids two live servers of one name for one client. The guard stays
+        // because the three UPDATEs behind it check only for no rows and never for too many, so if
+        // that index is ever dropped they would silently change both again - but what is testable
+        // now is the index itself.
+        Step("one live server of each name per client, enforced by the database", () =>
         {
-            db.Execute(@"INSERT dbo.Instance (ClientId, AgreementId, InstanceName, Environment, Role, Platform, CoveredFrom)
-                         SELECT i.ClientId, i.AgreementId, i.InstanceName, i.Environment, i.Role, i.Platform, i.CoveredFrom
-                         FROM dbo.Instance i JOIN dbo.Agreement a ON a.AgreementId = i.AgreementId
-                         WHERE a.AgreementRef = @r AND i.InstanceName = 'ST-SQL02' AND i.CoveredTo IS NULL", ("@r", reference));
             var refused = 0;
-            try { Submit(AdminForms.UpdateInstance(db, reference, "ST-SQL02"), ("Notes", "which one?")); }
-            catch (Exception ex) when (ex.Message.Contains("More than one")) { refused++; }
-            try { Submit(AdminForms.RiskAcceptance(db, reference, "ST-SQL02"), ("AcceptedBy", "Pat")); }
-            catch (Exception ex) when (ex.Message.Contains("More than one")) { refused++; }
-            try { Submit(AdminForms.RemoveInstance(db, reference, "ST-SQL02")); }
-            catch (Exception ex) when (ex.Message.Contains("More than one")) { refused++; }
-            // tidy up, so nothing after this sees a shape the guards forbid
-            db.Execute(@"DELETE FROM dbo.Instance WHERE InstanceId = (SELECT MAX(i.InstanceId) FROM dbo.Instance i
-                         JOIN dbo.Agreement a ON a.AgreementId = i.AgreementId
-                         WHERE a.AgreementRef = @r AND i.InstanceName = 'ST-SQL02')", ("@r", reference));
+            try
+            {
+                db.Execute(@"INSERT dbo.Instance (ClientId, InstanceName, Environment, Role, Platform, CoveredFrom)
+                             SELECT i.ClientId, i.InstanceName, i.Environment, i.Role, i.Platform, i.CoveredFrom
+                             FROM dbo.Instance i WHERE i.InstanceName = 'ST-SQL02' AND i.CoveredTo IS NULL");
+            }
+            catch (Exception ex) when (ex.Message.Contains("UQ_Instance_Open")) { refused++; }
             return refused;
-        }, n => (int)n! == 3 ? null : $"only {n} of 3 procedures refused");
+        }, n => (int)n! == 1 ? null : "a second live server of the same name was accepted");
 
         // coverage is a row, so a price change closes it and opens another. That is what keeps a
         // cycle that has already been billed able to re-derive the fee it charged - and it is the
@@ -1347,7 +1352,7 @@ public static partial class SelfTest
         // a ticket belongs to the client and names the work that bills it
         Step("a ticket knows its client and the work that bills it",
             () => db.Query(@"SELECT t.ClientId, t.EngagementId, a.ClientId AS AgreementClientId, a.EngagementId AS AgreementEngagementId
-                             FROM dbo.Ticket t JOIN dbo.Agreement a ON a.AgreementId = t.AgreementId
+                             FROM dbo.Ticket t JOIN dbo.Agreement a ON a.EngagementId = t.EngagementId
                              WHERE a.AgreementRef = @r", ("@r", reference)),
             t => t.Rows.Count > 0 && t.Rows.Cast<DataRow>().All(r =>
                      r["ClientId"] is int tc && tc == (int)r["AgreementClientId"]
@@ -1794,40 +1799,71 @@ public static partial class SelfTest
         // a live record when nothing covers it at all
         Step("a server whose cover ended can be covered again, and is live once more", () =>
         {
-            Submit(AdminForms.AddInstance(db, reference), ("InstanceName", "ST-MOVED"), ("SqlVersion", "2022"),
+            Submit(AdminForms.AddInstance(db, reference), ("InstanceName", "ST-RECOVER"), ("SqlVersion", "2022"),
                    ("CoveredFrom", D(DateTime.Today)));
-            Submit(AdminForms.RemoveInstance(db, reference, "ST-MOVED"));
-            var afterRemoval = db.Scalar(@"SELECT CONVERT(varchar(10), i.CoveredTo) FROM dbo.Instance i
-                                           JOIN dbo.Agreement a ON a.AgreementId = i.AgreementId AND a.AgreementRef = @r
-                                           WHERE i.InstanceName = 'ST-MOVED'", ("@r", reference)) as string;
-            db.Proc("dbo.usp_Agreement_CoverInstance", ("@Agreement", reference + "b"), ("@InstanceName", "ST-MOVED"));
-            var afterRecover = db.Scalar(@"SELECT CONVERT(varchar(10), i.CoveredTo) FROM dbo.Instance i
-                                           WHERE i.InstanceName = 'ST-MOVED'") as string;
+            Submit(AdminForms.RemoveInstance(db, reference, "ST-RECOVER"));
+            var afterRemoval = db.Scalar("SELECT CONVERT(varchar(10), CoveredTo) FROM dbo.Instance WHERE InstanceName = 'ST-RECOVER'") as string;
+            db.Proc("dbo.usp_Agreement_CoverInstance", ("@Agreement", reference + "b"), ("@InstanceName", "ST-RECOVER"));
+            var afterRecover = db.Scalar("SELECT CONVERT(varchar(10), CoveredTo) FROM dbo.Instance WHERE InstanceName = 'ST-RECOVER'") as string;
             var covers = db.Scalar(@"SELECT COUNT(*) FROM dbo.AgreementInstance ai
                                      JOIN dbo.Instance i ON i.InstanceId = ai.InstanceId
-                                     WHERE i.InstanceName = 'ST-MOVED'");
+                                     WHERE i.InstanceName = 'ST-RECOVER'");
             return $"{afterRemoval ?? "live"}/{afterRecover ?? "live"}/{covers}";
         }, s => (string)s! is var v && v.EndsWith("/live/2") && !v.StartsWith("live/")
                 ? null : $"removal then re-cover gave {s} (want ended, then live, with 2 coverage rows)");
 
-        // Two live coverages cannot be made through the procedures - that is the point of the
-        // refusal above - so the guard that keeps the server live while something still covers it
-        // is only reachable by a direct INSERT. Which is exactly the case it exists for.
-        Step("a server stays live while any agreement still covers it", () =>
+        // one live coverage per server is now the database's rule rather than a procedure's, so
+        // even a direct INSERT cannot make the shape that would bill one server on two agreements.
+        // Dated tomorrow on purpose: from today it would collide on (agreement, server, date) and
+        // be caught by the wrong index, which is how this passed while UQ_AgreementInstance_Open
+        // was missing altogether.
+        Step("two agreements cannot cover one server at once, whatever route is taken", () =>
         {
-            db.Execute(@"INSERT dbo.AgreementInstance (AgreementId, InstanceId, CoveredFrom)
-                         SELECT a.AgreementId, i.InstanceId, CAST(@today AS date)
-                         FROM dbo.Instance i, dbo.Agreement a
-                         WHERE i.InstanceName = 'ST-MOVED' AND a.AgreementRef = @r",
-                       ("@r", reference), ("@today", DateTime.Today));
-            // end the cover on the other agreement; the one just inserted is still open
-            db.Proc("dbo.usp_Instance_Remove", ("@Client", reference + "b"), ("@InstanceName", "ST-MOVED"));
-            var live = db.Scalar("SELECT CONVERT(varchar(10), CoveredTo) FROM dbo.Instance WHERE InstanceName = 'ST-MOVED'") as string;
-            db.Proc("dbo.usp_Instance_Remove", ("@Client", reference), ("@InstanceName", "ST-MOVED"));
-            var closed = db.Scalar("SELECT CONVERT(varchar(10), CoveredTo) FROM dbo.Instance WHERE InstanceName = 'ST-MOVED'") as string;
-            return $"{live ?? "live"}/{closed ?? "live"}";
-        }, s => (string)s! == "live/" + DateTime.Today.ToString("yyyy-MM-dd")
-                ? null : $"got {s}; wanted it live while one cover remained, then closed");
+            var refused = 0;
+            try
+            {
+                db.Execute(@"INSERT dbo.AgreementInstance (AgreementId, InstanceId, CoveredFrom)
+                             SELECT a.AgreementId, i.InstanceId, CAST(@when AS date)
+                             FROM dbo.Instance i, dbo.Agreement a
+                             WHERE i.InstanceName = 'ST-RECOVER' AND a.AgreementRef = @r",
+                           ("@r", reference), ("@when", DateTime.Today.AddDays(1)));
+            }
+            catch (Exception ex) when (ex.Message.Contains("UQ_AgreementInstance_Open")) { refused++; }
+            return refused;
+        }, n => (int)n! == 1 ? null : "a second live coverage was accepted");
+
+        // and the same coverage twice over the same dates, which only the other index can catch
+        Step("and one agreement cannot record the same cover twice from the same date", () =>
+        {
+            var refused = 0;
+            try
+            {
+                db.Execute(@"INSERT dbo.AgreementInstance (AgreementId, InstanceId, CoveredFrom, CoveredTo)
+                             SELECT ai.AgreementId, ai.InstanceId, ai.CoveredFrom, ai.CoveredTo
+                             FROM dbo.AgreementInstance ai
+                             JOIN dbo.Instance i ON i.InstanceId = ai.InstanceId
+                             WHERE i.InstanceName = 'ST-RECOVER' AND ai.CoveredTo IS NOT NULL");
+            }
+            catch (Exception ex) when (ex.Message.Contains("UQ_AgreementInstance")) { refused++; }
+            return refused;
+        }, n => (int)n! == 1 ? null : "the same coverage was recorded twice");
+
+        // the migration either finished or it did not, and that is worth asserting outright rather
+        // than inferring from behaviour
+        Step("the move is finished: old columns gone, new ones required, invariants indexed",
+            () => db.Query(@"SELECT OldInstance = CASE WHEN COL_LENGTH(N'dbo.Instance', N'AgreementId') IS NULL THEN 1 ELSE 0 END,
+                                    OldTicket   = CASE WHEN COL_LENGTH(N'dbo.Ticket', N'AgreementId') IS NULL THEN 1 ELSE 0 END,
+                                    OldTerms    = CASE WHEN COL_LENGTH(N'dbo.Instance', N'AgreedMonthlyFee') IS NULL THEN 1 ELSE 0 END,
+                                    Required    = (SELECT COUNT(*) FROM sys.columns
+                                                   WHERE is_nullable = 0 AND
+                                                   ((object_id = OBJECT_ID(N'dbo.Instance') AND name = N'ClientId')
+                                                 OR (object_id = OBJECT_ID(N'dbo.Ticket') AND name IN (N'ClientId', N'EngagementId')))),
+                                    Indexed     = (SELECT COUNT(*) FROM sys.indexes
+                                                   WHERE name IN (N'UQ_Instance_Open', N'UQ_AgreementInstance_Open', N'UQ_AgreementInstance'))"),
+            t => (int)t.Rows[0]["OldInstance"] == 1 && (int)t.Rows[0]["OldTicket"] == 1 && (int)t.Rows[0]["OldTerms"] == 1
+                 && (int)t.Rows[0]["Required"] == 3 && (int)t.Rows[0]["Indexed"] == 3
+                 ? null : $"old columns {t.Rows[0]["OldInstance"]}/{t.Rows[0]["OldTicket"]}/{t.Rows[0]["OldTerms"]}, "
+                          + $"{t.Rows[0]["Required"]} of 3 required, {t.Rows[0]["Indexed"]} of 3 indexed");
 
         // the onboarding tick is scoped to what THIS agreement covers. Nothing asserted it before,
         // which is how a mutation that widened it to every server the client has went unnoticed.

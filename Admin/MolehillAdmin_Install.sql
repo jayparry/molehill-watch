@@ -658,9 +658,13 @@ IF COL_LENGTH(N'dbo.Invoice', N'AgreementId') IS NOT NULL
     EXEC(N'UPDATE i SET i.ClientId = a.ClientId, i.EngagementId = a.EngagementId
            FROM dbo.Invoice i JOIN dbo.Agreement a ON a.AgreementId = i.AgreementId WHERE i.ClientId IS NULL;');
 
-UPDATE e SET e.EngagementId = a.EngagementId
-FROM dbo.TimeEntry e JOIN dbo.Ticket t ON t.TicketId = e.TicketId JOIN dbo.Agreement a ON a.AgreementId = t.AgreementId
-WHERE e.EngagementId IS NULL;
+-- 2.8.0 note: wrapped and guarded, because Ticket.AgreementId is dropped further down. Where the
+-- column has gone there is nothing left for this to do - either 2.0.0 ran long ago or this is a
+-- fresh install - but unguarded it stops the whole upgrade from compiling.
+IF COL_LENGTH(N'dbo.Ticket', N'AgreementId') IS NOT NULL
+    EXEC(N'UPDATE e SET e.EngagementId = a.EngagementId
+           FROM dbo.TimeEntry e JOIN dbo.Ticket t ON t.TicketId = e.TicketId JOIN dbo.Agreement a ON a.AgreementId = t.AgreementId
+           WHERE e.EngagementId IS NULL;');
 GO
 
 IF COL_LENGTH(N'dbo.Invoice', N'AgreementId') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM dbo.Invoice WHERE ClientId IS NULL)
@@ -916,6 +920,79 @@ GO
 -- a consultancy day is 8 hours, which is what the price sheet sells. Only touched where it is still
 -- the old 7.5, so a figure somebody has deliberately set is left alone.
 UPDATE dbo.Setting SET Value = N'8' WHERE Name = 'DayHours' AND Value IN (N'7.5', N'7.50');
+GO
+
+/*--- tighten. Each guarded the way 2.0.0 guards its own: only when the column is still
+      nullable AND nothing is left unfilled, so a database the pre-flight stopped is left
+      working rather than half-changed. ---*/
+
+IF NOT EXISTS (SELECT 1 FROM #MhBlock)
+BEGIN
+    IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.Instance') AND name = N'ClientId' AND is_nullable = 1)
+       AND NOT EXISTS (SELECT 1 FROM dbo.Instance WHERE ClientId IS NULL)
+        ALTER TABLE dbo.Instance ALTER COLUMN ClientId int NOT NULL;
+
+    IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.Ticket') AND name = N'ClientId' AND is_nullable = 1)
+       AND NOT EXISTS (SELECT 1 FROM dbo.Ticket WHERE ClientId IS NULL)
+        ALTER TABLE dbo.Ticket ALTER COLUMN ClientId int NOT NULL;
+
+    -- a ticket must name the work that bills it, or nothing can ever invoice it
+    IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.Ticket') AND name = N'EngagementId' AND is_nullable = 1)
+       AND NOT EXISTS (SELECT 1 FROM dbo.Ticket WHERE EngagementId IS NULL)
+        ALTER TABLE dbo.Ticket ALTER COLUMN EngagementId int NOT NULL;
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM #MhBlock)
+BEGIN
+    -- One live server of each name per client. Filtered, so the remove-and-re-add history that
+    -- usp_Instance_Add has always allowed is kept: only the open rows have to be unique.
+    IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UQ_Instance_Open' AND object_id = OBJECT_ID(N'dbo.Instance'))
+        CREATE UNIQUE INDEX UQ_Instance_Open ON dbo.Instance (ClientId, InstanceName) WHERE CoveredTo IS NULL;
+
+    -- and one live coverage per server, which is decision 3 said declaratively. The procedural
+    -- guard in usp_Agreement_CoverInstance catches the overlapping-history case this cannot see.
+    IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UQ_AgreementInstance_Open' AND object_id = OBJECT_ID(N'dbo.AgreementInstance'))
+        CREATE UNIQUE INDEX UQ_AgreementInstance_Open ON dbo.AgreementInstance (InstanceId) WHERE CoveredTo IS NULL;
+
+    IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UQ_AgreementInstance' AND object_id = OBJECT_ID(N'dbo.AgreementInstance'))
+        CREATE UNIQUE INDEX UQ_AgreementInstance ON dbo.AgreementInstance (AgreementId, InstanceId, CoveredFrom);
+END
+GO
+
+/*--- drop. Last, and only once everything above has happened. ---*/
+
+IF NOT EXISTS (SELECT 1 FROM #MhBlock)
+   AND COL_LENGTH(N'dbo.Instance', N'AgreementId') IS NOT NULL
+   AND NOT EXISTS (SELECT 1 FROM dbo.Instance WHERE ClientId IS NULL)
+BEGIN
+    -- this check cannot follow the columns onto AgreementInstance: a CHECK constraint there cannot
+    -- see Instance.Environment. usp_Instance_Add still refuses, and the dashboard reports any that
+    -- arrive by a direct INSERT.
+    IF OBJECT_ID(N'dbo.CK_Instance_NonProdFee', 'C') IS NOT NULL
+        ALTER TABLE dbo.Instance DROP CONSTRAINT CK_Instance_NonProdFee;
+
+    -- by lookup, because an old install may have let SQL Server name it
+    DECLARE @fkI sysname = (SELECT name FROM sys.foreign_keys
+                            WHERE parent_object_id = OBJECT_ID(N'dbo.Instance') AND name LIKE N'FK_Instance_Agreement%');
+    IF @fkI IS NOT NULL EXEC(N'ALTER TABLE dbo.Instance DROP CONSTRAINT ' + @fkI);
+    ALTER TABLE dbo.Instance DROP COLUMN AgreementId;
+    ALTER TABLE dbo.Instance DROP CONSTRAINT DF_Instance_Full;
+    ALTER TABLE dbo.Instance DROP COLUMN PricedAsFullInstance, AgreedMonthlyFee;
+    PRINT N'Instances now belong to the client; what an agreement covers, and on what terms, is in dbo.AgreementInstance.';
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM #MhBlock)
+   AND COL_LENGTH(N'dbo.Ticket', N'AgreementId') IS NOT NULL
+   AND NOT EXISTS (SELECT 1 FROM dbo.Ticket WHERE ClientId IS NULL OR EngagementId IS NULL)
+BEGIN
+    DECLARE @fkT sysname = (SELECT name FROM sys.foreign_keys
+                            WHERE parent_object_id = OBJECT_ID(N'dbo.Ticket') AND name LIKE N'FK_Ticket_Agreement%');
+    IF @fkT IS NOT NULL EXEC(N'ALTER TABLE dbo.Ticket DROP CONSTRAINT ' + @fkT);
+    ALTER TABLE dbo.Ticket DROP COLUMN AgreementId;
+    PRINT N'Tickets now belong to the client and name the work that bills them.';
+END
 GO
 
 /*=============================================================================
@@ -1731,12 +1808,11 @@ BEGIN
     IF @PrimaryInstanceName IS NOT NULL AND @PrimaryId IS NULL
         PRINT N'Note: primary instance "' + @PrimaryInstanceName + N'" not found on this agreement; add it first to link the secondary.';
 
-    INSERT dbo.Instance (ClientId, AgreementId, InstanceName, Environment, Role, Platform, DatabaseCount, PricedAsFullInstance, AgreedMonthlyFee, AvailabilityGroup, PrimaryInstanceId,
+    INSERT dbo.Instance (ClientId, InstanceName, Environment, Role, Platform, DatabaseCount, AvailabilityGroup, PrimaryInstanceId,
                          FciNodes, SqlVersion, Edition, OsVersion, CoveredFrom)
-    VALUES (@OwningClientId, @AgreementId, @InstanceName, @Environment, @Role, @Platform, @DatabaseCount, @PricedAsFullInstance, @AgreedMonthlyFee, @AvailabilityGroup, @PrimaryId,
+    VALUES (@OwningClientId, @InstanceName, @Environment, @Role, @Platform, @DatabaseCount, @AvailabilityGroup, @PrimaryId,
             @FciNodes, @SqlVersion, @Edition, @OsVersion, @CoveredFrom);
-    -- and the coverage row it is covered under. The old columns are written above as well, because
-    -- every read path is still on them until the second half of 2.8.0.
+    -- and the coverage row, which carries what this agreement charges for it
     DECLARE @NewInstanceId int = CONVERT(int, SCOPE_IDENTITY());
     INSERT dbo.AgreementInstance (AgreementId, InstanceId, CoveredFrom, PricedAsFullInstance, AgreedMonthlyFee)
     VALUES (@AgreementId, @NewInstanceId, @CoveredFrom, @PricedAsFullInstance, @AgreedMonthlyFee);
@@ -2426,9 +2502,8 @@ BEGIN
     IF @RateType NOT IN ('BusinessHours', 'OutOfHours', 'ByTimeOfWork')
     BEGIN RAISERROR(N'@RateType must be BusinessHours, OutOfHours or ByTimeOfWork.', 16, 1); RETURN; END
 
-    -- AgreementId is still written for a support ticket while the old column is still there
-    INSERT dbo.Ticket (ClientId, EngagementId, AgreementId, InstanceId, ContactId, Severity, WorkType, Title, Description, Channel, RaisedAt, ResponseDueAt, Status, RateType)
-    VALUES (@ClientId, @TicketEngagementId, @AgreementId, @InstanceId, @ContactId, @Severity, @WorkType, @Title, @Description, @Channel, @RaisedAt,
+    INSERT dbo.Ticket (ClientId, EngagementId, InstanceId, ContactId, Severity, WorkType, Title, Description, Channel, RaisedAt, ResponseDueAt, Status, RateType)
+    VALUES (@ClientId, @TicketEngagementId, @InstanceId, @ContactId, @Severity, @WorkType, @Title, @Description, @Channel, @RaisedAt,
             dbo.fn_ResponseDue(@RaisedAt, @Severity), 'Open', @RateType);
     IF @RateType = 'OutOfHours' PRINT N'Time on this ticket is charged at the out-of-hours rate.';
     ELSE IF @RateType = 'ByTimeOfWork' PRINT N'Time on this ticket is charged by when the work is done (out of hours outside Mon-Fri 09:00-17:30).';
