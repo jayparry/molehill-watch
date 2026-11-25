@@ -243,7 +243,7 @@ public static class Queries
     public static DataTable TimeEntries(AdminDb db, string ticketRef) => db.Query("""
         SELECT e.TimeEntryId AS Id, e.WorkStart AS Started, e.Minutes, e.RateType AS Rate, CASE WHEN e.IsBillable = 1 THEN 'Yes' ELSE 'No' END AS Billable,
                CASE WHEN inv.InvoiceNo IS NOT NULL THEN inv.InvoiceNo
-                    WHEN dbo.fn_IsBillablePeriod(t.AgreementId, e.WorkStart) = 0 THEN 'NEVER - outside the billing period'
+                    WHEN dbo.fn_IsBillableWhen(t.EngagementId, e.WorkStart) = 0 THEN 'NEVER - outside the billing period'
                     WHEN e.IsBillable = 0 THEN 'not billable'
                     ELSE 'at the next billing run' END AS Invoiced,
                e.Description

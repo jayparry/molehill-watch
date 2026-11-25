@@ -1450,6 +1450,23 @@ public static partial class SelfTest
             Submit(AdminForms.LogWork(db, conRef), ("WorkDate", D(lastMonth.AddDays(3))), ("Hours", "2"), ("Description", "ETL rewrite"));
             return Submit(AdminForms.LogWork(db, conRef), ("WorkDate", D(lastMonth.AddDays(3))), ("Hours", "3"), ("Description", "ETL testing"));
         });
+        // 2.8.0: when work can be billed is decided from the ENGAGEMENT, not from an agreement.
+        // Monitoring keeps the agreement's dates; consultancy uses its own.
+        Step("consultancy work inside its engagement's dates is billable",
+            () => db.Scalar(@"SELECT dbo.fn_IsBillableWhen(e.EngagementId, CAST(e.StartDate AS datetime2(0)))
+                              FROM dbo.Engagement e WHERE e.EngagementRef = @r", ("@r", conRef)),
+            v => Convert.ToInt32(v) == 1 ? null : "the engagement's own start date reads as unbillable");
+        Step("and work dated before it starts is not",
+            () => db.Scalar(@"SELECT dbo.fn_IsBillableWhen(e.EngagementId, CAST(DATEADD(day, -1, e.StartDate) AS datetime2(0)))
+                              FROM dbo.Engagement e WHERE e.EngagementRef = @r", ("@r", conRef)),
+            v => Convert.ToInt32(v) == 0 ? null : "work before the engagement started reads as billable");
+        // the rename is the mechanism that forced every caller to be updated; this is the tripwire
+        // that stops the old name coming back as a trap, since both its parameters were int and a
+        // stale caller would have gone on returning a plausible wrong answer
+        Step("the old fn_IsBillablePeriod is gone, not kept as a synonym",
+            () => db.Scalar("SELECT OBJECT_ID(N'dbo.fn_IsBillablePeriod')"),
+            v => v == null || v is DBNull ? null : "fn_IsBillablePeriod still exists");
+
         Step("three hours bills as half a day; two plus three on one day bills as a whole one", () => Queries.ConsultancyWork(db, conRef),
             t => t.Rows.Count == 3 && t.Rows.Cast<DataRow>().Sum(r => (decimal)r["Days"]) == 2.5m ? null
                  : string.Join(", ", t.Rows.Cast<DataRow>().Select(r => $"{Output.Format(r["Date"])} {r["Days"]}")));

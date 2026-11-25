@@ -1098,13 +1098,40 @@ GO
 
 -- Work is only ever billed if it falls inside one of the agreement's billing cycles: from the start date,
 -- and not after the agreement ends. Anything outside that is never invoiced.
-CREATE OR ALTER FUNCTION dbo.fn_IsBillablePeriod (@AgreementId int, @WorkStart datetime2(0))
+-- When a piece of work can be billed for. Monitoring takes the agreement's dates, because that is
+-- what the client is paying for a cycle at a time; consultancy takes the engagement's own. One
+-- definition, so the test and the message that explains a failed test cannot disagree.
+CREATE OR ALTER FUNCTION dbo.fn_BillableWindow (@EngagementId int)
+RETURNS TABLE
+AS
+RETURN
+    SELECT EngagementType = e.EngagementType,
+           WindowStart = CASE WHEN e.EngagementType = 'Monitoring' THEN a.StartDate ELSE e.StartDate END,
+           WindowEnd   = CASE WHEN e.EngagementType = 'Monitoring' THEN a.EndDate   ELSE e.EndDate   END
+    FROM dbo.Engagement e
+    LEFT JOIN dbo.Agreement a ON a.EngagementId = e.EngagementId
+    WHERE e.EngagementId = @EngagementId;
+GO
+
+-- 2.8.0: renamed from fn_IsBillablePeriod(@AgreementId, @WorkStart), and the old name is dropped
+-- on purpose. Both parameters are int, so a caller left on the old name would have gone on
+-- compiling and gone on returning a plausible wrong answer about whether work can be invoiced.
+-- Dropping it makes every stale caller fail instead.
+DROP FUNCTION IF EXISTS dbo.fn_IsBillablePeriod;
+GO
+
+CREATE OR ALTER FUNCTION dbo.fn_IsBillableWhen (@EngagementId int, @WorkStart datetime2(0))
 RETURNS bit
 AS
 BEGIN
-    DECLARE @Start date, @End date;
-    SELECT @Start = StartDate, @End = EndDate FROM dbo.Agreement WHERE AgreementId = @AgreementId;
-    IF @Start IS NULL RETURN 0;
+    DECLARE @Type varchar(20), @Start date, @End date;
+    SELECT @Type = EngagementType, @Start = WindowStart, @End = WindowEnd
+    FROM dbo.fn_BillableWindow(@EngagementId);
+    IF @Type IS NULL RETURN 0;
+    -- a support agreement with no start date has no billing window yet. Consultancy with no start
+    -- date is billable whenever the work was done: usp_Billing_Run takes the earliest entry as the
+    -- start, so refusing here would strand the work instead.
+    IF @Start IS NULL RETURN CASE WHEN @Type = 'Monitoring' THEN 0 ELSE 1 END;
     RETURN CASE WHEN CAST(@WorkStart AS date) >= @Start AND (@End IS NULL OR CAST(@WorkStart AS date) <= @End) THEN 1 ELSE 0 END;
 END
 GO
@@ -1241,15 +1268,23 @@ RETURNS TABLE
 AS
 RETURN
     WITH inst AS (
-        SELECT i.InstanceId, i.InstanceName, i.Role, i.Environment, i.AgreedMonthlyFee, i.CoveredFrom, i.Platform, i.DatabaseCount,
+        -- AgreedMonthlyFee, PricedAsFullInstance and the covered dates come from the COVERAGE:
+        -- they are terms of what this agreement agreed, not facts about the server.
+        SELECT i.InstanceId, i.InstanceName, i.Role, i.Environment, ai.AgreedMonthlyFee, ai.CoveredFrom, i.Platform, i.DatabaseCount,
                p.ServerFee, p.ServerFeeTiered, p.TierFromServerNumber, p.SecondaryReplicaFee,
                p.AzureSqlDbUnitFee, p.AzureSqlDbIncludedDatabases, p.AzureSqlDbExtraDatabaseFee,
                IsAzureDb   = CASE WHEN i.Platform IN ('AzureSqlDatabaseServer', 'AzureSqlDatabaseElasticPool') THEN 1 ELSE 0 END,
-               IsSecondary = CASE WHEN i.Role IN ('AGSecondary', 'LogShippingSecondary', 'MirrorSecondary', 'GeoReplica') AND i.PricedAsFullInstance = 0 THEN 1 ELSE 0 END
-        FROM dbo.Instance i
+               IsSecondary = CASE WHEN i.Role IN ('AGSecondary', 'LogShippingSecondary', 'MirrorSecondary', 'GeoReplica') AND ai.PricedAsFullInstance = 0 THEN 1 ELSE 0 END
+        FROM dbo.AgreementInstance ai
+        JOIN dbo.Instance i ON i.InstanceId = ai.InstanceId
         JOIN dbo.PriceList p ON p.PriceListId = dbo.fn_PriceListIdOn(@AgreementId, @AsOf)
-        WHERE i.AgreementId = @AgreementId AND i.CoveredFrom <= @AsOf AND (i.CoveredTo IS NULL OR i.CoveredTo >= @AsOf)),
+        WHERE ai.AgreementId = @AgreementId AND ai.CoveredFrom <= @AsOf AND (ai.CoveredTo IS NULL OR ai.CoveredTo >= @AsOf)),
     ranked AS (
+        -- Untouched on purpose. The PARTITION BY splits "counts towards the multi-server tiers"
+        -- from the rest; tiers stay per agreement because the WHERE above confines this to one.
+        -- The tiebreaker must stay InstanceId: those values survive the move, so this reproduces
+        -- the old order exactly, where the coverage table's identity would be a fresh sequence
+        -- and could reverse which server is the 2nd and which the 3rd - which is the price.
         SELECT *, TierRank = ROW_NUMBER() OVER (PARTITION BY CASE WHEN AgreedMonthlyFee IS NULL AND IsSecondary = 0 AND IsAzureDb = 0 THEN 1 ELSE 0 END
                                                 ORDER BY CoveredFrom, InstanceId),
                   ExtraDatabases = CASE WHEN DatabaseCount > AzureSqlDbIncludedDatabases THEN DatabaseCount - AzureSqlDbIncludedDatabases ELSE 0 END
@@ -2342,12 +2377,13 @@ BEGIN
         PRINT N'Logged as OUT OF HOURS (GBP ' + ISNULL(@OohRate, N'?') + N'/h). Pass @RateType = ''BusinessHours'' if that is wrong, or change the ticket''s rate (usp_Ticket_SetRate).';
     END
 
-    IF dbo.fn_IsBillablePeriod(@AgreementId, @WorkStart) = 0
+    IF dbo.fn_IsBillableWhen(@TicketEngagementId, @WorkStart) = 0
     BEGIN
-        DECLARE @AgStart date, @AgEnd date;
-        SELECT @AgStart = StartDate, @AgEnd = EndDate FROM dbo.Agreement WHERE AgreementId = @AgreementId;
-        PRINT N'WARNING: this time is dated ' + CONVERT(nvarchar(11), @WorkStart, 106) + N', outside the agreement''s billing period ('
-            + CONVERT(nvarchar(11), @AgStart, 106) + ISNULL(N' to ' + CONVERT(nvarchar(11), @AgEnd, 106), N' onwards')
+        -- the window comes from the same place the test does, so the two cannot disagree
+        DECLARE @WStart date, @WEnd date;
+        SELECT @WStart = WindowStart, @WEnd = WindowEnd FROM dbo.fn_BillableWindow(@TicketEngagementId);
+        PRINT N'WARNING: this time is dated ' + CONVERT(nvarchar(11), @WorkStart, 106) + N', outside the billing period ('
+            + ISNULL(CONVERT(nvarchar(11), @WStart, 106), N'not started') + ISNULL(N' to ' + CONVERT(nvarchar(11), @WEnd, 106), N' onwards')
             + N'). It will NEVER be invoiced and will not use included or pre-paid hours. Correct the date with usp_Time_Update.';
     END
     ELSE IF CAST(@WorkStart AS date) > CAST(dbo.fn_UkNow() AS date)
@@ -2368,8 +2404,9 @@ CREATE OR ALTER PROCEDURE dbo.usp_Time_Update
 AS
 BEGIN
     SET NOCOUNT ON;
-    DECLARE @TicketId int, @InvoiceId int, @AgreementId int, @Ref varchar(30), @Found bit = 0;
+    DECLARE @TicketId int, @InvoiceId int, @AgreementId int, @EntryEngagementId int, @Ref varchar(30), @Found bit = 0;
     SELECT @TicketId = e.TicketId, @InvoiceId = e.InvoiceId, @AgreementId = t.AgreementId,
+           @EntryEngagementId = e.EngagementId,
            @Ref = ISNULL(t.TicketRef, g.EngagementRef), @Found = 1
     FROM dbo.TimeEntry e
     LEFT JOIN dbo.Ticket t ON t.TicketId = e.TicketId
@@ -2393,8 +2430,8 @@ BEGIN
 
     DECLARE @NewStart datetime2(0) = (SELECT WorkStart FROM dbo.TimeEntry WHERE TimeEntryId = @TimeEntryId);
     PRINT N'Updated the time on ' + @Ref + N'.';
-    IF @AgreementId IS NOT NULL AND dbo.fn_IsBillablePeriod(@AgreementId, @NewStart) = 0
-        PRINT N'WARNING: it is still dated outside the agreement''s billing period, so it will never be invoiced.';
+    IF dbo.fn_IsBillableWhen(@EntryEngagementId, @NewStart) = 0
+        PRINT N'WARNING: it is still dated outside the billing period, so it will never be invoiced.';
     SELECT e.TimeEntryId, Ref = ISNULL(t.TicketRef, g.EngagementRef), e.WorkStart, e.Minutes, e.RateType, e.IsBillable, e.Description
     FROM dbo.TimeEntry e LEFT JOIN dbo.Ticket t ON t.TicketId = e.TicketId LEFT JOIN dbo.Engagement g ON g.EngagementId = e.EngagementId
     WHERE e.TimeEntryId = @TimeEntryId;
@@ -2631,13 +2668,18 @@ BEGIN
            OutOfHoursLogged = CAST(ISNULL(SUM(CASE WHEN e.RateType = 'OutOfHours' THEN e.Minutes END), 0) / 60.0 AS decimal(6,2)),
            PrepaidHoursLeft = (SELECT CAST(SUM(Remaining) AS decimal(9,2)) FROM dbo.fn_PrepaidPackages(@AgreementId, @AsOfDate) WHERE State IN ('Active', 'Not started')),
            -- billable time not yet on an invoice: included and pre-paid hours are only used when billing runs
-           UnbilledHours = (SELECT CAST(ISNULL(SUM(x.Minutes), 0) / 60.0 AS decimal(9,2)) FROM dbo.TimeEntry x JOIN dbo.Ticket y ON y.TicketId = x.TicketId
-                            WHERE y.AgreementId = @AgreementId AND y.WorkType <> 'Project' AND x.IsBillable = 1 AND x.InvoiceId IS NULL
-                              AND dbo.fn_IsBillablePeriod(y.AgreementId, x.WorkStart) = 1),
+           -- reached through THIS agreement's engagement, which is what keeps a ticket raised on a
+           -- consultancy engagement from eating the support agreement's included hours
+           UnbilledHours = (SELECT CAST(ISNULL(SUM(x.Minutes), 0) / 60.0 AS decimal(9,2)) FROM dbo.TimeEntry x
+                            JOIN dbo.Ticket y ON y.TicketId = x.TicketId
+                            JOIN dbo.Agreement ya ON ya.EngagementId = y.EngagementId AND ya.AgreementId = @AgreementId
+                            WHERE y.WorkType <> 'Project' AND x.IsBillable = 1 AND x.InvoiceId IS NULL
+                              AND dbo.fn_IsBillableWhen(y.EngagementId, x.WorkStart) = 1),
            Note = N'Approximate - minimum charges are applied at invoicing. Unused included hours do not roll over.'
     FROM dbo.Ticket t
+    JOIN dbo.Agreement ta ON ta.EngagementId = t.EngagementId AND ta.AgreementId = @AgreementId
     LEFT JOIN dbo.TimeEntry e ON e.TicketId = t.TicketId AND e.IsBillable = 1 AND CAST(e.WorkStart AS date) BETWEEN @CycleStart AND @CycleEnd
-    WHERE t.AgreementId = @AgreementId AND t.WorkType <> 'Project';
+    WHERE t.WorkType <> 'Project';
 END
 GO
 
@@ -3863,7 +3905,7 @@ BEGIN
            + N'). It will never be invoiced and does not use included or pre-paid hours: correct the date (usp_Time_Update) or remove it.', NULL
     FROM dbo.TimeEntry e JOIN dbo.Ticket t ON t.TicketId = e.TicketId
     JOIN dbo.Agreement a ON a.AgreementId = t.AgreementId JOIN dbo.Client c ON c.ClientId = a.ClientId
-    WHERE e.IsBillable = 1 AND e.InvoiceId IS NULL AND t.WorkType <> 'Project' AND dbo.fn_IsBillablePeriod(t.AgreementId, e.WorkStart) = 0
+    WHERE e.IsBillable = 1 AND e.InvoiceId IS NULL AND t.WorkType <> 'Project' AND dbo.fn_IsBillableWhen(t.EngagementId, e.WorkStart) = 0
     GROUP BY c.ClientName, t.TicketRef, a.AgreementRef, a.StartDate, a.EndDate;
 
     -- Weekly reports
