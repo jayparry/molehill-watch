@@ -86,8 +86,10 @@ public static class Queries
 
     public static List<string> InstanceNames(AdminDb db, string agreementRef) =>
         db.Query("""
-            SELECT i.InstanceName FROM dbo.Instance i JOIN dbo.Agreement a ON a.AgreementId = i.AgreementId
-            WHERE a.AgreementRef = @Ref AND i.CoveredTo IS NULL ORDER BY i.InstanceName;
+            SELECT i.InstanceName FROM dbo.AgreementInstance ai
+            JOIN dbo.Instance i ON i.InstanceId = ai.InstanceId
+            JOIN dbo.Agreement a ON a.AgreementId = ai.AgreementId
+            WHERE a.AgreementRef = @Ref AND ai.CoveredTo IS NULL ORDER BY i.InstanceName;
             """, ("@Ref", agreementRef)).Rows.Cast<DataRow>().Select(r => (string)r[0]).ToList();
 
     public static DataRow? Agreement(AdminDb db, string agreementRef)
@@ -173,27 +175,38 @@ public static class Queries
                                WHEN 'AzureSqlDatabaseServer' THEN 'Azure SQL DB server' WHEN 'AzureSqlDatabaseElasticPool' THEN 'Azure SQL DB pool' END AS Platform,
                i.Role, i.DatabaseCount AS DBs, i.Environment AS Env, i.SqlVersion AS Version,
                f.MonthlyFee AS Fee,
-               CASE WHEN i.CoveredTo IS NOT NULL AND i.CoveredTo < @AsOf THEN 'Removed ' + CONVERT(varchar(11), i.CoveredTo, 106)
-                    WHEN i.CoveredTo IS NOT NULL THEN 'Ends ' + CONVERT(varchar(11), i.CoveredTo, 106)
-                    WHEN i.CoveredFrom > @AsOf THEN 'From ' + CONVERT(varchar(11), i.CoveredFrom, 106) ELSE 'Covered' END AS Cover,
+               CASE WHEN ai.CoveredTo IS NOT NULL AND ai.CoveredTo < @AsOf THEN 'Removed ' + CONVERT(varchar(11), ai.CoveredTo, 106)
+                    WHEN ai.CoveredTo IS NOT NULL THEN 'Ends ' + CONVERT(varchar(11), ai.CoveredTo, 106)
+                    WHEN ai.CoveredFrom > @AsOf THEN 'From ' + CONVERT(varchar(11), ai.CoveredFrom, 106) ELSE 'Covered' END AS Cover,
                i.MonitoringInstalledDate AS Monitoring,
                CASE WHEN i.Platform IN ('AzureSqlDatabaseServer', 'AzureSqlDatabaseElasticPool', 'AzureSqlManagedInstance') THEN 'Microsoft-managed'
                     WHEN l.ExtendedEnd < @Today AND i.UnsupportedRiskAcceptedDate IS NOT NULL THEN 'Unsupported, risk accepted'
                     WHEN l.ExtendedEnd < @Today THEN 'UNSUPPORTED'
                     WHEN l.ExtendedEnd IS NULL THEN '?' ELSE 'Supported' END AS Lifecycle,
                f.PricingBasis AS Basis
+        -- One row per SERVER, not per coverage. A server repriced part-way through has more than
+        -- one coverage row, and listing both would show it twice and double its fee in any total -
+        -- which is exactly what the write suite caught. The coverage in force at @AsOf wins; where
+        -- none is, the most recent one is shown so a removed server still appears.
         FROM dbo.Instance i
+        JOIN (SELECT InstanceId, AgreementId, CoveredFrom, CoveredTo,
+                     Pick = ROW_NUMBER() OVER (PARTITION BY InstanceId
+                            ORDER BY CASE WHEN CoveredFrom <= @AsOf AND (CoveredTo IS NULL OR CoveredTo >= @AsOf) THEN 0 ELSE 1 END,
+                                     CoveredFrom DESC)
+              FROM dbo.AgreementInstance WHERE AgreementId = @AgreementId) ai
+          ON ai.InstanceId = i.InstanceId AND ai.Pick = 1
         LEFT JOIN dbo.fn_AgreementFees(@AgreementId, @AsOf) f ON f.InstanceId = i.InstanceId
         LEFT JOIN dbo.ProductLifecycle l ON l.VersionKey = i.SqlVersion
-        WHERE i.AgreementId = @AgreementId
-        ORDER BY CASE WHEN i.CoveredTo < @AsOf THEN 1 ELSE 0 END, i.InstanceName;
+        ORDER BY CASE WHEN ai.CoveredTo < @AsOf THEN 1 ELSE 0 END, i.InstanceName;
         """, ("@Ref", agreementRef));
 
     public static DataRow? Instance(AdminDb db, string agreementRef, string instanceName)
     {
         var t = db.Query("""
-            SELECT i.* FROM dbo.Instance i JOIN dbo.Agreement a ON a.AgreementId = i.AgreementId
-            WHERE a.AgreementRef = @Ref AND i.InstanceName = @Name;
+            SELECT TOP (1) i.* FROM dbo.Instance i
+            JOIN dbo.Agreement a ON a.ClientId = i.ClientId
+            WHERE a.AgreementRef = @Ref AND i.InstanceName = @Name
+            ORDER BY CASE WHEN i.CoveredTo IS NULL THEN 0 ELSE 1 END, i.InstanceId;
             """, ("@Ref", agreementRef), ("@Name", instanceName));
         return t.Rows.Count == 0 ? null : t.Rows[0];
     }
@@ -209,7 +222,8 @@ public static class Queries
         SELECT TOP (200) w.WeekEnding, i.InstanceName AS Instance, w.OverallStatus AS Status, w.CriticalCount AS Critical,
                w.WarningCount AS Warnings, t.TicketRef AS FollowUp, w.Notes
         FROM dbo.WeeklyReportLog w JOIN dbo.Instance i ON i.InstanceId = w.InstanceId
-        JOIN dbo.Agreement a ON a.AgreementId = i.AgreementId
+        JOIN dbo.AgreementInstance ai ON ai.InstanceId = i.InstanceId
+        JOIN dbo.Agreement a ON a.AgreementId = ai.AgreementId
         LEFT JOIN dbo.Ticket t ON t.TicketId = w.FollowUpTicketId
         WHERE a.AgreementRef = @Ref ORDER BY w.WeekEnding DESC, i.InstanceName;
         """, ("@Ref", agreementRef));
@@ -220,7 +234,8 @@ public static class Queries
                i.InstanceName AS Instance, t.RaisedAt AS Raised, t.ResponseDueAt AS ResponseDue, t.FirstResponseAt AS Responded,
                CAST(ISNULL((SELECT SUM(Minutes) FROM dbo.TimeEntry e WHERE e.TicketId = t.TicketId), 0) / 60.0 AS decimal(6,2)) AS Hours,
                t.EstimateHours AS Estimate, CASE WHEN t.EstimateApprovedAt IS NOT NULL THEN 'Yes' END AS Approved
-        FROM dbo.Ticket t JOIN dbo.Agreement a ON a.AgreementId = t.AgreementId JOIN dbo.Client c ON c.ClientId = a.ClientId
+        FROM dbo.Ticket t JOIN dbo.Client c ON c.ClientId = t.ClientId
+        LEFT JOIN dbo.Agreement a ON a.EngagementId = t.EngagementId
         LEFT JOIN dbo.Instance i ON i.InstanceId = t.InstanceId
         WHERE (@OpenOnly = 0 OR t.Status NOT IN ('Resolved', 'Closed')) AND (@Ref IS NULL OR a.AgreementRef = @Ref)
         ORDER BY CASE WHEN t.Status IN ('Resolved', 'Closed') THEN 1 ELSE 0 END,
@@ -233,7 +248,8 @@ public static class Queries
             SELECT t.TicketRef, a.AgreementRef, c.ClientName, t.Title, t.Severity, t.WorkType, t.RateType, t.Status, i.InstanceName,
                    ct.FullName AS Contact, t.Channel, t.RaisedAt, t.ResponseDueAt, t.FirstResponseAt,
                    t.EstimateHours, t.EstimateSentAt, t.EstimateApprovedAt, t.ResolvedAt, t.Description, t.Resolution
-            FROM dbo.Ticket t JOIN dbo.Agreement a ON a.AgreementId = t.AgreementId JOIN dbo.Client c ON c.ClientId = a.ClientId
+            FROM dbo.Ticket t JOIN dbo.Client c ON c.ClientId = t.ClientId
+            LEFT JOIN dbo.Agreement a ON a.EngagementId = t.EngagementId
             LEFT JOIN dbo.Instance i ON i.InstanceId = t.InstanceId LEFT JOIN dbo.Contact ct ON ct.ContactId = t.ContactId
             WHERE t.TicketRef = @Ref;
             """, ("@Ref", ticketRef));
@@ -286,7 +302,7 @@ public static class Queries
         SELECT e.EngagementRef AS Ref, c.ClientName AS Client,
                CASE e.EngagementType WHEN 'Monitoring' THEN 'Molehill Watch' ELSE 'Consultancy' END AS Type,
                CASE WHEN e.EngagementType = 'Monitoring'
-                    THEN CONVERT(nvarchar(10), (SELECT COUNT(*) FROM dbo.Instance i WHERE i.AgreementId = a.AgreementId AND i.CoveredTo IS NULL))
+                    THEN CONVERT(nvarchar(10), (SELECT COUNT(*) FROM dbo.AgreementInstance ai WHERE ai.AgreementId = a.AgreementId AND ai.CoveredTo IS NULL))
                          + ' instance(s) monitored'
                     ELSE e.Name END AS [What],
                CASE WHEN e.EngagementType = 'Monitoring' THEN {AgreementStatus} ELSE e.Status END AS Status,
@@ -303,7 +319,7 @@ public static class Queries
                                                WHERE te.EngagementId = e.EngagementId AND te.IsBillable = 1 AND te.InvoiceId IS NULL), 0), 'N2') + ' h', '0.00 h')
                     ELSE NULLIF(NCHAR(163) + FORMAT(ISNULL(u.Value, 0), 'N0') + ' (' + FORMAT(ISNULL(u.Days, 0), 'N2') + ' d)', NCHAR(163) + '0 (0.00 d)')
                     END AS Unbilled,
-               (SELECT COUNT(*) FROM dbo.Ticket t WHERE t.AgreementId = a.AgreementId AND t.Status NOT IN ('Resolved', 'Closed')) AS OpenTickets,
+               (SELECT COUNT(*) FROM dbo.Ticket t WHERE t.EngagementId = e.EngagementId AND t.Status NOT IN ('Resolved', 'Closed')) AS OpenTickets,
                (SELECT COUNT(*) FROM dbo.OnboardingItem o WHERE o.AgreementId = a.AgreementId AND o.IsRequired = 1 AND o.CompletedDate IS NULL) AS OnboardingLeft,
                e.EngagementType AS _EngagementType
         FROM dbo.Engagement e

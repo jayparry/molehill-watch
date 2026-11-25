@@ -1700,8 +1700,6 @@ BEGIN
     DECLARE @AgreementId int = dbo.fn_AgreementId(@Client);
     IF @AgreementId IS NULL BEGIN RAISERROR(N'Agreement or client "%s" not found.', 16, 1, @Client); RETURN; END
     DECLARE @OwningClientId int = (SELECT ClientId FROM dbo.Agreement WHERE AgreementId = @AgreementId);
-    IF EXISTS (SELECT 1 FROM dbo.Instance WHERE AgreementId = @AgreementId AND InstanceName = @InstanceName AND CoveredTo IS NULL)
-    BEGIN RAISERROR(N'Instance "%s" is already covered on this agreement.', 16, 1, @InstanceName); RETURN; END
     -- 2.8.0: an instance is the client's, so the name has to be free across the whole client and not
     -- just this agreement. Checked case-insensitively, because the unique index that will enforce
     -- it is: ST-SQL01 and st-sql01 on two agreements do not collide today, and will.
@@ -1729,7 +1727,7 @@ BEGIN
              WHEN NOT EXISTS (SELECT 1 FROM dbo.BillingCycle WHERE AgreementId = @AgreementId AND FeeInvoiceId IS NOT NULL) THEN @Start
              ELSE @Today END);
 
-    DECLARE @PrimaryId int = (SELECT TOP (1) InstanceId FROM dbo.Instance WHERE AgreementId = @AgreementId AND InstanceName = @PrimaryInstanceName AND CoveredTo IS NULL);
+    DECLARE @PrimaryId int = (SELECT TOP (1) InstanceId FROM dbo.Instance WHERE ClientId = @OwningClientId AND InstanceName = @PrimaryInstanceName AND CoveredTo IS NULL);
     IF @PrimaryInstanceName IS NOT NULL AND @PrimaryId IS NULL
         PRINT N'Note: primary instance "' + @PrimaryInstanceName + N'" not found on this agreement; add it first to link the secondary.';
 
@@ -2354,24 +2352,50 @@ CREATE OR ALTER PROCEDURE dbo.usp_Ticket_Open
     @RaisedAt     datetime2(0)  = NULL,     -- UK time; default now
     @Channel      nvarchar(50)  = N'E-mail',
     @WorkType     varchar(20)   = 'Support', -- Support | PlannedOutOfHours | Project
-    @RateType     varchar(20)   = NULL       -- BusinessHours | OutOfHours | ByTimeOfWork; default: out of hours for planned
+    @RateType     varchar(20)   = NULL,      -- BusinessHours | OutOfHours | ByTimeOfWork; default: out of hours for planned
                                              -- out-of-hours work, otherwise business hours
+    @Engagement   nvarchar(200) = NULL       -- 2.8.0: the work that bills this ticket. Blank = the
+                                             -- client's Molehill Watch agreement, which is what a
+                                             -- support ticket has always meant.
 AS
 BEGIN
     SET NOCOUNT ON;
-    DECLARE @AgreementId int = dbo.fn_AgreementId(@Client);
-    IF @AgreementId IS NULL BEGIN RAISERROR(N'Agreement or client "%s" not found.', 16, 1, @Client); RETURN; END
     SET @RaisedAt = ISNULL(@RaisedAt, dbo.fn_UkNow());
 
+    -- A ticket belongs to the client and names the piece of work that bills it. Given an
+    -- engagement, that is the answer; otherwise it is the support agreement @Client resolves to,
+    -- and every agreement has exactly one engagement (UQ_Agreement_Engagement).
+    DECLARE @TicketEngagementId int, @AgreementId int, @ClientId int;
+    IF @Engagement IS NOT NULL
+    BEGIN
+        SET @TicketEngagementId = dbo.fn_EngagementId(@Engagement);
+        IF @TicketEngagementId IS NULL BEGIN RAISERROR(N'Engagement "%s" not found.', 16, 1, @Engagement); RETURN; END
+        SELECT @ClientId = ClientId FROM dbo.Engagement WHERE EngagementId = @TicketEngagementId;
+        SET @AgreementId = (SELECT AgreementId FROM dbo.Agreement WHERE EngagementId = @TicketEngagementId);
+    END
+    ELSE
+    BEGIN
+        SET @AgreementId = dbo.fn_AgreementId(@Client);
+        IF @AgreementId IS NULL BEGIN RAISERROR(N'Agreement or client "%s" not found.', 16, 1, @Client); RETURN; END
+        SELECT @ClientId = ClientId, @TicketEngagementId = EngagementId FROM dbo.Agreement WHERE AgreementId = @AgreementId;
+    END
+
+    -- the server is the client's; whether this agreement covered it when the ticket was raised is
+    -- a separate question, and the commercial rule in the warning is about the cover, not the server
     DECLARE @InstanceId int = NULL;
     IF @InstanceName IS NOT NULL
     BEGIN
-        SET @InstanceId = (SELECT TOP (1) InstanceId FROM dbo.Instance WHERE AgreementId = @AgreementId AND InstanceName = @InstanceName
-                           AND CoveredFrom <= CAST(@RaisedAt AS date) AND (CoveredTo IS NULL OR CoveredTo >= CAST(@RaisedAt AS date)));
+        SET @InstanceId = (SELECT TOP (1) InstanceId FROM dbo.Instance
+                           WHERE ClientId = @ClientId AND InstanceName = @InstanceName);
         IF @InstanceId IS NULL
+            PRINT N'WARNING: this client has no server called ' + @InstanceName + N'.';
+        ELSE IF @AgreementId IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM dbo.AgreementInstance ai
+                             WHERE ai.AgreementId = @AgreementId AND ai.InstanceId = @InstanceId
+                               AND ai.CoveredFrom <= CAST(@RaisedAt AS date)
+                               AND (ai.CoveredTo IS NULL OR ai.CoveredTo >= CAST(@RaisedAt AS date)))
             PRINT N'WARNING: ' + @InstanceName + N' is not a covered instance on this agreement. Support for non-covered servers is quoted separately.';
     END
-    DECLARE @ClientId int = (SELECT ClientId FROM dbo.Agreement WHERE AgreementId = @AgreementId);
     DECLARE @ContactId int = (SELECT TOP (1) ContactId FROM dbo.Contact
                               WHERE ClientId = @ClientId AND (FullName = @ContactName OR (@ContactName IS NULL AND IsNamedContact = 1 AND IsActive = 1))
                               ORDER BY IsActive DESC, IsNamedContact DESC);
@@ -2384,20 +2408,25 @@ BEGIN
             + N'). Check the request is authorised by a current named contact.';
     END
 
-    DECLARE @a_End date, @a_Paused date, @a_Start date;
-    SELECT @a_End = EndDate, @a_Paused = SupportPausedFrom, @a_Start = StartDate FROM dbo.Agreement WHERE AgreementId = @AgreementId;
-    IF @a_End < CAST(@RaisedAt AS date) PRINT N'WARNING: this agreement ended on ' + CONVERT(nvarchar(11), @a_End, 106) + N'.';
-    IF @a_Start > CAST(@RaisedAt AS date) PRINT N'WARNING: this agreement does not start until ' + CONVERT(nvarchar(11), @a_Start, 106) + N'.';
-    IF @a_Paused IS NOT NULL PRINT N'WARNING: support is paused for late payment (since ' + CONVERT(nvarchar(11), @a_Paused, 106) + N').';
+    IF @AgreementId IS NOT NULL
+    BEGIN
+        DECLARE @a_End date, @a_Paused date, @a_Start date;
+        SELECT @a_End = EndDate, @a_Paused = SupportPausedFrom, @a_Start = StartDate FROM dbo.Agreement WHERE AgreementId = @AgreementId;
+        IF @a_End < CAST(@RaisedAt AS date) PRINT N'WARNING: this agreement ended on ' + CONVERT(nvarchar(11), @a_End, 106) + N'.';
+        IF @a_Start > CAST(@RaisedAt AS date) PRINT N'WARNING: this agreement does not start until ' + CONVERT(nvarchar(11), @a_Start, 106) + N'.';
+        IF @a_Paused IS NOT NULL PRINT N'WARNING: support is paused for late payment (since ' + CONVERT(nvarchar(11), @a_Paused, 106) + N').';
+    END
+    ELSE
+    BEGIN
+        DECLARE @EngRef varchar(30) = (SELECT EngagementRef FROM dbo.Engagement WHERE EngagementId = @TicketEngagementId);
+        PRINT N'This ticket is billed by ' + @EngRef + N', not by a support agreement: no included hours, and time on it is invoiced with that work.';
+    END
 
     SET @RateType = ISNULL(@RateType, CASE WHEN @WorkType = 'PlannedOutOfHours' THEN 'OutOfHours' ELSE 'BusinessHours' END);
     IF @RateType NOT IN ('BusinessHours', 'OutOfHours', 'ByTimeOfWork')
     BEGIN RAISERROR(N'@RateType must be BusinessHours, OutOfHours or ByTimeOfWork.', 16, 1); RETURN; END
 
-    -- 2.8.0: a ticket belongs to the client and names the piece of work that bills it. Every
-    -- agreement has exactly one engagement (UQ_Agreement_Engagement), so there is nothing to
-    -- choose between here. AgreementId is still written: the read paths are on it until G2.
-    DECLARE @TicketEngagementId int = (SELECT EngagementId FROM dbo.Agreement WHERE AgreementId = @AgreementId);
+    -- AgreementId is still written for a support ticket while the old column is still there
     INSERT dbo.Ticket (ClientId, EngagementId, AgreementId, InstanceId, ContactId, Severity, WorkType, Title, Description, Channel, RaisedAt, ResponseDueAt, Status, RateType)
     VALUES (@ClientId, @TicketEngagementId, @AgreementId, @InstanceId, @ContactId, @Severity, @WorkType, @Title, @Description, @Channel, @RaisedAt,
             dbo.fn_ResponseDue(@RaisedAt, @Severity), 'Open', @RateType);
@@ -2413,7 +2442,7 @@ BEGIN
     SELECT t.TicketRef, c.ClientName, t.Severity, t.Title, Instance = @InstanceName, t.RaisedAt, t.ResponseDueAt,
            DueIn = CASE WHEN DATEDIFF(minute, dbo.fn_UkNow(), t.ResponseDueAt) < 0 THEN 'OVERDUE'
                         ELSE CONVERT(varchar(10), DATEDIFF(minute, dbo.fn_UkNow(), t.ResponseDueAt) / 60) + 'h ' + CONVERT(varchar(10), DATEDIFF(minute, dbo.fn_UkNow(), t.ResponseDueAt) % 60) + 'm' END
-    FROM dbo.Ticket t JOIN dbo.Agreement a ON a.AgreementId = t.AgreementId JOIN dbo.Client c ON c.ClientId = a.ClientId
+    FROM dbo.Ticket t JOIN dbo.Client c ON c.ClientId = t.ClientId
     WHERE t.TicketId = @TicketId;
 END
 GO
@@ -2463,10 +2492,13 @@ CREATE OR ALTER PROCEDURE dbo.usp_Time_Log
 AS
 BEGIN
     SET NOCOUNT ON;
-    DECLARE @TicketId int, @AgreementId int, @WorkType varchar(20), @EstApproved datetime2(0), @EstHours decimal(6,2), @TicketRate varchar(20);
-    SELECT @TicketId = TicketId, @AgreementId = AgreementId, @WorkType = WorkType, @EstApproved = EstimateApprovedAt, @EstHours = EstimateHours, @TicketRate = RateType
+    DECLARE @TicketId int, @TicketEngagementId int, @WorkType varchar(20), @EstApproved datetime2(0), @EstHours decimal(6,2), @TicketRate varchar(20);
+    SELECT @TicketId = TicketId, @TicketEngagementId = EngagementId, @WorkType = WorkType, @EstApproved = EstimateApprovedAt, @EstHours = EstimateHours, @TicketRate = RateType
     FROM dbo.Ticket WHERE TicketRef = @TicketRef;
     IF @TicketId IS NULL BEGIN RAISERROR(N'Ticket %s not found.', 16, 1, @TicketRef); RETURN; END
+    -- 2.8.0: the engagement comes from the TICKET now. The agreement is derived from it, and is
+    -- NULL for a ticket on consultancy work - which has no price list and no included hours.
+    DECLARE @AgreementId int = (SELECT AgreementId FROM dbo.Agreement WHERE EngagementId = @TicketEngagementId);
 
     SET @WorkStart = ISNULL(@WorkStart, DATEADD(minute, -@Minutes, dbo.fn_UkNow()));
     -- the entry's own rate if given, else the ticket's; "by time of work" decides from when the work was done
@@ -2475,7 +2507,6 @@ BEGIN
                                            ELSE 'BusinessHours' END);
     IF @RateType NOT IN ('BusinessHours', 'OutOfHours') BEGIN RAISERROR(N'@RateType must be BusinessHours or OutOfHours.', 16, 1); RETURN; END
 
-    DECLARE @TicketEngagementId int = (SELECT EngagementId FROM dbo.Agreement WHERE AgreementId = @AgreementId);
     INSERT dbo.TimeEntry (EngagementId, TicketId, WorkStart, Minutes, RateType, Description, IsBillable)
     VALUES (@TicketEngagementId, @TicketId, @WorkStart, @Minutes, @RateType, @Description, @IsBillable);
 
@@ -2506,7 +2537,9 @@ BEGIN
     ELSE IF CAST(@WorkStart AS date) > CAST(dbo.fn_UkNow() AS date)
         PRINT N'Note: this time is dated in the future, so it is billed in a later cycle.';
 
-    EXEC dbo.usp_Agreement_Usage @Client = NULL, @AgreementId = @AgreementId, @AsOfDate = @WorkStart;
+    -- included hours are a support agreement's idea; consultancy work has none to report on
+    IF @AgreementId IS NOT NULL
+        EXEC dbo.usp_Agreement_Usage @Client = NULL, @AgreementId = @AgreementId, @AsOfDate = @WorkStart;
 END
 GO
 
@@ -2521,8 +2554,8 @@ CREATE OR ALTER PROCEDURE dbo.usp_Time_Update
 AS
 BEGIN
     SET NOCOUNT ON;
-    DECLARE @TicketId int, @InvoiceId int, @AgreementId int, @EntryEngagementId int, @Ref varchar(30), @Found bit = 0;
-    SELECT @TicketId = e.TicketId, @InvoiceId = e.InvoiceId, @AgreementId = t.AgreementId,
+    DECLARE @TicketId int, @InvoiceId int, @EntryEngagementId int, @Ref varchar(30), @Found bit = 0;
+    SELECT @TicketId = e.TicketId, @InvoiceId = e.InvoiceId,
            @EntryEngagementId = e.EngagementId,
            @Ref = ISNULL(t.TicketRef, g.EngagementRef), @Found = 1
     FROM dbo.TimeEntry e
@@ -2659,7 +2692,9 @@ AS
 BEGIN
     SET NOCOUNT ON;
     DECLARE @AgreementId int = dbo.fn_AgreementId(@Client);
-    DECLARE @InstanceId int = (SELECT TOP (1) InstanceId FROM dbo.Instance WHERE AgreementId = @AgreementId AND InstanceName = @InstanceName ORDER BY CASE WHEN CoveredTo IS NULL THEN 0 ELSE 1 END);
+    DECLARE @InstanceId int = (SELECT TOP (1) i.InstanceId FROM dbo.Instance i
+                               JOIN dbo.Agreement a ON a.ClientId = i.ClientId AND a.AgreementId = @AgreementId
+                               WHERE i.InstanceName = @InstanceName ORDER BY CASE WHEN i.CoveredTo IS NULL THEN 0 ELSE 1 END, i.InstanceId);
     IF @InstanceId IS NULL BEGIN RAISERROR(N'Instance "%s" not found on that agreement.', 16, 1, @InstanceName); RETURN; END
     DECLARE @Today date = CAST(dbo.fn_UkNow() AS date);
     -- 1900-01-07 was a Sunday
@@ -3112,8 +3147,12 @@ BEGIN
 
     SELECT e.TimeEntryId, e.TicketId, e.Minutes, e.RateType, e.WorkStart
     INTO #entries
-    FROM dbo.TimeEntry e JOIN dbo.Ticket t ON t.TicketId = e.TicketId
-    WHERE t.AgreementId = @AgreementId AND t.WorkType <> 'Project' AND e.IsBillable = 1 AND e.InvoiceId IS NULL
+    FROM dbo.TimeEntry e
+    JOIN dbo.Ticket t ON t.TicketId = e.TicketId
+    -- through THIS agreement's own engagement: a ticket on consultancy work is billed by the
+    -- consultancy run, and must not be swept into a support cycle's arrears
+    JOIN dbo.Agreement ta ON ta.EngagementId = t.EngagementId AND ta.AgreementId = @AgreementId
+    WHERE t.WorkType <> 'Project' AND e.IsBillable = 1 AND e.InvoiceId IS NULL
       AND CAST(e.WorkStart AS date) BETWEEN @Start AND @End;
 
     SELECT t.TicketId, t.TicketRef, t.Title, Instance = i.InstanceName,
@@ -3317,7 +3356,8 @@ BEGIN
             WHERE bc.AgreementId = @AgreementId AND bc.CycleNumber < @CycleNo
               AND (bc.ArrearsProcessedAt IS NULL
                    OR EXISTS (SELECT 1 FROM dbo.TimeEntry e JOIN dbo.Ticket t ON t.TicketId = e.TicketId
-                              WHERE t.AgreementId = bc.AgreementId AND t.WorkType <> 'Project' AND e.IsBillable = 1 AND e.InvoiceId IS NULL
+                              JOIN dbo.Agreement ta ON ta.EngagementId = t.EngagementId AND ta.AgreementId = bc.AgreementId
+                              WHERE t.WorkType <> 'Project' AND e.IsBillable = 1 AND e.InvoiceId IS NULL
                                 AND CAST(e.WorkStart AS date) BETWEEN bc.StartDate AND bc.EndDate))
             ORDER BY bc.CycleNumber;
         OPEN prev;
@@ -3355,15 +3395,18 @@ BEGIN
         WHERE bc.EndDate < @AsOfDate AND bc.AgreementId IN (SELECT AgreementId FROM @Ags)
           AND (bc.ArrearsProcessedAt IS NULL
                OR EXISTS (SELECT 1 FROM dbo.TimeEntry e JOIN dbo.Ticket t ON t.TicketId = e.TicketId
-                          WHERE t.AgreementId = bc.AgreementId AND t.WorkType <> 'Project' AND e.IsBillable = 1 AND e.InvoiceId IS NULL
+                          JOIN dbo.Agreement ta ON ta.EngagementId = t.EngagementId AND ta.AgreementId = bc.AgreementId
+                          WHERE t.WorkType <> 'Project' AND e.IsBillable = 1 AND e.InvoiceId IS NULL
                             AND CAST(e.WorkStart AS date) BETWEEN bc.StartDate AND bc.EndDate))
         ORDER BY bc.AgreementId, bc.CycleNumber;
     OPEN fin;
     FETCH NEXT FROM fin INTO @CycleId, @AgreementId, @ce;
     WHILE @@FETCH_STATUS = 0
     BEGIN
-        IF EXISTS (SELECT 1 FROM dbo.TimeEntry e JOIN dbo.Ticket t ON t.TicketId = e.TicketId JOIN dbo.BillingCycle bc ON bc.BillingCycleId = @CycleId
-                   WHERE t.AgreementId = @AgreementId AND t.WorkType <> 'Project' AND e.IsBillable = 1 AND e.InvoiceId IS NULL
+        IF EXISTS (SELECT 1 FROM dbo.TimeEntry e JOIN dbo.Ticket t ON t.TicketId = e.TicketId
+                   JOIN dbo.Agreement ta ON ta.EngagementId = t.EngagementId AND ta.AgreementId = @AgreementId
+                   JOIN dbo.BillingCycle bc ON bc.BillingCycleId = @CycleId
+                   WHERE t.WorkType <> 'Project' AND e.IsBillable = 1 AND e.InvoiceId IS NULL
                      AND CAST(e.WorkStart AS date) BETWEEN bc.StartDate AND bc.EndDate)
         BEGIN
             BEGIN TRAN;
@@ -4004,32 +4047,38 @@ BEGIN
            t.TicketRef + N' ' + t.Severity + N': ' + t.Title,
            CASE WHEN t.ResponseDueAt < @AsOf THEN N'Response OVERDUE (was due ' ELSE N'Response due ' END + FORMAT(t.ResponseDueAt, 'ddd dd MMM HH:mm') + CASE WHEN t.ResponseDueAt < @AsOf THEN N')' ELSE N'' END,
            t.ResponseDueAt
-    FROM dbo.Ticket t JOIN dbo.Agreement a ON a.AgreementId = t.AgreementId JOIN dbo.Client c ON c.ClientId = a.ClientId
+    FROM dbo.Ticket t JOIN dbo.Client c ON c.ClientId = t.ClientId
     WHERE t.FirstResponseAt IS NULL AND t.Status NOT IN ('Resolved', 'Closed');
 
     -- Estimates needed
     INSERT #A
     SELECT 2, 'Ticket', c.ClientName, t.TicketRef + N' needs an estimate', FORMAT(x.Mins / 60.0, 'N2') + N' h logged without an approved estimate (agreement: flag work over 1 hour before continuing).', NULL
-    FROM dbo.Ticket t JOIN dbo.Agreement a ON a.AgreementId = t.AgreementId JOIN dbo.Client c ON c.ClientId = a.ClientId
+    FROM dbo.Ticket t JOIN dbo.Client c ON c.ClientId = t.ClientId
     CROSS APPLY (SELECT Mins = SUM(Minutes) FROM dbo.TimeEntry e WHERE e.TicketId = t.TicketId AND e.IsBillable = 1) x
     WHERE x.Mins > @Threshold AND t.EstimateApprovedAt IS NULL AND t.Status NOT IN ('Resolved', 'Closed') AND t.WorkType = 'Support';
 
     -- Time that can never be invoiced: dated outside the agreement's billing period
     INSERT #A
+    -- the window named here comes from the same place the test does, so a ticket on consultancy
+    -- work is described by its engagement's dates rather than by an agreement it does not have
     SELECT 2, 'Billing', c.ClientName, N'Time logged outside the billing period: ' + t.TicketRef,
            FORMAT(SUM(e.Minutes) / 60.0, 'N2') + N' h dated ' + CONVERT(nvarchar(11), MIN(e.WorkStart), 106)
-           + N', outside ' + a.AgreementRef + N' (' + CONVERT(nvarchar(11), a.StartDate, 106) + ISNULL(N' to ' + CONVERT(nvarchar(11), a.EndDate, 106), N' onwards')
+           + N', outside ' + g.EngagementRef + N' (' + ISNULL(CONVERT(nvarchar(11), w.WindowStart, 106), N'not started')
+           + ISNULL(N' to ' + CONVERT(nvarchar(11), w.WindowEnd, 106), N' onwards')
            + N'). It will never be invoiced and does not use included or pre-paid hours: correct the date (usp_Time_Update) or remove it.', NULL
     FROM dbo.TimeEntry e JOIN dbo.Ticket t ON t.TicketId = e.TicketId
-    JOIN dbo.Agreement a ON a.AgreementId = t.AgreementId JOIN dbo.Client c ON c.ClientId = a.ClientId
+    JOIN dbo.Client c ON c.ClientId = t.ClientId
+    JOIN dbo.Engagement g ON g.EngagementId = t.EngagementId
+    CROSS APPLY dbo.fn_BillableWindow(t.EngagementId) w
     WHERE e.IsBillable = 1 AND e.InvoiceId IS NULL AND t.WorkType <> 'Project' AND dbo.fn_IsBillableWhen(t.EngagementId, e.WorkStart) = 0
-    GROUP BY c.ClientName, t.TicketRef, a.AgreementRef, a.StartDate, a.EndDate;
+    GROUP BY c.ClientName, t.TicketRef, g.EngagementRef, w.WindowStart, w.WindowEnd;
 
     -- Weekly reports
     IF DATEDIFF(day, @LastSunday, @Today) > @Grace
     INSERT #A
     SELECT 2, 'Report', c.ClientName, N'Weekly report outstanding: ' + i.InstanceName, N'No report logged for the week ending ' + CONVERT(nvarchar(11), @LastSunday, 106) + N'.', NULL
-    FROM dbo.Instance i JOIN dbo.Agreement a ON a.AgreementId = i.AgreementId JOIN dbo.Client c ON c.ClientId = a.ClientId
+    FROM dbo.AgreementInstance ai JOIN dbo.Instance i ON i.InstanceId = ai.InstanceId
+         JOIN dbo.Agreement a ON a.AgreementId = ai.AgreementId JOIN dbo.Client c ON c.ClientId = a.ClientId
     WHERE i.CoveredTo IS NULL AND i.CoveredFrom <= DATEADD(day, -6, @LastSunday) AND i.MonitoringInstalledDate <= @LastSunday
       AND a.StartDate <= DATEADD(day, -6, @LastSunday) AND (a.EndDate IS NULL OR a.EndDate >= @LastSunday)
       AND NOT EXISTS (SELECT 1 FROM dbo.WeeklyReportLog w WHERE w.InstanceId = i.InstanceId AND w.WeekEnding > DATEADD(day, -7, @LastSunday));
@@ -4168,16 +4217,18 @@ BEGIN
            i.InstanceName + N' runs unsupported SQL Server ' + i.SqlVersion,
            CASE WHEN i.UnsupportedRiskAcceptedDate IS NULL THEN N'No risk acceptance recorded - obtain it (usp_Instance_RecordRiskAcceptance) and recommend an upgrade.'
                 ELSE N'Risk accepted by ' + i.UnsupportedRiskAcceptedBy + N'. Upgrade project opportunity.' END, NULL
-    FROM dbo.Instance i JOIN dbo.ProductLifecycle l ON l.VersionKey = i.SqlVersion
-    JOIN dbo.Agreement a ON a.AgreementId = i.AgreementId JOIN dbo.Client c ON c.ClientId = a.ClientId
-    WHERE i.CoveredTo IS NULL AND l.ExtendedEnd < @Today AND (a.EndDate IS NULL OR a.EndDate >= @Today);
+    FROM dbo.AgreementInstance ai JOIN dbo.Instance i ON i.InstanceId = ai.InstanceId
+    JOIN dbo.ProductLifecycle l ON l.VersionKey = i.SqlVersion
+    JOIN dbo.Agreement a ON a.AgreementId = ai.AgreementId JOIN dbo.Client c ON c.ClientId = a.ClientId
+    WHERE ai.CoveredTo IS NULL AND l.ExtendedEnd < @Today AND (a.EndDate IS NULL OR a.EndDate >= @Today);
 
     INSERT #A
     SELECT 3, 'Version', c.ClientName, i.InstanceName + N': SQL Server ' + i.SqlVersion + N' support ends ' + CONVERT(nvarchar(11), l.ExtendedEnd, 106),
            N'Recommend an upgrade (quote as project work).', CAST(l.ExtendedEnd AS datetime2(0))
-    FROM dbo.Instance i JOIN dbo.ProductLifecycle l ON l.VersionKey = i.SqlVersion
-    JOIN dbo.Agreement a ON a.AgreementId = i.AgreementId JOIN dbo.Client c ON c.ClientId = a.ClientId
-    WHERE i.CoveredTo IS NULL AND l.ExtendedEnd BETWEEN @Today AND DATEADD(month, 12, @Today) AND (a.EndDate IS NULL OR a.EndDate >= @Today);
+    FROM dbo.AgreementInstance ai JOIN dbo.Instance i ON i.InstanceId = ai.InstanceId
+    JOIN dbo.ProductLifecycle l ON l.VersionKey = i.SqlVersion
+    JOIN dbo.Agreement a ON a.AgreementId = ai.AgreementId JOIN dbo.Client c ON c.ClientId = a.ClientId
+    WHERE ai.CoveredTo IS NULL AND l.ExtendedEnd BETWEEN @Today AND DATEADD(month, 12, @Today) AND (a.EndDate IS NULL OR a.EndDate >= @Today);
 
     -- Included hours
     INSERT #A
@@ -4188,7 +4239,7 @@ BEGIN
                         CycleEnd = DATEADD(day, -1, dbo.fn_CycleStart(a.StartDate, dbo.fn_CycleNumberForDate(a.StartDate, @Today) + 1))) cy
     CROSS APPLY (SELECT Used = ISNULL(SUM(e.Minutes), 0) / 60.0, cy.CycleStart, cy.CycleEnd
                  FROM dbo.TimeEntry e JOIN dbo.Ticket t ON t.TicketId = e.TicketId
-                 WHERE t.AgreementId = a.AgreementId AND e.IsBillable = 1 AND e.RateType = 'BusinessHours' AND t.WorkType <> 'Project'
+                 WHERE t.EngagementId = a.EngagementId AND e.IsBillable = 1 AND e.RateType = 'BusinessHours' AND t.WorkType <> 'Project'
                    AND CAST(e.WorkStart AS date) BETWEEN cy.CycleStart AND cy.CycleEnd) u
     JOIN dbo.PriceList p ON p.PriceListId = dbo.fn_PriceListIdOn(a.AgreementId, cy.CycleStart)
     WHERE a.StartDate <= @Today AND (a.EndDate IS NULL OR a.EndDate >= @Today) AND u.Used >= 0.8 * p.IncludedHoursPerCycle;
@@ -4206,7 +4257,7 @@ BEGIN
     SELECT t.TicketRef, c.ClientName, t.Severity, t.Status, t.Title, Instance = i.InstanceName, t.RaisedAt, t.ResponseDueAt, t.FirstResponseAt,
            HoursLogged = CAST(ISNULL((SELECT SUM(Minutes) FROM dbo.TimeEntry e WHERE e.TicketId = t.TicketId), 0) / 60.0 AS decimal(6,2)),
            t.EstimateHours, EstimateApproved = CASE WHEN t.EstimateApprovedAt IS NOT NULL THEN 'Yes' END
-    FROM dbo.Ticket t JOIN dbo.Agreement a ON a.AgreementId = t.AgreementId JOIN dbo.Client c ON c.ClientId = a.ClientId
+    FROM dbo.Ticket t JOIN dbo.Client c ON c.ClientId = t.ClientId
     LEFT JOIN dbo.Instance i ON i.InstanceId = t.InstanceId
     WHERE t.Status NOT IN ('Resolved', 'Closed')
     ORDER BY CASE t.Severity WHEN 'Critical' THEN 0 ELSE 1 END, t.ResponseDueAt;
@@ -4276,7 +4327,7 @@ BEGIN
                  + N'</td><td>' + dbo.fn_Html(t.Title) + N'</td><td>' + t.Status + N'</td><td>' + FORMAT(t.ResponseDueAt, 'ddd dd MMM HH:mm')
                  + CASE WHEN t.FirstResponseAt IS NULL AND t.ResponseDueAt < @Now THEN N' <strong>OVERDUE</strong>' WHEN t.FirstResponseAt IS NOT NULL THEN N' (responded)' ELSE N'' END + N'</td></tr>'), N'')
                WITHIN GROUP (ORDER BY t.ResponseDueAt)
-        FROM dbo.Ticket t JOIN dbo.Agreement a ON a.AgreementId = t.AgreementId JOIN dbo.Client c ON c.ClientId = a.ClientId
+        FROM dbo.Ticket t JOIN dbo.Client c ON c.ClientId = t.ClientId
         WHERE t.Status NOT IN ('Resolved', 'Closed'));
 
     SET @Html = N'<html><head><meta charset="utf-8" /><title>Molehill Watch - Daily dashboard</title><style>

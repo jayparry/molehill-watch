@@ -1182,6 +1182,15 @@ public static partial class SelfTest
         Step("add Azure SQL Database server, 8 databases", () => Submit(add(), ("InstanceName", "st-sqldb"), ("Platform", "AzureSqlDatabaseServer"), ("DatabaseCount", "8")));
         Step("add Azure SQL Database geo-replica", () => Submit(add(), ("InstanceName", "st-sqldb-dr"), ("Platform", "AzureSqlDatabaseServer"), ("Role", "GeoReplica"), ("PrimaryInstanceName", "st-sqldb")));
         Step("add non-production at an agreed fee", () => Submit(add(), ("InstanceName", "ST-DEV01"), ("Environment", "NonProduction"), ("AgreedMonthlyFee", "95.50"), ("SqlVersion", "2022")));
+        // the commercial rule in that warning is about the COVER, not about the server: support for
+        // a server this agreement does not cover is quoted separately
+        Step("a ticket on a server the agreement does not cover says so", () =>
+        {
+            Submit(add(), ("InstanceName", "ST-UNCOVERED"), ("SqlVersion", "2022"), ("CoveredFrom", D(DateTime.Today.AddDays(30))));
+            var r = db.Proc("dbo.usp_Ticket_Open", ("@Client", reference), ("@Title", "Not covered yet"),
+                            ("@InstanceName", "ST-UNCOVERED"));
+            return string.Join(" | ", r.Messages);
+        }, s => ((string)s!).Contains("not a covered instance") ? null : $"said: {s}");
         ExpectError("Azure SQL Database without a database count is refused", () => Submit(add(), ("InstanceName", "st-pool"), ("Platform", "AzureSqlDatabaseElasticPool")), "database");
         ExpectError("non-production without a fee is refused", () => Submit(add(), ("InstanceName", "ST-DEV02"), ("Environment", "NonProduction")), "@AgreedMonthlyFee");
 
@@ -1234,9 +1243,9 @@ public static partial class SelfTest
                  ? null : $"{(t.Rows.Count == 0 ? "no coverage row" : t.Rows[0]["AgreedMonthlyFee"].ToString())}");
         // the name has to be free across the client now, not just the agreement, because that is
         // what the unique index will enforce - and case-insensitively, which is the trap
-        ExpectError("the same instance name twice on one agreement is refused",
+        ExpectError("the same instance name twice for one client is refused",
             () => Submit(AdminForms.AddInstance(db, reference), ("InstanceName", "ST-SQL01"), ("SqlVersion", "2019")),
-            "already covered on this agreement");
+            "This client already has");
         Step("ending coverage ends the coverage row too, not just the instance",
             () =>
             {
@@ -1530,6 +1539,105 @@ public static partial class SelfTest
         Step("the old fn_IsBillablePeriod is gone, not kept as a synonym",
             () => db.Scalar("SELECT OBJECT_ID(N'dbo.fn_IsBillablePeriod')"),
             v => v == null || v is DBNull ? null : "fn_IsBillablePeriod still exists");
+
+        // ---- 2.8.0: a ticket can be raised on consultancy work, and when it is, none of the
+        // support agreement's machinery may touch it. Three separate ways that could go wrong and
+        // every one of them is silent: the hours get eaten, the time gets swept into a support
+        // invoice, or it gets swept into neither and vanishes.
+        // its own engagement, so the time logged below cannot move the day counts the consultancy
+        // billing assertions check - which is exactly what it did when it shared conRef
+        var tktRef = $"CSTT-{stamp}";
+        Step("a second piece of consultancy work, for the ticket below", () => Submit(AdminForms.NewEngagement(db, name),
+            ("ClientName", name), ("Name", "Migration advice"), ("BillingMode", "Hourly"), ("HourlyRate", "55"),
+            ("StartDate", D(lastMonth)), ("EngagementRef", tktRef)));
+        var conTicket = Step("a ticket can be raised on consultancy work", () => db.Proc("dbo.usp_Ticket_Open",
+                ("@Client", name), ("@Engagement", tktRef), ("@Title", "Migration question"), ("@Severity", "Standard")),
+            r => r.First is { Rows.Count: 1 } ? null : "no ticket came back");
+        var conTicketRef = conTicket?.First?.Rows[0]["TicketRef"] as string ?? "MW-?";
+        Step("and it is billed by that work, not by the agreement",
+            () => db.Query(@"SELECT t.EngagementId, e.EngagementRef, HasAgreement =
+                                    CASE WHEN EXISTS (SELECT 1 FROM dbo.Agreement a WHERE a.EngagementId = t.EngagementId) THEN 1 ELSE 0 END
+                             FROM dbo.Ticket t JOIN dbo.Engagement e ON e.EngagementId = t.EngagementId
+                             WHERE t.TicketRef = @t", ("@t", conTicketRef)),
+            t => t.Rows.Count == 1 && (string)t.Rows[0]["EngagementRef"] == tktRef && (int)t.Rows[0]["HasAgreement"] == 0
+                 ? null : $"billed by {t.Rows[0]["EngagementRef"]}");
+
+        var beforeUsage = Queries.AgreementUsage(db, reference);
+        static decimal Used(ProcResult u) =>
+            u.First is { Rows.Count: > 0 } t && t.Columns.Contains("BusinessHoursLogged")
+                ? (decimal)t.Rows[0]["BusinessHoursLogged"] : -1m;
+        Step("logging time on it leaves the agreement's included hours alone", () =>
+        {
+            // dated inside the support agreement's FIRST cycle, which has ended. Arrears are only
+            // swept for cycles that are over, so time dated today would never be reached by the
+            // sweep at all and a broken one would look innocent.
+            db.Proc("dbo.usp_Time_Log", ("@TicketRef", conTicketRef), ("@Minutes", 120),
+                    ("@WorkStart", start.AddDays(5).AddHours(10)),
+                    ("@Description", "Looked at the migration plan"));
+            return Queries.AgreementUsage(db, reference);
+        }, u => Used(u) == Used(beforeUsage) ? null
+                : $"the agreement's logged business hours went from {Used(beforeUsage)} to {Used(u)}");
+        Step("the agreement's arrears invoice does not bill it",
+            () => db.Scalar(@"SELECT COUNT(*) FROM dbo.InvoiceLine l
+                              JOIN dbo.Invoice i ON i.InvoiceId = l.InvoiceId
+                              JOIN dbo.Agreement a ON a.EngagementId = i.EngagementId AND a.AgreementRef = @r
+                              WHERE l.TicketId = (SELECT TicketId FROM dbo.Ticket WHERE TicketRef = @t)",
+                            ("@r", reference), ("@t", conTicketRef)),
+            n => (int)n! == 0 ? null : $"{n} support invoice line(s) for a consultancy ticket");
+        // and the opposite failure, which is the one that loses money quietly: the time belonging
+        // to nothing. It is on the engagement, so the consultancy run is what must pick it up.
+        // Two separate guards keep this work out of the support invoice, and they protect each
+        // other - so each has to be driven on its own or neither shows. The consultancy time above
+        // is dated inside the agreement's FIRST cycle, which has ended and has already had its
+        // arrears processed.
+        //
+        // One: a processed cycle is only revisited if it still owes arrears. Consultancy work is
+        // not arrears, so the cycle must be left alone.
+        Step("a cycle that owes nothing is not revisited because of consultancy work", () =>
+        {
+            var was = db.Scalar(@"SELECT CONVERT(varchar(30), bc.ArrearsProcessedAt, 126) FROM dbo.BillingCycle bc
+                                  JOIN dbo.Agreement a ON a.AgreementId = bc.AgreementId AND a.AgreementRef = @r
+                                  WHERE bc.CycleNumber = 1", ("@r", reference)) as string;
+            db.Proc("dbo.usp_Billing_Run", ("@Client", reference));
+            var now = db.Scalar(@"SELECT CONVERT(varchar(30), bc.ArrearsProcessedAt, 126) FROM dbo.BillingCycle bc
+                                  JOIN dbo.Agreement a ON a.AgreementId = bc.AgreementId AND a.AgreementRef = @r
+                                  WHERE bc.CycleNumber = 1", ("@r", reference)) as string;
+            return $"{was}|{now}";
+        }, s => ((string)s!).Split('|') is var p && p[0] == p[1] && p[0].Length > 0
+                ? null : $"cycle 1 was reprocessed ({s})");
+
+        // Two: and if the sweep does run, it must not pick the work up. Called directly, because
+        // the sweep lives inside the loop over cycles with no fee invoice yet - once every cycle
+        // has been invoiced that loop never runs again, so through usp_Billing_Run the sweep is
+        // simply unreachable and a broken one would look innocent for the wrong reason.
+        Step("and the sweep itself bills nothing from it when it is run", () =>
+        {
+            var cycle = (int)db.Scalar(@"SELECT bc.BillingCycleId FROM dbo.BillingCycle bc
+                                         JOIN dbo.Agreement a ON a.AgreementId = bc.AgreementId AND a.AgreementRef = @r
+                                         WHERE bc.CycleNumber = 1", ("@r", reference))!;
+            var eng = (int)db.Scalar("SELECT EngagementId FROM dbo.Agreement WHERE AgreementRef = @r", ("@r", reference))!;
+            // usp_Invoice_New hands its id back as an OUTPUT parameter, so it is wrapped to
+            // return it as a row
+            var invoiceId = (int)db.Scalar(@"DECLARE @id int;
+                                             EXEC dbo.usp_Invoice_New @EngagementId = @e, @InvoiceDate = @d, @InvoiceId = @id OUTPUT;
+                                             SELECT @id;", ("@e", eng), ("@d", DateTime.Today))!;
+            var invoiceNo = (string)db.Scalar("SELECT InvoiceNo FROM dbo.Invoice WHERE InvoiceId = @i", ("@i", invoiceId))!;
+            db.Proc("dbo.usp_Invoice_AddArrears", ("@InvoiceId", invoiceId), ("@BillingCycleId", cycle));
+            var leaked = (int)db.Scalar(@"SELECT COUNT(*) FROM dbo.InvoiceLine l
+                                          WHERE l.InvoiceId = @i
+                                            AND l.TicketId = (SELECT TicketId FROM dbo.Ticket WHERE TicketRef = @t)",
+                                        ("@i", invoiceId), ("@t", conTicketRef))!;
+            // put the books back: this invoice exists only to be swept into
+            db.Proc("dbo.usp_Invoice_SetStatus", ("@InvoiceNo", invoiceNo!), ("@Status", "Void"));
+            return leaked;
+        }, n => (int)n! == 0 ? null : $"{n} support invoice line(s) built from consultancy work");
+
+        Step("but the work is on the engagement, so the consultancy run can bill it",
+            () => db.Scalar(@"SELECT COUNT(*) FROM dbo.TimeEntry e
+                              JOIN dbo.Engagement g ON g.EngagementId = e.EngagementId AND g.EngagementRef = @c
+                              JOIN dbo.Ticket t ON t.TicketId = e.TicketId AND t.TicketRef = @t
+                              WHERE e.IsBillable = 1", ("@c", tktRef), ("@t", conTicketRef)),
+            n => (int)n! == 1 ? null : $"{n} entries tie that ticket's time to the engagement");
 
         Step("three hours bills as half a day; two plus three on one day bills as a whole one", () => Queries.ConsultancyWork(db, conRef),
             t => t.Rows.Count == 3 && t.Rows.Cast<DataRow>().Sum(r => (decimal)r["Days"]) == 2.5m ? null
