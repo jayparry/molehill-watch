@@ -1,4 +1,4 @@
-# What the patch report needs — one page for whoever approves it
+# What the patch report needs, for whoever approves it
 
 `Get-PatchStatus.ps1` reports how far behind each SQL Server and the Windows under it is. It is
 **read-only**: it installs nothing, writes nothing to any SQL Server, changes no setting, and reads
@@ -18,7 +18,7 @@ access to one registry key.
 | 3 | User right **Access this computer from the network** | every target server | needed to connect at all |
 | 4 | **Remote Registry** service running, and read on one key (below) | every target server | read the Windows build number |
 | 5 | UDP 1434, TCP 1433 (plus any fixed instance ports), TCP 445 | firewall, reporting box → targets | instance discovery, SQL, registry |
-| 6 | Outbound HTTPS to two Microsoft hosts (below) | firewall, reporting box only | Microsoft's own patch data — **avoidable**, see the last section |
+| 6 | Outbound HTTPS to two Microsoft hosts (below) | firewall, reporting box only | Microsoft's own patch data. **Avoidable**, see the last section |
 
 Nothing in this list is needed on the box the report runs *from* beyond the account being able to
 log on to it and write the output file where you point it.
@@ -74,7 +74,7 @@ There are two other outcomes, and it is worth being explicit about the trade:
 
 | Instead | What it costs |
 |---------|---------------|
-| Give the account `sysadmin` on SQL Server, so the report can read the key through `xp_regread` | A great deal — `sysadmin` is total control of the instance. **Not recommended.** |
+| Give the account `sysadmin` on SQL Server, so the report can read the key through `xp_regread` | A great deal. `sysadmin` is total control of the instance. **Not recommended.** |
 | Allow neither | Nothing breaks. Every SQL Server result is still produced; the Windows rows say the build could not be read and suggest running it on the server itself. |
 
 The report is designed for the third outcome to be acceptable. Do not grant `sysadmin` to get a
@@ -85,7 +85,7 @@ build number.
 The report asks the SQL Browser (UDP 1434) which instances exist, and also reads the Windows service
 list to catch instances whose service is **stopped**. The service list needs read access to the
 Service Control Manager, which authenticated users have by default; some hardening baselines remove
-it. If it is unavailable, discovery still works through the SQL Browser — you simply will not see
+it. If it is unavailable, discovery still works through the SQL Browser; you simply will not see
 instances that are turned off.
 
 ## 6. The two Microsoft hosts, or no internet at all
@@ -114,10 +114,10 @@ for them:
 | Visible by default | Note |
 |--------------------|------|
 | The names of other logins (`sys.sql_logins`) | server-level metadata is visible to all logins |
-| Which databases exist (`sys.databases`) | names only — it cannot connect to them |
+| Which databases exist (`sys.databases`) | names only; it cannot connect to them |
 | `msdb.dbo.backupset` (backup history) | `msdb` has `guest` enabled out of the box |
 
-If the last one matters to you, `USE msdb; REVOKE CONNECT FROM guest;` removes it — check nothing
+If the last one matters to you, `USE msdb; REVOKE CONNECT FROM guest;` removes it. Check nothing
 else on the instance relies on it first.
 
 ## Summary for a change record
