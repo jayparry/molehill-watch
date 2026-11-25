@@ -36,6 +36,19 @@ public sealed class ConnectionConfig
     public ConnectionConfig Clone() => (ConnectionConfig)MemberwiseClone();
 }
 
+/// <summary>How the window was left. Nothing here affects the terminal front end.</summary>
+public sealed class WindowConfig
+{
+    /// <summary>0 until the window has been closed once; see <see cref="WindowPlace.Opening"/>.</summary>
+    public int Width { get; set; }
+
+    public int Height { get; set; }
+
+    public bool Maximised { get; set; }
+
+    public WindowConfig Clone() => (WindowConfig)MemberwiseClone();
+}
+
 /// <summary>Everything the app keeps between runs.</summary>
 public sealed class AppConfig
 {
@@ -51,6 +64,9 @@ public sealed class AppConfig
 
     /// <summary>Refresh the screens every N minutes (0 = only when you press F5).</summary>
     public int AutoRefreshMinutes { get; set; } = 0;
+
+    /// <summary>The size the window was left at, so it opens the same way next time.</summary>
+    public WindowConfig Window { get; set; } = new();
 
     /// <summary>Not saved: the password for this run (decrypted, typed in, or read from a plain-text field).</summary>
     [JsonIgnore] public string? Secret { get; set; }

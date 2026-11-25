@@ -795,7 +795,7 @@ a PDF, which opens in the browser they already have, prints, and attaches to a c
 * **Client side:** SQL Server 2012 or later on Windows. SQL Server Agent is used where available. **Express edition** has no Agent, so run the installer on the server with `-UseTaskScheduler`; this grants `NT AUTHORITY\SYSTEM` sysadmin so the scheduled tasks can collect, so agree that with the client first. The installer needs Windows PowerShell 5.1 or PowerShell 7 and no extra modules.
 * **Azure SQL Managed Instance:** the same installer, from a machine that can reach the instance. SQL Agent is always available.
 * **Azure SQL Database:** Windows PowerShell 5.1 or PowerShell 7 on the jump box. Sign in with the Azure CLI (`az login`), Az PowerShell, or `-SqlCredential`. The account needs VIEW DATABASE STATE in each database and access to master. `-AzurePlatformChecks` also needs the Azure CLI with Reader on the resource group.
-* **Admin side:** SQL Server 2017 or later (Express/Developer fine) on a Windows machine you control. Molehill Manager needs the .NET 8 SDK to run from source, or nothing at all as a published single `.exe` (about 71 MB; it unpacks ~9.5 MB of libraries into `%TEMP%\.net` the first time it runs, so a machine whose `%TEMP%` is redirected or non-executable will need that allowing).
+* **Admin side:** SQL Server 2017 or later (Express/Developer fine) on a Windows machine you control. Molehill Manager needs the .NET 8 SDK to run from source, or nothing at all as a published single `.exe` (about 71 MB; it unpacks ~8.5 MB of libraries into `%TEMP%\.net` the first time it runs, so a machine whose `%TEMP%` is redirected or non-executable will need that allowing).
 
 ## Decisions and assumptions to review
 

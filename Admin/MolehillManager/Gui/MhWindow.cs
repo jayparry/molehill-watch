@@ -198,15 +198,33 @@ internal sealed class MhWindow : Window
         _shell = new Shell(Open);
 
         Title = "Molehill Manager";
-        Width = 1200;
-        Height = 780;
-        MinWidth = 780;
-        MinHeight = 520;
+        MinWidth = WindowPlace.MinWidth;
+        MinHeight = WindowPlace.MinHeight;
+        var (width, height, maximised) = WindowPlace.Opening(
+            config.Window, SystemParameters.WorkArea.Width, SystemParameters.WorkArea.Height);
+        Width = width;
+        Height = height;
+        if (maximised) WindowState = WindowState.Maximized;
+        WindowStartupLocation = WindowStartupLocation.CenterScreen;
         Background = AppResources.Resource<Brush>("Paper");
         Content = _shell;
 
-        // F5 refreshes, as in the terminal - as an accelerator, never as the only way to do it
-        KeyDown += (_, e) => { if (e.Key == System.Windows.Input.Key.F5) Report.Try("Refresh", Reload); };
+        // accelerators, never the only way to do anything: every one of these is also a button or
+        // a place in the tree, which is the whole difference between this and the terminal
+        KeyDown += (_, e) =>
+        {
+            switch (e.Key)
+            {
+                case System.Windows.Input.Key.F5:
+                    Report.Try("Refresh", Reload);
+                    break;
+                case System.Windows.Input.Key.Q when
+                    (System.Windows.Input.Keyboard.Modifiers & System.Windows.Input.ModifierKeys.Control) != 0:
+                    Close();
+                    break;
+            }
+        };
+        Closing += (_, _) => RememberSize();
 
         Reload();
     }
@@ -228,6 +246,31 @@ internal sealed class MhWindow : Window
         Opens.Billing => BillingPage(),
         _ => new PlainPage(node.Label, NotBuilt(node))
     };
+
+    /// <summary>
+    ///   Writes the size back, if it moved. Not on every close: the config file holds the encrypted
+    ///   password, and rewriting it for a run that resized nothing is a risk taken for no reason.
+    ///   A failure here is swallowed on purpose - the app is shutting down and a window that would
+    ///   not remember its size is not worth a dialog on the way out.
+    /// </summary>
+    private void RememberSize()
+    {
+        try
+        {
+            var maximised = WindowState == WindowState.Maximized;
+            // RestoreBounds is what it was before it was maximised, which is the size worth keeping
+            var bounds = maximised ? RestoreBounds : new Rect(Left, Top, Width, Height);
+            var width = (int)Math.Round(bounds.Width);
+            var height = (int)Math.Round(bounds.Height);
+            if (!WindowPlace.WorthSaving(_config.Window, width, height, maximised)) return;
+            _config.Window = new WindowConfig { Width = width, Height = height, Maximised = maximised };
+            ConfigStore.Save(_configPath, _config);
+        }
+        catch
+        {
+            // a read-only folder, a file someone else has open: nothing worth stopping for
+        }
+    }
 
     /// <summary>
     ///   Re-reads everything after something changed it. Load stays where it was and rebuilds the

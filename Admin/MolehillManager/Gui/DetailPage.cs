@@ -115,12 +115,39 @@ internal sealed class DetailPage : UserControl, IShellPage
         _tabs.Margin = new Thickness(16, 10, 16, 16);
         _tabs.Background = AppResources.Resource<Brush>("Paper");
         _tabs.BorderThickness = new Thickness(0);
+        _tabs.ItemContainerStyle = TabHeader();
         rows.Children.Add(box);
         rows.Children.Add(_tabs);
 
         Content = rows;
         FontFamily = AppResources.Resource<FontFamily>("BodyFont");
         Foreground = AppResources.Resource<Brush>("Ink");
+    }
+
+    /// <summary>
+    ///   The tab headers in the house palette. Not a new template - the default one honours these,
+    ///   and replacing it to move three colours would be a lot of XAML to maintain for nothing. The
+    ///   grid's border had to be painted the same way, for the same reason: one stray system colour
+    ///   makes a window look as though it belongs to a different application.
+    /// </summary>
+    private static Style TabHeader()
+    {
+        var style = new Style(typeof(TabItem));
+        style.Setters.Add(new Setter(Control.FontFamilyProperty, AppResources.Resource<FontFamily>("BodyFont")));
+        style.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(12, 5, 12, 5)));
+        style.Setters.Add(new Setter(Control.BorderBrushProperty, AppResources.Resource<Brush>("Line")));
+        style.Setters.Add(new Setter(Control.BackgroundProperty, AppResources.Resource<Brush>("Surface")));
+        style.Setters.Add(new Setter(Control.ForegroundProperty, AppResources.Resource<Brush>("InkSecondary")));
+
+        var selected = new Trigger { Property = TabItem.IsSelectedProperty, Value = true };
+        selected.Setters.Add(new Setter(Control.BackgroundProperty, AppResources.Resource<Brush>("Paper")));
+        selected.Setters.Add(new Setter(Control.ForegroundProperty, AppResources.Resource<Brush>("Ink")));
+        // and no FontWeight here, however much the selected tab would suit being bold. FontWeight
+        // is an inherited property and a TabItem's content sits inside it, so setting it on the tab
+        // set every row of the grid on that tab in semibold. The two backgrounds say which tab is
+        // selected without reaching into the page underneath.
+        style.Triggers.Add(selected);
+        return style;
     }
 
     private static UIElement Body(DetailTab tab)

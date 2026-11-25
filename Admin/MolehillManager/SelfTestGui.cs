@@ -219,6 +219,7 @@ public static partial class SelfTest
         Section("the engagement page", () => CheckEngagementPage(watcher));
         Section("the tickets page", () => CheckTicketsPage(watcher));
         Section("the billing page", () => CheckBillingPage(watcher));
+        Section("how big the window opens", CheckWindowSize);
         return Finish();
     }
 

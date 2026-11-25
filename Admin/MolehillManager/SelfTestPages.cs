@@ -447,6 +447,15 @@ public static partial class SelfTest
 
         Layout(page, 1200, 820);
         NothingAdrift(page, "the agreement page");
+        // FontWeight is inherited and a TabItem's content lives inside it, so a weight set on the
+        // selected tab reaches every cell of the grid on it. Nothing on these pages is meant to be
+        // bold; the one that was came from three words in a style and was invisible to everything
+        // except a picture.
+        var bold = Descendants<TextBlock>(page)
+            .Where(b => b.FontWeight != FontWeights.Normal)
+            .Select(b => $"\"{TextOf(b)}\" ({b.FontWeight})").ToList();
+        Check("nothing on the page has been made bold by something above it",
+            bold.Count == 0, string.Join(" | ", bold.Take(3)));
         Shot(page, "7-agreement");
 
         // ---- everything offered reaches something the window will run
@@ -790,6 +799,58 @@ public static partial class SelfTest
         shell.Actions.Buttons.FirstOrDefault(b => (b.Content as string) == label) is { } button
             ? (button.IsEnabled ? "on" : "off")
             : null;
+
+
+    /// <summary>
+    ///   How big the window opens. A small rule with one case in it that bites: a size remembered
+    ///   from a monitor that is no longer plugged in, which puts the toolbar off the side of a
+    ///   screen with nothing left to drag it back by.
+    /// </summary>
+    private static void CheckWindowSize()
+    {
+        const double big = 2560, tall = 1440;
+
+        var fresh = WindowPlace.Opening(new WindowConfig(), big, tall);
+        Check("a config that has never seen the window opens at the default",
+            fresh == (WindowPlace.DefaultWidth, WindowPlace.DefaultHeight, false), fresh.ToString());
+        var none = WindowPlace.Opening(null, big, tall);
+        Check("and so does no config at all",
+            none == (WindowPlace.DefaultWidth, WindowPlace.DefaultHeight, false), none.ToString());
+
+        var saved = new WindowConfig { Width = 1600, Height = 1000 };
+        Check("a remembered size that fits is used as it stands",
+            WindowPlace.Opening(saved, big, tall) == (1600, 1000, false),
+            WindowPlace.Opening(saved, big, tall).ToString());
+
+        // the one that matters: left on a 2560-wide monitor, opened on a 1366-wide laptop
+        var elsewhere = new WindowConfig { Width = 2400, Height = 1300 };
+        var squeezed = WindowPlace.Opening(elsewhere, 1366, 768);
+        Check("a size from a monitor that has gone is brought back onto the screen",
+            squeezed == (1366, 768, false), squeezed.ToString());
+        Check("and not thrown away, so it fills the screen it is on rather than shrinking to the default",
+            squeezed.Width > WindowPlace.DefaultWidth || squeezed.Width == 1366, squeezed.Width.ToString());
+
+        var silly = new WindowConfig { Width = 120, Height = 80 };
+        Check("a size too small to use anything is treated as nothing saved",
+            WindowPlace.Opening(silly, big, tall) == (WindowPlace.DefaultWidth, WindowPlace.DefaultHeight, false),
+            WindowPlace.Opening(silly, big, tall).ToString());
+
+        // a service, or a measurement taken before anything was on the screen
+        var noScreen = WindowPlace.Opening(saved, 0, 0);
+        Check("a screen that measures as nothing is ignored rather than obeyed",
+            noScreen == (1600, 1000, false), noScreen.ToString());
+
+        Check("maximised is remembered",
+            WindowPlace.Opening(new WindowConfig { Width = 1600, Height = 1000, Maximised = true }, big, tall).Maximised);
+
+        Check("a run that changed nothing does not rewrite the config file",
+            !WindowPlace.WorthSaving(saved, 1600, 1000, false));
+        Check("a run that resized it does", WindowPlace.WorthSaving(saved, 1601, 1000, false));
+        Check("and so does one that maximised it", WindowPlace.WorthSaving(saved, 1600, 1000, true));
+        Check("the first run ever does too", WindowPlace.WorthSaving(new WindowConfig(), 1600, 1000, false));
+        Check("but a nonsense size is never written",
+            !WindowPlace.WorthSaving(saved, 10, 10, false));
+    }
 
     /// <summary>A double-click the grid will accept, without a mouse.</summary>
     private sealed class MouseButtonEventArgsStub : System.Windows.Input.MouseButtonEventArgs
