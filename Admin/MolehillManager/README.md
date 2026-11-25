@@ -1,6 +1,6 @@
 ﻿# Molehill Manager
 
-A terminal front end for the **MolehillAdmin** database. It covers clients, agreements, instances, onboarding, tickets, time, billing and invoices. It runs on your own machine and is never installed on a client server.
+A front end for the **MolehillAdmin** database: a window, and a terminal UI (`--tui`). It covers clients, agreements, instances, onboarding, tickets, time, billing and invoices. It runs on your own machine and is never installed on a client server.
 
 Every change goes through the MolehillAdmin stored procedures, so the rules are the same whether you use the app or SQL. Any warnings a procedure prints are shown in the app. These include "out of Microsoft support", "priced as a secondary replica" and "no invoice for this cycle".
 
@@ -91,8 +91,8 @@ Editing the file by hand is fine:
 ```powershell
 MolehillManager.exe --setup                  # open the settings screen first
 MolehillManager.exe --config D:\test.json    # a separate file, e.g. for a test copy of MolehillAdmin
-MolehillManager.exe --tui                    # the terminal front end, whatever the default becomes
-MolehillManager.exe --gui                    # the window (see below), whatever the default is
+MolehillManager.exe --tui                    # the terminal front end instead of the window
+MolehillManager.exe --gui                    # the window (the default; see below)
 ```
 
 Running from source (`dotnet run`) needs the .NET 8 SDK and keeps its config next to the build output.
@@ -136,37 +136,47 @@ Invoice numbers follow the invoice date: after every billing run the drafts are 
 - F4 also offers: change the rate, PO, dates or put it on hold; mark it finished (which invoices what's left); cancel it; raise an invoice by hand; run billing for it.
 - **Finished - invoice what is left** starts on the engagement's end date if it has one (change it if the work really stopped another day), otherwise blank = today. The final invoice is dated whatever you give it, so the part-month goes out without waiting for month end.
 
-## The window (`--gui`)
+## The window
 
-Being built a screen at a time. What is there now: a tree down the left (Today, Clients and each
-client's work, Tickets, Billing, Settings), a breadcrumb saying where you are, and **a row of named
-buttons for whatever is selected**.
+What you get by double-clicking the app. A tree down the left (Today, Clients and each client's
+work, Tickets, Billing, Settings), a breadcrumb saying where you are, and **a row of named buttons
+for whatever is selected**.
 
 That toolbar is the point of it. In the terminal an action that does not apply is not disabled, it
 is *absent*, so there is no way to learn what is possible or why something is missing - which is
 what made the terminal UI hard to drive once there were 41 forms behind three function keys. The
 window shows every action, greys the ones that do not apply, and puts the reason on the button:
-"Already invoiced on MDS-INV-2026-0009", "4 hours of it have been used". Actions the window cannot
-do yet are shown the same way, saying to run `--tui` for that one, so nothing silently disappears
-while the port is half finished.
+"Already on invoice MDS-INV-2026-0009", "4 of these hours have already been used".
 
 **Today** is the daily to-do list with the priority cell coloured the same red, amber and blue as
 the dashboard HTML clients receive by e-mail, and the money figures underneath. **Clients** is
 everything being billed, with a tick box for finished work and a line underneath saying what is
-unusual about the row selected. Double-clicking a row, and clicking its node in the tree, go to the
-same place.
+unusual about the row selected.
+
+**An agreement** opens as a page, not a dialog: Instances, Onboarding, Contacts, Tickets, Weekly
+reports and Pre-paid hours on tabs, with the selected row's actions on the toolbar and the
+agreement's own actions - record the review, give notice, pause support, run the billing - as a
+second group beside them. The terminal reaches that second group through a menu item on a menu,
+which is as deep as the hiding gets anywhere in the app. **A consultancy engagement** opens the
+same way: Days worked, Everything logged, Invoices, Contacts.
+
+**Tickets** and **Billing** are lists with the thing selected described underneath - the whole
+ticket with every minute logged against it, or the invoice's lines. Voiding an invoice asks first,
+and says what it costs: "Any time it billed becomes billable again."
 
 **Settings** is the window's own screen, and a first run works here too: an empty config file opens
 it, the seven sign-in methods enable the fields they actually use and explain themselves, Test says
 what the server said, and a server that does not answer asks before saving rather than discarding
 what you typed. Installing MolehillAdmin reports its progress as it goes.
 
-The terminal front end stays, and is still what you get by default, because Tickets and Billing are
-not in the window yet - a default covering half the app would be worse than one covering all of it.
-Everything else is already shared: the 41 forms are laid out from the same `FormSpec`s, cells are
-formatted by the same code, and both front ends ask the start-up questions through one interface.
+The terminal front end stays, behind `--tui`, and is the one to use over a remote session with no
+desktop to draw on. Everything else is shared: the 41 forms are laid out from the same `FormSpec`s,
+cells are formatted by the same code, the availability rules are one set of functions, and both
+front ends ask the start-up questions through one interface.
 
-## Keys
+## Keys (the terminal front end)
+
+In the window every one of these is a button you can see; these are the terminal's.
 
 | Key | Action |
 |---|---|

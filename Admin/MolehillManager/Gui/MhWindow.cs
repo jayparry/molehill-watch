@@ -184,6 +184,11 @@ internal sealed class MhWindow : Window
     private readonly Shell _shell;
     private AdminDb _db;          // replaced when the settings screen points somewhere else
     private bool _showEnded;
+    // the two filters on the Tickets and Billing pages. They live here rather than on the pages
+    // because a refresh rebuilds the page, and a tick that resets itself every minute is worse
+    // than no tick at all
+    private bool _openTicketsOnly = true;
+    private bool _outstandingOnly = true;
 
     public MhWindow(AdminDb db, AppConfig config, string configPath)
     {
@@ -219,6 +224,8 @@ internal sealed class MhWindow : Window
         Opens.Settings => Settings(),
         Opens.Agreement => AgreementFor(node.Key!),
         Opens.Engagement => EngagementFor(node.Key!),
+        Opens.Tickets => TicketsPage(),
+        Opens.Billing => BillingPage(),
         _ => new PlainPage(node.Label, NotBuilt(node))
     };
 
@@ -244,7 +251,7 @@ internal sealed class MhWindow : Window
             Queries.WeeklyReports(_db, reference),
             Queries.Prepaid(_db, reference));
         return AgreementPage.Build(data, null, ClientsPage.NotYet,
-            (id, tab) => Report.Try(tab.Header, () => RunOnAgreement(reference, data.ClientName, id, tab)));
+            (id, tab) => Report.Try(tab.Header, () => RunOnAgreement(reference, data.ClientName, id, tab.Grid)));
     }
 
     private IShellPage EngagementFor(string reference)
@@ -260,19 +267,37 @@ internal sealed class MhWindow : Window
             Queries.EngagementInvoices(_db, reference),
             Queries.Contacts(_db, reference, includeRemoved: false));
         return EngagementPage.Build(data, null, ClientsPage.NotYet,
-            (id, tab) => Report.Try(tab.Header, () => RunOnEngagement(reference, data.ClientName, id, tab)));
+            (id, tab) => Report.Try(tab.Header, () => RunOnEngagement(reference, data.ClientName, id, tab.Grid)));
     }
 
-    private static int? SelectedId(DetailTab tab) => tab.Grid.SelectedRow()?["Id"] as int?;
+    private IShellPage TicketsPage() => WorkPages.Tickets(
+        Queries.Tickets(_db, _openTicketsOnly), _openTicketsOnly,
+        only => { _openTicketsOnly = only; Reload(); },
+        reference => Detail.TicketSummary(_db, reference),
+        (id, grid) => Report.Try("Tickets", () =>
+        {
+            // every ticket action, and the one way of opening a new one that needs no agreement
+            if (!RunOnTicket(null, id, grid)) Unknown(id);
+        }));
+
+    private IShellPage BillingPage() => WorkPages.Billing(
+        Queries.Invoices(_db, _outstandingOnly ? "Outstanding" : "All"), _outstandingOnly,
+        only => { _outstandingOnly = only; Reload(); },
+        no => Queries.InvoiceLines(_db, no),
+        (id, grid) => Report.Try("Billing", () =>
+        {
+            if (!RunOnInvoice(id, grid)) Unknown(id);
+        }));
+
+    private static int? SelectedId(MhGrid grid) => grid.SelectedRow()?["Id"] as int?;
 
     /// <summary>
     ///   Everything an agreement page can do. One place, and it throws on an id it does not know -
     ///   the guard that replaced checking a dictionary of handlers for completeness, and a better
     ///   one, because the self-test presses every enabled button on every tab and so walks it.
     /// </summary>
-    private void RunOnAgreement(string reference, string clientName, string id, DetailTab tab)
+    private void RunOnAgreement(string reference, string clientName, string id, MhGrid grid)
     {
-        var grid = tab.Grid;
         switch (id)
         {
             // ---- instances
@@ -291,12 +316,12 @@ internal sealed class MhWindow : Window
 
             // ---- contacts
             case "contact-add": Form(AdminForms.AddContact(_db, clientName)); break;
-            case "contact-edit": Form(AdminForms.EditContact(_db, SelectedId(tab)!.Value)); break;
-            case "contact-remove": Form(AdminForms.RemoveContact(_db, SelectedId(tab)!.Value)); break;
-            case "contact-readd": Form(AdminForms.ReaddContact(_db, SelectedId(tab)!.Value)); break;
+            case "contact-edit": Form(AdminForms.EditContact(_db, SelectedId(grid)!.Value)); break;
+            case "contact-remove": Form(AdminForms.RemoveContact(_db, SelectedId(grid)!.Value)); break;
+            case "contact-readd": Form(AdminForms.ReaddContact(_db, SelectedId(grid)!.Value)); break;
             case "contact-history":
                 Dialogs.Read(this, grid.Selected("Name") + " - contact history",
-                    Bound(Queries.ContactPeriods(_db, SelectedId(tab)!.Value)));
+                    Bound(Queries.ContactPeriods(_db, SelectedId(grid)!.Value)));
                 break;
 
             // ---- weekly reports
@@ -327,17 +352,19 @@ internal sealed class MhWindow : Window
             case "billing-run": RunBilling(reference); break;
 
             default:
-                if (!RunOnTicket(reference, id, tab)) Unknown(id);
+                if (!RunOnTicket(reference, id, grid)) Unknown(id);
                 break;
         }
     }
 
     /// <summary>The ticket actions, which the agreement page offers and the Tickets tab will share.</summary>
-    private bool RunOnTicket(string agreementRef, string id, DetailTab tab)
+    private bool RunOnTicket(string? agreementRef, string id, MhGrid grid)
     {
-        var ticket = tab.Grid.Selected("Ticket");
+        var ticket = grid.Selected("Ticket");
         switch (id)
         {
+            // from inside an agreement the new ticket is that client's; from the Tickets page the
+            // form asks which client, which is what a null reference means here
             case "ticket-new": Form(AdminForms.OpenTicket(_db, agreementRef)); return true;
             case "ticket-details": Dialogs.Read(this, ticket!, Reading(Detail.TicketSummary(_db, ticket!))); return true;
             case "ticket-respond": Form(AdminForms.RespondTicket(_db, ticket!)); return true;
@@ -351,9 +378,8 @@ internal sealed class MhWindow : Window
     }
 
     /// <summary>Everything an engagement page can do.</summary>
-    private void RunOnEngagement(string reference, string clientName, string id, DetailTab tab)
+    private void RunOnEngagement(string reference, string clientName, string id, MhGrid grid)
     {
-        var grid = tab.Grid;
         switch (id)
         {
             case "work-log": Form(AdminForms.LogWork(_db, reference)); break;
@@ -366,13 +392,13 @@ internal sealed class MhWindow : Window
                 Dialogs.Ask(this, "Logged work",
                     "This time is on invoice " + grid.Selected("Invoiced") + ". Void that invoice, then change the time.", "Ok");
                 break;
-            case "entry-correct": Form(AdminForms.EditTimeEntry(_db, SelectedId(tab)!.Value)); break;
-            case "entry-remove": Form(AdminForms.DeleteTimeEntry(_db, SelectedId(tab)!.Value)); break;
+            case "entry-correct": Form(AdminForms.EditTimeEntry(_db, SelectedId(grid)!.Value)); break;
+            case "entry-remove": Form(AdminForms.DeleteTimeEntry(_db, SelectedId(grid)!.Value)); break;
 
             case "contact-add": Form(AdminForms.AddContact(_db, clientName)); break;
-            case "contact-edit": Form(AdminForms.EditContact(_db, SelectedId(tab)!.Value)); break;
-            case "contact-remove": Form(AdminForms.RemoveContact(_db, SelectedId(tab)!.Value)); break;
-            case "contact-readd": Form(AdminForms.ReaddContact(_db, SelectedId(tab)!.Value)); break;
+            case "contact-edit": Form(AdminForms.EditContact(_db, SelectedId(grid)!.Value)); break;
+            case "contact-remove": Form(AdminForms.RemoveContact(_db, SelectedId(grid)!.Value)); break;
+            case "contact-readd": Form(AdminForms.ReaddContact(_db, SelectedId(grid)!.Value)); break;
 
             case "invoice-new": Form(AdminForms.NewInvoice(_db, reference)); break;
             case "engagement-edit": Form(AdminForms.EditEngagement(_db, reference)); break;
@@ -381,17 +407,21 @@ internal sealed class MhWindow : Window
             case "billing-run": RunBilling(reference); break;
 
             default:
-                if (!RunOnInvoice(id, tab)) Unknown(id);
+                if (!RunOnInvoice(id, grid)) Unknown(id);
                 break;
         }
     }
 
     /// <summary>The invoice actions, shared with the Billing tab when it arrives.</summary>
-    private bool RunOnInvoice(string id, DetailTab tab)
+    private bool RunOnInvoice(string id, MhGrid grid)
     {
-        var invoice = tab.Grid.Selected("Invoice");
+        var invoice = grid.Selected("Invoice");
         switch (id)
         {
+            // these two reach here only from the Billing page: inside an agreement or an engagement
+            // they are run for that reference and never fall through to here
+            case "billing-run": Form(AdminForms.RunBilling(_db)); return true;
+            case "invoice-new": Form(AdminForms.NewInvoice(_db)); return true;
             case "invoice-html": Saved("Invoice", AdminForms.SaveInvoiceHtml(_db, invoice!, AdminForms.OutputFolder)); return true;
             case "invoice-sent": Form(AdminForms.SetInvoiceStatus(_db, invoice!, "Sent")); return true;
             case "invoice-paid": Form(AdminForms.SetInvoiceStatus(_db, invoice!, "Paid")); return true;

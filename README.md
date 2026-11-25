@@ -12,7 +12,7 @@ It has two halves:
 |---|---|---|
 | **Client** (`Client\`) | Each covered client SQL Server or **Azure SQL Managed Instance** (and every AG replica) | Objects in an `mw` schema, in the `MolehillWatch` database or the client's existing DBA database, plus Agent jobs. They collect health data and build the **weekly status report**. |
 | **Client, Azure SQL Database** (`Client\Get-AzureSqlDatabaseReport.ps1`) | The client's jump box. Nothing is installed in Azure. | A read-only weekly report per logical server or elastic pool. |
-| **Admin** (`Admin\`) | Your own SQL Server (Express is fine) | The `MolehillAdmin` database: clients, agreements, pricing (including Azure SQL), **tickets and SLA times**, time logging, **included hours**, billing cycles, **invoices**, notice periods and a daily **dashboard**. **Molehill Manager** (`Admin\MolehillManager`) is the front end for all of it: a terminal UI, and a window (`--gui`) that is being built out a screen at a time. |
+| **Admin** (`Admin\`) | Your own SQL Server (Express is fine) | The `MolehillAdmin` database: clients, agreements, pricing (including Azure SQL), **tickets and SLA times**, time logging, **included hours**, billing cycles, **invoices**, notice periods and a daily **dashboard**. **Molehill Manager** (`Admin\MolehillManager`) is the front end for all of it: a window, with the terminal UI still there behind `--tui`. |
 
 ---
 
@@ -29,7 +29,7 @@ This creates the database and schedules a daily 07:00 run. Each run creates draf
 
 Then open `Admin\Example-NewClient.sql` in SSMS and press F5. It's a full worked example that rolls itself back.
 
-For everyday use, **Molehill Manager** is the front end for clients, agreements, instances, onboarding, tickets, time and invoices. It calls the same stored procedures, so the rules are identical. Run it and you get the terminal UI; `--gui` opens a window, which so far has Today and the client list, and shows what can be done with whatever is selected rather than hiding it behind a function key. See its [README](Admin/MolehillManager/README.md).
+For everyday use, **Molehill Manager** is the front end for clients, agreements, instances, onboarding, tickets, time and invoices. It calls the same stored procedures, so the rules are identical. Run it and you get the window, which shows what can be done with whatever is selected rather than hiding it behind a function key; `--tui` opens the terminal UI instead, which is what to use over a remote session with no desktop. See its [README](Admin/MolehillManager/README.md).
 
 ```powershell
 cd Admin\MolehillManager
@@ -143,7 +143,7 @@ MolehillWatch\
 │  ├─ MolehillAdmin_Install.sql
 │  ├─ Invoke-MolehillDaily.ps1              billing run + dashboard/invoice HTML
 │  ├─ Example-NewClient.sql                 worked example / template
-│  └─ MolehillManager\                      C# terminal front end: clients, tickets, billing
+│  └─ MolehillManager\                      C# front end: clients, tickets, billing
 ├─ Docs\
 │  ├─ Admin-Guide.md                        your day-to-day runbook
 │  └─ Client-Onboarding-Guide.md            send to the client

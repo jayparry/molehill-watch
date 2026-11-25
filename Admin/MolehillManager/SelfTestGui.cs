@@ -217,6 +217,8 @@ public static partial class SelfTest
         Section("the detail rules", CheckDetailRules);
         Section("the agreement page", () => CheckAgreementPage(watcher));
         Section("the engagement page", () => CheckEngagementPage(watcher));
+        Section("the tickets page", () => CheckTicketsPage(watcher));
+        Section("the billing page", () => CheckBillingPage(watcher));
         return Finish();
     }
 
@@ -1188,5 +1190,27 @@ public static partial class SelfTest
         Check("the selection stays on the same row, not the same row number",
             grid.Selected("Ref") == "MW-0002" && grid.SelectedIndex == 2,
             $"{grid.Selected("Ref")} at {grid.SelectedIndex}");
+
+        // and it still has its columns. A grid that has been rendered generates them the moment
+        // ItemsSource changes, so clearing them afterwards threw away the ones just made and left
+        // an empty header with nothing under it - on every refresh, in every grid in the window.
+        // Everything here passed throughout: the table was bound, the rows were there, the
+        // selection was right, and the screen was blank. A picture found it.
+        Check("and it still has its columns after a rebind",
+            grid.Columns.Select(c => c.Header?.ToString() ?? "").SequenceEqual(headers),
+            $"{grid.Columns.Count} columns: {string.Join(", ", grid.Columns.Select(c => c.Header))}");
+
+        // the invoice lines do this: the same grid, bound to a different shape each time the
+        // selection moves
+        var other = new DataTable();
+        other.Columns.Add("Id", typeof(int));
+        other.Columns.Add("Amount", typeof(decimal));
+        other.Rows.Add(1, 400m);
+        Step("rebinding to a table of another shape", () => { grid.Bind(other); Layout(host, 1100); return 0; });
+        Check("gives the columns of the new table, not the old ones",
+            grid.Columns.Select(c => c.Header?.ToString() ?? "").SequenceEqual(new[] { "Id", "Amount" }),
+            string.Join(", ", grid.Columns.Select(c => c.Header)));
+        Check("and its cells are on the screen",
+            Texts(host).Contains("400.00"), string.Join(" | ", Texts(host)));
     }
 }

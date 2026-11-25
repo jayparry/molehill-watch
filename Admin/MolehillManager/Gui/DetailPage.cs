@@ -220,11 +220,4 @@ internal sealed class DetailPage : UserControl, IShellPage
     }
 
     public event Action? Changed;
-
-    /// <summary>Puts a tab's table up again after something changed it.</summary>
-    public void Rebind(string header, DataTable table)
-    {
-        GridOn(header).Bind(table);
-        Changed?.Invoke();
-    }
 }

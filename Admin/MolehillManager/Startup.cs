@@ -1,4 +1,4 @@
-﻿namespace MolehillManager;
+namespace MolehillManager;
 
 /// <summary>Which front end to put up.</summary>
 public enum FrontEnd
@@ -18,17 +18,21 @@ public enum FrontEnd
 public static class Startup
 {
     /// <summary>
-    ///   What you get by saying nothing. It is the terminal until the window can do everything the
-    ///   terminal can; moving it is the one line that makes the window the double-click default, and
-    ///   the self-test says so when it changes, so the help text and both READMEs are not left behind.
+    ///   What you get by saying nothing. The window, now that it can do everything the terminal
+    ///   can - Today, the clients, an agreement, an engagement, tickets, billing, the settings and
+    ///   a first run on a machine with no config at all.
+    ///
+    ///   The terminal stays, reachable with --tui, and is still the only one that works over a
+    ///   remote session with no desktop. The self-test says when this line moves, so the help text
+    ///   and both READMEs cannot be left behind.
     /// </summary>
-    public const FrontEnd Default = FrontEnd.Terminal;
+    public const FrontEnd Default = FrontEnd.Window;
 
     /// <summary>
-    ///   Which front end to start. --tui always means the terminal and wins over --gui, because it
-    ///   is the one that can do everything; --gui asks for the window whatever the default is, which
-    ///   is how the window is reachable while the default is still the terminal; silence means the
-    ///   default.
+    ///   Which front end to start. --tui always means the terminal and wins over --gui, because
+    ///   the terminal is the one that still works where there is no desktop to draw on; --gui asks
+    ///   for the window whatever the default is; silence means the default, which is now the
+    ///   window.
     /// </summary>
     public static FrontEnd ChooseFrontEnd(bool tuiAsked, bool guiAsked = false) =>
         tuiAsked ? FrontEnd.Terminal : guiAsked ? FrontEnd.Window : Default;

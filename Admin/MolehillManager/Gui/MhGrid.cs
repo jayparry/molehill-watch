@@ -1,4 +1,4 @@
-﻿using System.Data;
+using System.Data;
 using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
@@ -117,9 +117,16 @@ internal sealed class MhGrid : DataGrid
         var was = Table == null ? null : RowKey.Of(Table, SelectedIndex);
         var wasIndex = SelectedIndex;
         Table = table;
-        ItemsSource = table.DefaultView;
-        Columns.Clear();                     // AutoGenerateColumns rebuilds them for the new table
+
+        // Clear the columns BEFORE the new source goes on, not after. A DataGrid generates its
+        // columns the moment ItemsSource changes, if it has already been rendered - so clearing
+        // afterwards threw away the columns it had just made, and the grid drew an empty header and
+        // nothing else. Before it has been rendered, generation waits for the first measure and
+        // either order works, which is why this only ever went wrong on the second bind: a refresh,
+        // or a selection moving to another row. Found by looking at a picture of the invoice lines.
+        Columns.Clear();
         AutoGenerateColumns = true;
+        ItemsSource = table.DefaultView;
         SelectedIndex = RowKey.Reselect(table, was, wasIndex);
     }
 

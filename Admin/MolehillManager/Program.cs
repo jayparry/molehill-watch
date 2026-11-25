@@ -233,9 +233,10 @@ Anything missing is asked for on start-up and saved. Passwords and client secret
 only saved if you tick "Remember it", and then encrypted for your Windows account.
 
   MolehillManager                       start (first run asks for the settings)
-  MolehillManager --tui                 start the terminal front end, whatever the default is
-  MolehillManager --gui                 start the window: Today, the clients and the settings,
-                                        including the first run. Tickets and billing are --tui
+  MolehillManager                       start the window
+  MolehillManager --tui                 start the terminal front end instead: the one that works
+                                        over a remote session with no desktop
+  MolehillManager --gui                 start the window, whatever the default is
   MolehillManager --setup               open the settings screen first
   MolehillManager --config D:\x.json    use a different config file (one per environment)
   MolehillManager --install             create / install / upgrade the configured database without

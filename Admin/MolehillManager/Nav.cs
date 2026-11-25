@@ -30,7 +30,7 @@ public sealed record NavNode(NavKind Kind, string Label, string? Key = null)
 ///   node opens two different pages: a support agreement and a piece of consultancy work are both
 ///   engagements in the tree and share nothing but a client.
 /// </summary>
-public enum Opens { Today, Clients, Agreement, Engagement, Settings, NotBuilt }
+public enum Opens { Today, Clients, Agreement, Engagement, Tickets, Billing, Settings, NotBuilt }
 
 public static class Nav
 {
@@ -47,6 +47,8 @@ public static class Nav
     {
         NavKind.Today => Opens.Today,
         NavKind.Clients or NavKind.Client => Opens.Clients,
+        NavKind.Tickets => Opens.Tickets,
+        NavKind.Billing => Opens.Billing,
         NavKind.Settings => Opens.Settings,
         NavKind.Engagement when node.Key != null =>
             node.EngagementType == "Consultancy" ? Opens.Engagement : Opens.Agreement,

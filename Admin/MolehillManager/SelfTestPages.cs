@@ -241,10 +241,12 @@ public static partial class SelfTest
             (Nav.Find(Nav.Build(SomeWork()), NavKind.Engagement, "C-0041")?.Label) == "Molehill Watch",
             Nav.Find(Nav.Build(SomeWork()), NavKind.Engagement, "C-0041")?.Label ?? "(missing)");
 
-        // these two move to their own pages in Phase 3, and this is what will say so
-        Check("Tickets and Billing are not built yet",
-            For(NavKind.Tickets) == Opens.NotBuilt && For(NavKind.Billing) == Opens.NotBuilt,
+        Check("Tickets opens the tickets, and Billing the invoices",
+            For(NavKind.Tickets) == Opens.Tickets && For(NavKind.Billing) == Opens.Billing,
             $"{For(NavKind.Tickets)} / {For(NavKind.Billing)}");
+        Check("and a node the window has no page for says so rather than guessing",
+            Nav.Opening(new NavNode(NavKind.Engagement, "orphan")) == Opens.NotBuilt,
+            Nav.Opening(new NavNode(NavKind.Engagement, "orphan")).ToString());
     }
 
     private static void CheckDetailRules()
@@ -414,6 +416,35 @@ public static partial class SelfTest
         Check("double-clicking an instance edits it", ran.SequenceEqual(new[] { "Instances/instance-update" }),
             string.Join(", ", ran));
 
+        // the toolbar has to follow, not merely be right when asked. Reading page.Actions asks the
+        // rules again every time, so a page that never says its selection moved passes every check
+        // above while the buttons on the screen stay exactly as they were.
+        var onScreen = Showing(page);
+        page.ShowTab(AgreementPage.Instances);
+        page.GridOn(AgreementPage.Instances).SelectedIndex = -1;
+        Check("with no instance picked the toolbar offers only adding one",
+            ButtonState(onScreen, "Add an instance / Azure SQL server or pool") == "on"
+            && ButtonState(onScreen, "Remove from cover") == null,
+            string.Join(", ", onScreen.Actions.Buttons.Select(b => b.Content)));
+        page.GridOn(AgreementPage.Instances).Select("Instance", "SQL01");
+        Check("and picking one puts that instance's buttons up",
+            ButtonState(onScreen, "Remove from cover") == "on",
+            string.Join(", ", onScreen.Actions.Buttons.Select(b => b.Content)));
+        // changing tab, and nothing else: touching the new tab's grid afterwards would move its
+        // selection and offer the actions again for that reason instead, which would hide a tab
+        // switch that offers nothing at all
+        page.ShowTab(AgreementPage.Weekly);
+        Check("changing tab puts the new tab's buttons up, not the ones from the last",
+            ButtonState(onScreen, "Log a weekly report sent") == "on"
+            && ButtonState(onScreen, "Remove from cover") == null,
+            string.Join(", ", onScreen.Actions.Buttons.Select(b => b.Content)));
+
+        page.ShowTab(AgreementPage.Prepaid);
+        page.GridOn(AgreementPage.Prepaid).Select("Ref", "PP-0014");
+        Check("and the greyed reasons are carried onto the screen with them",
+            ButtonState(onScreen, "Cancel (unused only)") == "off",
+            ButtonState(onScreen, "Cancel (unused only)") ?? "(not there)");
+
         Layout(page, 1200, 820);
         NothingAdrift(page, "the agreement page");
         Shot(page, "7-agreement");
@@ -538,6 +569,227 @@ public static partial class SelfTest
                 lost.Count == 0, string.Join(" | ", lost.Take(4)));
         }
     }
+
+
+    // ---------------------------------------------------------------- tickets and billing
+
+    private static DataTable AllTickets()
+    {
+        var t = Table(("Ticket", typeof(string)), ("Client", typeof(string)), ("Severity", typeof(string)),
+            ("Status", typeof(string)), ("Title", typeof(string)), ("Hours", typeof(decimal)));
+        t.Rows.Add("TKT-0042", "Acme Ltd", "Critical", "Open", "Backups failing on SQL01", 1.5m);
+        t.Rows.Add("TKT-0043", "Zeta Ltd", "Standard", "Resolved", "Slow overnight job", 0.5m);
+        return t;
+    }
+
+    private static DataTable AllInvoices()
+    {
+        var t = Table(("Invoice", typeof(string)), ("Client", typeof(string)), ("For", typeof(string)),
+            ("Dated", typeof(DateTime)), ("Total", typeof(decimal)), ("Status", typeof(string)),
+            ("_IsDraft", typeof(bool)));
+        t.Rows.Add("MDS-INV-2026-0012", "Acme Ltd", "C-0012", new DateTime(2026, 11, 20), 600m, "Draft", true);
+        t.Rows.Add("MDS-INV-2026-0011", "Acme Ltd", "C-0012", new DateTime(2026, 10, 1), 1200m, "OVERDUE", false);
+        t.Rows.Add("MDS-INV-2026-0010", "Zeta Ltd", "free-text", new DateTime(2026, 9, 1), 300m, "Paid", false);
+        return t;
+    }
+
+    private static DataTable SomeInvoiceLines()
+    {
+        var t = Table(("Id", typeof(int)), ("Type", typeof(string)), ("Description", typeof(string)),
+            ("Qty", typeof(decimal)), ("Price", typeof(decimal)), ("Amount", typeof(decimal)));
+        t.Rows.Add(9001, "Consultancy", "Upgrade work, 17 November", 1m, 400m, 400m);
+        t.Rows.Add(9002, "Consultancy", "Upgrade work, 18 November", 0.5m, 400m, 200m);
+        return t;
+    }
+
+    private static void CheckTicketsPage(BindingWatcher watcher)
+    {
+        var tickets = AllTickets();
+        var reloads = new List<bool>();
+        var ran = new List<string>();
+        var asked = new List<string>();
+        watcher.Clear();
+
+        ListPage? page = null;
+        Step("the tickets page lays out with no window", () =>
+        {
+            page = WorkPages.Tickets(tickets, openOnly: true, only => reloads.Add(only),
+                reference => { asked.Add(reference); return $"{reference}  Backups failing on SQL01\nRaised 20 Nov"; },
+                (id, _) => ran.Add(id));
+            Layout(page, 1200, 820);
+            return 0;
+        });
+        if (page == null) return;
+        Check("no binding warnings from the tickets page", watcher.Lines.Count == 0,
+            string.Join(" | ", watcher.Lines.Take(2)));
+
+        Check("every ticket is on it", page.List.Table == tickets, $"{page.List.Table?.Rows.Count} rows");
+        Check("it starts on the first one, and describes it underneath",
+            page.List.SelectedIndex == 0 && page.Text.Contains("TKT-0042"), page.Text);
+        Check("the whole ticket is asked for, not pieced together up here",
+            asked.Contains("TKT-0042"), string.Join(", ", asked));
+        Check("picking another describes that one",
+            page.List.Select("Ticket", "TKT-0043") && page.Text.Contains("TKT-0043"), page.Text);
+
+        Check("a ticket's actions are offered",
+            page.Actions.ById("ticket-respond")?.Enabled == true
+            && page.Actions.ById("ticket-log-time")?.Enabled == true
+            && page.Actions.ById("ticket-close")?.Enabled == true,
+            string.Join(", ", page.Actions.Actions.Select(a => a.Id)));
+
+        var empty = WorkPages.Tickets(tickets.Clone(), true, _ => { }, _ => "", (_, _) => { });
+        Layout(empty, 1000, 600);
+        Check("with no tickets at all it says so rather than showing a blank half-screen",
+            empty.Text == WorkPages.NoTickets, empty.Text);
+        Check("and offers only opening one",
+            empty.Actions.Available.Select(a => a.Id).SequenceEqual(new[] { "ticket-new" }),
+            string.Join(", ", empty.Actions.Available.Select(a => a.Id)));
+
+        var tick = Descendants<CheckBox>(page).FirstOrDefault(c => (c.Content as string) == WorkPages.OpenOnly);
+        Check("there is a tick box for the closed ones", tick != null);
+        if (tick != null)
+        {
+            Check("which starts ticked, because the open ones are what you came for", tick.IsChecked == true);
+            tick.IsChecked = false;
+            tick.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+            Check("unticking it asks for the lot", reloads.SequenceEqual(new[] { false }),
+                string.Join(", ", reloads));
+        }
+
+        ran.Clear();
+        page.Opened?.Invoke();
+        Check("double-clicking a ticket shows it in full", ran.SequenceEqual(new[] { "ticket-details" }),
+            string.Join(", ", ran));
+
+        var shell = Showing(page);
+        page.List.SelectedIndex = -1;
+        Check("with no ticket picked the toolbar offers only opening one",
+            ButtonState(shell, "Open a ticket") == "on" && ButtonState(shell, "Record first response") == null,
+            string.Join(", ", shell.Actions.Buttons.Select(b => b.Content)));
+        page.List.Select("Ticket", "TKT-0042");
+        Check("and picking one puts that ticket's buttons up, without anything else being touched",
+            ButtonState(shell, "Record first response") == "on" && ButtonState(shell, "Resolve or close") == "on",
+            string.Join(", ", shell.Actions.Buttons.Select(b => b.Content)));
+
+        Layout(page, 1200, 820);
+        NothingAdrift(page, "the tickets page");
+        Shot(page, "9-tickets");
+
+        var wired = WiredIds("Ticket");
+        if (wired.Count == 0) Console.WriteLine("SKIP  the window's wiring (no source beside the exe)");
+        else
+        {
+            var lost = page.Actions.Actions.Where(a => a.Enabled && !wired.Contains(a.Id)).Select(a => a.Id).ToList();
+            Check("every ticket action has a case in the window", lost.Count == 0, string.Join(", ", lost));
+        }
+    }
+
+    private static void CheckBillingPage(BindingWatcher watcher)
+    {
+        var invoices = AllInvoices();
+        var reloads = new List<bool>();
+        var ran = new List<string>();
+        watcher.Clear();
+
+        ListPage? page = null;
+        Step("the billing page lays out with no window", () =>
+        {
+            page = WorkPages.Billing(invoices, outstandingOnly: true, only => reloads.Add(only),
+                _ => SomeInvoiceLines(), (id, _) => ran.Add(id));
+            Layout(page, 1200, 820);
+            return 0;
+        });
+        if (page == null) return;
+        Check("no binding warnings from the billing page", watcher.Lines.Count == 0,
+            string.Join(" | ", watcher.Lines.Take(2)));
+
+        Check("every invoice is on it", page.List.Table == invoices, $"{page.List.Table?.Rows.Count} rows");
+        Check("the lines of the one selected are underneath, as a grid rather than as words",
+            ReferenceEquals(page.Detail, page.Below) && page.Below.Table?.Rows.Count == 2,
+            page.Detail?.GetType().Name ?? "(nothing)");
+
+        page.List.Select("Invoice", "MDS-INV-2026-0012");
+        Check("a draft invoice can have its lines changed",
+            page.Actions.ById("invoice-line-add")?.Enabled == true
+            && page.Actions.ById("invoice-line-remove")?.Enabled == true
+            && page.Actions.ById("invoice-adjust")?.Enabled == true);
+        page.List.Select("Invoice", "MDS-INV-2026-0011");
+        Check("an overdue one cannot, and the greyed buttons say why",
+            page.Actions.ById("invoice-adjust")?.Enabled == false
+            && page.Actions.ById("invoice-adjust")?.DisabledReason?.Contains("Void it") == true,
+            page.Actions.ById("invoice-adjust")?.DisabledReason ?? "(enabled)");
+        Check("a paid invoice is read from the raw flag too, not from the word Paid",
+            page.List.Select("Invoice", "MDS-INV-2026-0010")
+            && page.Actions.ById("invoice-line-add")?.Enabled == false);
+        Check("running the billing and typing an invoice by hand are offered whatever is selected",
+            page.Actions.ById("billing-run")?.Enabled == true
+            && page.Actions.ById("invoice-new")?.Enabled == true,
+            string.Join(", ", page.Actions.Actions.Select(a => a.Id)));
+
+        var empty = WorkPages.Billing(invoices.Clone(), true, _ => { }, _ => SomeInvoiceLines(), (_, _) => { });
+        Layout(empty, 1000, 600);
+        Check("with no invoices it says where they come from", empty.Text == WorkPages.NoInvoices, empty.Text);
+        Check("and offers the two things that make one",
+            empty.Actions.Available.Select(a => a.Id).OrderBy(x => x).SequenceEqual(new[] { "billing-run", "invoice-new" }),
+            string.Join(", ", empty.Actions.Available.Select(a => a.Id)));
+
+        var tick = Descendants<CheckBox>(page).FirstOrDefault(c => (c.Content as string) == WorkPages.Outstanding);
+        Check("there is a tick box for the settled ones", tick != null && tick.IsChecked == true);
+        if (tick != null)
+        {
+            tick.IsChecked = false;
+            tick.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+            Check("unticking it asks for all of them", reloads.SequenceEqual(new[] { false }),
+                string.Join(", ", reloads));
+        }
+
+        ran.Clear();
+        page.List.Select("Invoice", "MDS-INV-2026-0012");
+        page.Opened?.Invoke();
+        Check("double-clicking an invoice saves and opens it", ran.SequenceEqual(new[] { "invoice-html" }),
+            string.Join(", ", ran));
+
+        var shell = Showing(page);
+        page.List.Select("Invoice", "MDS-INV-2026-0012");
+        Check("the toolbar offers changing a draft invoice's lines",
+            ButtonState(shell, "Add a line") == "on", string.Join(", ", shell.Actions.Buttons.Select(b => b.Content)));
+        page.List.Select("Invoice", "MDS-INV-2026-0010");
+        Check("and moving to a paid one greys that button rather than leaving it live",
+            ButtonState(shell, "Add a line") == "off", ButtonState(shell, "Add a line") ?? "(not there)");
+
+        Layout(page, 1200, 820);
+        NothingAdrift(page, "the billing page");
+        Shot(page, "10-billing");
+
+        var wired = WiredIds("Invoice");
+        if (wired.Count == 0) Console.WriteLine("SKIP  the window's wiring (no source beside the exe)");
+        else
+        {
+            var lost = page.Actions.Actions.Where(a => a.Enabled && !wired.Contains(a.Id)).Select(a => a.Id).ToList();
+            Check("every billing action has a case in the window", lost.Count == 0, string.Join(", ", lost));
+        }
+    }
+
+
+    /// <summary>
+    ///   The toolbar follows the list. Worth its own helper and worth doing twice: reading a page's
+    ///   Actions property asks the rules again every time, so a page that never says its selection
+    ///   moved passes every one of those checks while the buttons on the screen stay as they were.
+    ///   A mutation pass found exactly that - and a stale toolbar is the original complaint in a
+    ///   new coat.
+    /// </summary>
+    private static Shell Showing(IShellPage page)
+    {
+        var shell = new Shell(_ => page);
+        shell.Load(Nav.Build(SomeWork()));
+        Layout(shell, 1200, 820);
+        return shell;
+    }
+
+    private static string? ButtonState(Shell shell, string label) =>
+        shell.Actions.Buttons.FirstOrDefault(b => (b.Content as string) == label) is { } button
+            ? (button.IsEnabled ? "on" : "off")
+            : null;
 
     /// <summary>A double-click the grid will accept, without a mouse.</summary>
     private sealed class MouseButtonEventArgsStub : System.Windows.Input.MouseButtonEventArgs

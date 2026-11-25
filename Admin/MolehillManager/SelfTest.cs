@@ -144,10 +144,15 @@ public static partial class SelfTest
                 Startup.ChooseFrontEnd(tuiAsked: true) == FrontEnd.Terminal);
             Check("saying nothing gets the default",
                 Startup.ChooseFrontEnd(tuiAsked: false) == Startup.Default);
-            // when the default moves to the window, this is the check that fails, and the reminder
-            // that --help, README.md and Admin/MolehillManager/README.md all still say otherwise
-            Check("the default is still the terminal, as everything written down says",
-                Startup.Default == FrontEnd.Terminal, Startup.Default.ToString());
+            // the default moved to the window at the end of Phase 3, once the window could do
+            // everything the terminal could. This check is still the tripwire: move the line again
+            // and it fails, with --help, README.md and Admin/MolehillManager/README.md to follow
+            Check("the default is the window, as everything written down says",
+                Startup.Default == FrontEnd.Window, Startup.Default.ToString());
+            Check("and --gui asks for it too, so a script that says so keeps working",
+                Startup.ChooseFrontEnd(tuiAsked: false, guiAsked: true) == FrontEnd.Window);
+            Check("while --tui still gets the terminal, which is what works with no desktop",
+                Startup.ChooseFrontEnd(tuiAsked: true, guiAsked: true) == FrontEnd.Terminal);
 
             // column names are written for SQL; the window has room to say them properly
             Check("a run-together column name is given its spaces back",
