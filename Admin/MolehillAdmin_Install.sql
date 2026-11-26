@@ -1285,6 +1285,20 @@ GO
 
 -- consultancy work, a line per day worked (out-of-hours work on its own line when
 -- the engagement has an out-of-hours rate). Quantity is days, or hours when billed hourly.
+-- Whether a rate type counts as out of hours. One definition, because the alternative is the same
+-- literal comparison written out in six places and only five of them remembered when a band is
+-- added.
+CREATE OR ALTER FUNCTION dbo.fn_IsOutOfHoursRate (@RateType varchar(20))
+RETURNS bit
+AS
+BEGIN
+    RETURN CASE WHEN @RateType IS NULL THEN 0
+                WHEN EXISTS (SELECT 1 FROM dbo.RateBand WHERE Band = @RateType AND CountsAsOutOfHours = 1) THEN 1
+                WHEN @RateType = 'OutOfHours' THEN 1
+                ELSE 0 END;
+END
+GO
+
 -- What an hour or a day of work is charged at, and where that figure came from.
 --
 -- Resolved in one place, in one order: the engagement's own figure, then this client's rate, then
@@ -1322,15 +1336,15 @@ RETURN
     picked AS (
         SELECT *,
                -- the engagement's own figure for the unit being charged
-               EngRate = CASE WHEN @RateType = 'OutOfHours' AND OutOfHoursRate IS NOT NULL THEN OutOfHoursRate
+               EngRate = CASE WHEN dbo.fn_IsOutOfHoursRate(@RateType) = 1 AND OutOfHoursRate IS NOT NULL THEN OutOfHoursRate
                               WHEN @Unit = 'hour' THEN HourlyRate
                               ELSE DayRate END,
                -- then this client's standing rate
-               CliRate = CASE WHEN @RateType = 'OutOfHours' THEN COALESCE(ClientOoh, CASE WHEN @Unit = 'hour' THEN ClientHour END)
+               CliRate = CASE WHEN dbo.fn_IsOutOfHoursRate(@RateType) = 1 THEN COALESCE(ClientOoh, CASE WHEN @Unit = 'hour' THEN ClientHour END)
                               WHEN @Unit = 'hour' THEN COALESCE(ClientHour, ClientBh)
                               ELSE ClientDay END,
                -- then the agreement's price list, which only prices support hours
-               ListRate = CASE WHEN @Unit = 'hour' THEN CASE WHEN @RateType = 'OutOfHours' THEN ListOoh ELSE ListBh END END
+               ListRate = CASE WHEN @Unit = 'hour' THEN CASE WHEN dbo.fn_IsOutOfHoursRate(@RateType) = 1 THEN ListOoh ELSE ListBh END END
         FROM src)
     SELECT EngagementId, ClientId, AgreementId,
            BaseRate = COALESCE(EngRate, CliRate, ListRate),
@@ -1341,19 +1355,6 @@ RETURN
     FROM picked;
 GO
 
--- Whether a rate type counts as out of hours. One definition, because the alternative is the same
--- literal comparison written out in six places and only five of them remembered when a band is
--- added.
-CREATE OR ALTER FUNCTION dbo.fn_IsOutOfHoursRate (@RateType varchar(20))
-RETURNS bit
-AS
-BEGIN
-    RETURN CASE WHEN @RateType IS NULL THEN 0
-                WHEN EXISTS (SELECT 1 FROM dbo.RateBand WHERE Band = @RateType AND CountsAsOutOfHours = 1) THEN 1
-                WHEN @RateType = 'OutOfHours' THEN 1
-                ELSE 0 END;
-END
-GO
 
 CREATE OR ALTER FUNCTION dbo.fn_ConsultancyWork (@EngagementId int, @UnbilledOnly bit)
 RETURNS TABLE
@@ -1365,18 +1366,19 @@ RETURN
            Minutes      = SUM(te.Minutes),
            Hours        = CAST(SUM(te.Minutes) / 60.0 AS decimal(9,2)),
            Days         = dbo.fn_DaysWorked(SUM(te.Minutes), e.DayRounding),
-           Unit         = CASE WHEN e.BillingMode = 'Hourly' OR (te.RateType = 'OutOfHours' AND e.OutOfHoursRate IS NOT NULL) THEN 'hour' ELSE 'day' END,
-           Quantity     = CASE WHEN e.BillingMode = 'Hourly' OR (te.RateType = 'OutOfHours' AND e.OutOfHoursRate IS NOT NULL)
+           Unit         = CASE WHEN e.BillingMode = 'Hourly' OR (dbo.fn_IsOutOfHoursRate(te.RateType) = 1 AND e.OutOfHoursRate IS NOT NULL) THEN 'hour' ELSE 'day' END,
+           Quantity     = CASE WHEN e.BillingMode = 'Hourly' OR (dbo.fn_IsOutOfHoursRate(te.RateType) = 1 AND e.OutOfHoursRate IS NOT NULL)
                                THEN CAST(SUM(te.Minutes) / 60.0 AS decimal(9,2))
                                ELSE dbo.fn_DaysWorked(SUM(te.Minutes), e.DayRounding) END,
-           UnitPrice    = CASE WHEN te.RateType = 'OutOfHours' AND e.OutOfHoursRate IS NOT NULL THEN e.OutOfHoursRate
-                               WHEN e.BillingMode = 'Hourly' THEN e.HourlyRate
-                               ELSE ISNULL(e.DayRate, 0) END,
+           -- what the work was charged at when it was logged, not what the engagement says now
+           UnitPrice    = te.ChargeRate,
            WorkDone     = STRING_AGG(CONVERT(nvarchar(max), te.Description), N'; ') WITHIN GROUP (ORDER BY te.WorkStart)
     FROM dbo.Engagement e
     JOIN dbo.TimeEntry te ON te.EngagementId = e.EngagementId
     WHERE e.EngagementId = @EngagementId AND te.IsBillable = 1 AND (@UnbilledOnly = 0 OR te.InvoiceId IS NULL)
-    GROUP BY e.EngagementId, CAST(te.WorkStart AS date), te.RateType, e.DayRounding, e.BillingMode, e.OutOfHoursRate, e.HourlyRate, e.DayRate;
+    -- grouped by the charge rate as well, so a day worked at two different rates becomes two lines
+    -- instead of quietly averaging into one
+    GROUP BY e.EngagementId, CAST(te.WorkStart AS date), te.RateType, te.ChargeRate, e.DayRounding, e.BillingMode, e.OutOfHoursRate;
 GO
 
 CREATE OR ALTER FUNCTION dbo.fn_InitialTermEnd (@AgreementId int)
@@ -2654,7 +2656,7 @@ BEGIN
     INSERT dbo.Ticket (ClientId, EngagementId, InstanceId, ContactId, Severity, WorkType, Title, Description, Channel, RaisedAt, ResponseDueAt, Status, RateType)
     VALUES (@ClientId, @TicketEngagementId, @InstanceId, @ContactId, @Severity, @WorkType, @Title, @Description, @Channel, @RaisedAt,
             dbo.fn_ResponseDue(@RaisedAt, @Severity), 'Open', @RateType);
-    IF @RateType = 'OutOfHours' PRINT N'Time on this ticket is charged at the out-of-hours rate.';
+    IF dbo.fn_IsOutOfHoursRate(@RateType) = 1 PRINT N'Time on this ticket is charged at the out-of-hours rate.';
     ELSE IF @RateType = 'ByTimeOfWork' PRINT N'Time on this ticket is charged by when the work is done (out of hours outside Mon-Fri 09:00-17:30).';
     DECLARE @TicketId int = SCOPE_IDENTITY();
 
@@ -2746,7 +2748,7 @@ BEGIN
         PRINT N'ESTIMATE NEEDED: ' + @TicketRef + N' now has ' + CONVERT(nvarchar(10), @Total) + N' minutes logged. The agreement says work over 1 hour must be flagged to the client with an estimate before continuing (usp_Ticket_Estimate).';
     ELSE IF @EstHours IS NOT NULL AND @Total > @EstHours * 60
         PRINT N'NOTE: logged time (' + CONVERT(nvarchar(10), @Total) + N' min) has passed the approved estimate of ' + CONVERT(nvarchar(10), @EstHours) + N' hours.';
-    IF @RateType = 'OutOfHours' AND @WorkType <> 'PlannedOutOfHours'
+    IF dbo.fn_IsOutOfHoursRate(@RateType) = 1 AND @WorkType <> 'PlannedOutOfHours'
     BEGIN
         DECLARE @OohRate nvarchar(20) = (SELECT CONVERT(nvarchar(20), OutOfHoursRate) FROM dbo.PriceList WHERE PriceListId = dbo.fn_PriceListIdOn(@AgreementId, CAST(@WorkStart AS date)));
         PRINT N'Logged as OUT OF HOURS (GBP ' + ISNULL(@OohRate, N'?') + N'/h). Pass @RateType = ''BusinessHours'' if that is wrong, or change the ticket''s rate (usp_Ticket_SetRate).';
@@ -3043,10 +3045,10 @@ BEGIN
 
     SELECT CycleNumber = @n, CycleStart = @CycleStart, CycleEnd = @CycleEnd,
            IncludedHours = @Included,
-           BusinessHoursLogged = CAST(ISNULL(SUM(CASE WHEN e.RateType = 'BusinessHours' THEN e.Minutes END), 0) / 60.0 AS decimal(6,2)),
-           IncludedHoursRemaining = CAST(CASE WHEN @Included - ISNULL(SUM(CASE WHEN e.RateType = 'BusinessHours' THEN e.Minutes END), 0) / 60.0 < 0 THEN 0
-                                              ELSE @Included - ISNULL(SUM(CASE WHEN e.RateType = 'BusinessHours' THEN e.Minutes END), 0) / 60.0 END AS decimal(6,2)),
-           OutOfHoursLogged = CAST(ISNULL(SUM(CASE WHEN e.RateType = 'OutOfHours' THEN e.Minutes END), 0) / 60.0 AS decimal(6,2)),
+           BusinessHoursLogged = CAST(ISNULL(SUM(CASE WHEN dbo.fn_IsOutOfHoursRate(e.RateType) = 0 THEN e.Minutes END), 0) / 60.0 AS decimal(6,2)),
+           IncludedHoursRemaining = CAST(CASE WHEN @Included - ISNULL(SUM(CASE WHEN dbo.fn_IsOutOfHoursRate(e.RateType) = 0 THEN e.Minutes END), 0) / 60.0 < 0 THEN 0
+                                              ELSE @Included - ISNULL(SUM(CASE WHEN dbo.fn_IsOutOfHoursRate(e.RateType) = 0 THEN e.Minutes END), 0) / 60.0 END AS decimal(6,2)),
+           OutOfHoursLogged = CAST(ISNULL(SUM(CASE WHEN dbo.fn_IsOutOfHoursRate(e.RateType) = 1 THEN e.Minutes END), 0) / 60.0 AS decimal(6,2)),
            PrepaidHoursLeft = (SELECT CAST(SUM(Remaining) AS decimal(9,2)) FROM dbo.fn_PrepaidPackages(@AgreementId, @AsOfDate) WHERE State IN ('Active', 'Not started')),
            -- billable time not yet on an invoice: included and pre-paid hours are only used when billing runs
            -- reached through THIS agreement's engagement, which is what keeps a ticket raised on a
@@ -3366,15 +3368,20 @@ CREATE OR ALTER PROCEDURE dbo.usp_Invoice_AddArrears
 AS
 BEGIN
     SET NOCOUNT ON;
-    DECLARE @AgreementId int, @Start date, @End date, @Included decimal(6,2), @Used decimal(6,2), @BhRate decimal(9,2), @OohRate decimal(9,2), @Min decimal(5,2);
+    -- The minimum charge still comes from the cycle's price list: it is a term of the agreement
+    -- for that cycle, not a property of the work. The RATES do not - they come from each time
+    -- entry, stamped when the work was logged, so a price change cannot move an invoice that has
+    -- already gone out and re-running this produces the same figures.
+    DECLARE @AgreementId int, @Start date, @End date, @Included decimal(6,2), @Used decimal(6,2), @Min decimal(5,2);
     SELECT @AgreementId = bc.AgreementId, @Start = bc.StartDate, @End = bc.EndDate, @Included = bc.IncludedHours, @Used = bc.IncludedHoursUsed,
-           @BhRate = p.BusinessHoursRate, @OohRate = p.OutOfHoursRate, @Min = p.MinimumChargeHours
+           @Min = p.MinimumChargeHours
     FROM dbo.BillingCycle bc JOIN dbo.PriceList p ON p.PriceListId = bc.PriceListId
     WHERE bc.BillingCycleId = @BillingCycleId;
     DECLARE @Strict bit = CASE WHEN dbo.fn_Setting('MinimumChargeMode') = N'Strict' THEN 1 ELSE 0 END;
     DECLARE @Period nvarchar(40) = CONVERT(nvarchar(11), @Start, 106) + N' - ' + CONVERT(nvarchar(11), @End, 106);
 
-    SELECT e.TimeEntryId, e.TicketId, e.Minutes, e.RateType, e.WorkStart
+    SELECT e.TimeEntryId, e.TicketId, e.Minutes, e.RateType, e.WorkStart, e.ChargeRate,
+           IsOoh = dbo.fn_IsOutOfHoursRate(e.RateType)
     INTO #entries
     FROM dbo.TimeEntry e
     JOIN dbo.Ticket t ON t.TicketId = e.TicketId
@@ -3385,8 +3392,13 @@ BEGIN
       AND CAST(e.WorkStart AS date) BETWEEN @Start AND @End;
 
     SELECT t.TicketId, t.TicketRef, t.Title, Instance = i.InstanceName,
-           BhHours  = CAST(ISNULL(SUM(CASE WHEN x.RateType = 'BusinessHours' THEN x.Minutes END), 0) / 60.0 AS decimal(9,4)),
-           OohHours = CAST(ISNULL(SUM(CASE WHEN x.RateType = 'OutOfHours' THEN x.Minutes END), 0) / 60.0 AS decimal(9,4)),
+           BhHours  = CAST(ISNULL(SUM(CASE WHEN x.IsOoh = 0 THEN x.Minutes END), 0) / 60.0 AS decimal(9,4)),
+           OohHours = CAST(ISNULL(SUM(CASE WHEN x.IsOoh = 1 THEN x.Minutes END), 0) / 60.0 AS decimal(9,4)),
+           -- the rate each side of the ticket was charged at. Re-stamping keeps every un-invoiced
+           -- entry of a band on one rate, so MAX is the rate rather than one of several; the write
+           -- suite asserts that rather than leaving it as an assumption.
+           BhRate   = MAX(CASE WHEN x.IsOoh = 0 THEN x.ChargeRate END),
+           OohRate  = MAX(CASE WHEN x.IsOoh = 1 THEN x.ChargeRate END),
            FirstWork = MIN(x.WorkStart)
     INTO #tickets
     FROM #entries x JOIN dbo.Ticket t ON t.TicketId = x.TicketId LEFT JOIN dbo.Instance i ON i.InstanceId = t.InstanceId
@@ -3395,12 +3407,15 @@ BEGIN
     DECLARE @Remaining decimal(9,4) = CASE WHEN @Included - @Used > 0 THEN @Included - @Used ELSE 0 END;
     DECLARE @UsedNow decimal(9,4) = 0;
     DECLARE @TicketId int, @Ref varchar(20), @Title nvarchar(200), @Inst nvarchar(128), @Bh decimal(9,4), @Ooh decimal(9,4);
+    DECLARE @BhRate decimal(9,2), @OohRate decimal(9,2);
     DECLARE @TicketHours decimal(9,4), @Covered decimal(9,4), @Charged decimal(9,4), @Label nvarchar(400);
     DECLARE @FirstWork datetime2(0), @FromPack decimal(9,4), @PackRefs nvarchar(400), @Billed decimal(9,4);
 
-    DECLARE c CURSOR LOCAL FAST_FORWARD FOR SELECT TicketId, TicketRef, Title, Instance, BhHours, OohHours, FirstWork FROM #tickets ORDER BY FirstWork, TicketId;
+    DECLARE c CURSOR LOCAL FAST_FORWARD FOR
+        SELECT TicketId, TicketRef, Title, Instance, BhHours, OohHours, BhRate, OohRate, FirstWork
+        FROM #tickets ORDER BY FirstWork, TicketId;
     OPEN c;
-    FETCH NEXT FROM c INTO @TicketId, @Ref, @Title, @Inst, @Bh, @Ooh, @FirstWork;
+    FETCH NEXT FROM c INTO @TicketId, @Ref, @Title, @Inst, @Bh, @Ooh, @BhRate, @OohRate, @FirstWork;
     WHILE @@FETCH_STATUS = 0
     BEGIN
         SET @Label = @Ref + N' ' + LEFT(@Title, 120) + ISNULL(N' (' + @Inst + N')', N'');
@@ -3452,7 +3467,7 @@ BEGIN
                     + CASE WHEN @Ooh < @Min THEN N', 1 h minimum charge applied' ELSE N'' END,
                     ROUND(@Charged, 2), @OohRate, ROUND(ROUND(@Charged, 2) * @OohRate, 2));
         END
-        FETCH NEXT FROM c INTO @TicketId, @Ref, @Title, @Inst, @Bh, @Ooh, @FirstWork;
+        FETCH NEXT FROM c INTO @TicketId, @Ref, @Title, @Inst, @Bh, @Ooh, @BhRate, @OohRate, @FirstWork;
     END
     CLOSE c; DEALLOCATE c;
 
@@ -3694,7 +3709,7 @@ BEGIN
                     INSERT dbo.InvoiceLine (InvoiceId, LineType, EngagementId, WorkDate, RateType, Description, Quantity, UnitPrice, Amount)
                     SELECT @InvoiceId, 'Consultancy', @Eid, w.WorkDate, w.RateType,
                            CONVERT(nvarchar(11), w.WorkDate, 106) + N' - ' + w.WorkDone
-                           + CASE WHEN w.RateType = 'OutOfHours' THEN N' (out of hours)' ELSE N'' END,
+                           + CASE WHEN dbo.fn_IsOutOfHoursRate(w.RateType) = 1 THEN N' (out of hours)' ELSE N'' END,
                            w.Quantity, w.UnitPrice, CAST(w.Quantity * w.UnitPrice AS decimal(10,2))
                     FROM dbo.fn_ConsultancyWork(@Eid, 1) w
                     WHERE dbo.fn_ConsultancyPeriod(@EStart, w.WorkDate, @EDays) = @Period
@@ -4468,7 +4483,7 @@ BEGIN
                         CycleEnd = DATEADD(day, -1, dbo.fn_CycleStart(a.StartDate, dbo.fn_CycleNumberForDate(a.StartDate, @Today) + 1))) cy
     CROSS APPLY (SELECT Used = ISNULL(SUM(e.Minutes), 0) / 60.0, cy.CycleStart, cy.CycleEnd
                  FROM dbo.TimeEntry e JOIN dbo.Ticket t ON t.TicketId = e.TicketId
-                 WHERE t.EngagementId = a.EngagementId AND e.IsBillable = 1 AND e.RateType = 'BusinessHours' AND t.WorkType <> 'Project'
+                 WHERE t.EngagementId = a.EngagementId AND e.IsBillable = 1 AND dbo.fn_IsOutOfHoursRate(e.RateType) = 0 AND t.WorkType <> 'Project'
                    AND CAST(e.WorkStart AS date) BETWEEN cy.CycleStart AND cy.CycleEnd) u
     JOIN dbo.PriceList p ON p.PriceListId = dbo.fn_PriceListIdOn(a.AgreementId, cy.CycleStart)
     WHERE a.StartDate <= @Today AND (a.EndDate IS NULL OR a.EndDate >= @Today) AND u.Used >= 0.8 * p.IncludedHoursPerCycle;
@@ -4691,7 +4706,7 @@ BEGIN
     CROSS APPLY dbo.fn_ChargeRate(te.EngagementId, te.RateType,
                                   CASE WHEN EXISTS (SELECT 1 FROM dbo.Agreement a WHERE a.EngagementId = te.EngagementId)
                                             OR e.BillingMode = 'Hourly'
-                                            OR (te.RateType = 'OutOfHours' AND e.OutOfHoursRate IS NOT NULL)
+                                            OR (dbo.fn_IsOutOfHoursRate(te.RateType) = 1 AND e.OutOfHoursRate IS NOT NULL)
                                        THEN 'hour' ELSE 'day' END,
                                   CAST(te.WorkStart AS date)) r
     WHERE te.ChargeRate IS NULL;

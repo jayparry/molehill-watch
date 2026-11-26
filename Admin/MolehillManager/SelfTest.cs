@@ -1724,6 +1724,22 @@ public static partial class SelfTest
             return $"{t.Rows[0]["BaseRate"]}/{t.Rows[0]["RateSource"]}";
         }, s2 => (string)s2! == "600.00/Engagement" ? null : $"got {s2}, wanted the engagement's 600.00");
 
+        // out-of-hours work is billed separately and never comes out of the included allowance
+        Step("out-of-hours support time is counted apart from the included hours", () =>
+        {
+            var before = Queries.AgreementUsage(db, reference);
+            decimal Bh(ProcResult u) => u.First is { Rows.Count: > 0 } t ? (decimal)t.Rows[0]["BusinessHoursLogged"] : -1m;
+            decimal Ooh(ProcResult u) => u.First is { Rows.Count: > 0 } t ? (decimal)t.Rows[0]["OutOfHoursLogged"] : -1m;
+            var t2 = db.Proc("dbo.usp_Ticket_Open", ("@Client", reference), ("@Title", "Evening call"),
+                             ("@RateType", "OutOfHours"));
+            var ref2 = t2.First!.Rows[0]["TicketRef"] as string;
+            db.Proc("dbo.usp_Time_Log", ("@TicketRef", ref2!), ("@Minutes", 90), ("@RateType", "OutOfHours"),
+                    ("@Description", "Out of hours"));
+            var after = Queries.AgreementUsage(db, reference);
+            return $"{Bh(before)}/{Bh(after)}/{Ooh(before)}/{Ooh(after)}";
+        }, s2 => ((string)s2!).Split('/') is var p && p[0] == p[1] && decimal.Parse(p[3]) - decimal.Parse(p[2]) == 1.5m
+                 ? null : $"business/out-of-hours logged went {s2}; wanted business unchanged and 1.5 h added out of hours");
+
         Step("and clearing it leaves nothing behind on the client",
             () => db.Query("SELECT DayRate, HourlyRate, BusinessHoursRate, OutOfHoursRate FROM dbo.Client WHERE ClientName = @n",
                            ("@n", name)),
@@ -2078,6 +2094,68 @@ public static partial class SelfTest
         {
             Application.Shutdown();
         }
+
+        // ---- The point of stamping the rate: an invoice can be worked out again and come out the
+        // same. Last in the suite, because it voids and re-raises invoices, and self-contained,
+        // because where this was first written there was no support-hours invoice to compare and it
+        // passed by saying so.
+        Step("a support invoice re-derives to the same figures after a price change", () =>
+        {
+            // Logged while this client is on a support rate of their own, so the figure on the
+            // entry (60) differs from the price list (75) AND from what the client rate will be
+            // changed to later (999). Only the entry's own stamp can produce 60, which is what
+            // makes this able to tell the three apart - priced from the list it read 75 both times
+            // and the test could not see the difference.
+            db.Proc("dbo.usp_Client_SetRates", ("@Client", name), ("@BusinessHoursRate", 60.00m));
+            var tkt = db.Proc("dbo.usp_Ticket_Open", ("@Client", reference), ("@Title", "Re-derivation check"),
+                              ("@RateType", "BusinessHours"));
+            var tktNo = tkt.First!.Rows[0]["TicketRef"] as string;
+            // comfortably past the 3 included hours, so there is definitely something chargeable:
+            // 2.5 hours sat entirely inside the allowance and the sweep billed nothing at all
+            db.Proc("dbo.usp_Time_Log", ("@TicketRef", tktNo!), ("@Minutes", 600),
+                    ("@WorkStart", start.AddDays(3).AddHours(11)), ("@Description", "Support work"));
+
+            var cycle = (int)db.Scalar(@"SELECT bc.BillingCycleId FROM dbo.BillingCycle bc
+                                         JOIN dbo.Agreement a ON a.AgreementId = bc.AgreementId AND a.AgreementRef = @r
+                                         WHERE bc.CycleNumber = 1", ("@r", reference))!;
+            var eng = (int)db.Scalar("SELECT EngagementId FROM dbo.Agreement WHERE AgreementRef = @r", ("@r", reference))!;
+
+            int Sweep()
+            {
+                var id = (int)db.Scalar(@"DECLARE @id int;
+                                          EXEC dbo.usp_Invoice_New @EngagementId = @e, @InvoiceDate = @d, @InvoiceId = @id OUTPUT;
+                                          SELECT @id;", ("@e", eng), ("@d", DateTime.Today))!;
+                db.Proc("dbo.usp_Invoice_AddArrears", ("@InvoiceId", id), ("@BillingCycleId", cycle));
+                return id;
+            }
+            // the RATE is what must not move. The quantity can, and does: voiding an invoice
+            // resets the cycle's IncludedHoursUsed to zero (usp_Invoice_SetStatus), so the second
+            // sweep has the whole allowance to spend again. That is a pre-existing bug this test
+            // happens to demonstrate, not something rate-stamping causes, and it is why this
+            // compares the price per hour rather than the hours.
+            string Rates(int id) => string.Join(" | ", db.Query(
+                @"SELECT DISTINCT l.LineType, l.UnitPrice FROM dbo.InvoiceLine l
+                  WHERE l.InvoiceId = @i AND l.LineType IN ('BusinessHours', 'OutOfHours')
+                  ORDER BY l.LineType, l.UnitPrice", ("@i", id))
+                .Rows.Cast<DataRow>().Select(r => $"{r["LineType"]}@{r["UnitPrice"]}"));
+
+            var first = Sweep();
+            var billed = Rates(first);
+            if (billed.Length == 0) return "the sweep billed nothing, so there is nothing to re-derive";
+
+            // change the rate the work would be priced at TODAY, then void and bill it again.
+            // Nothing about the re-raised invoice may move: the rate lives on the time entry.
+            db.Proc("dbo.usp_Client_SetRates", ("@Client", name), ("@BusinessHoursRate", 999.00m));
+            var no = (string)db.Scalar("SELECT InvoiceNo FROM dbo.Invoice WHERE InvoiceId = @i", ("@i", first))!;
+            db.Proc("dbo.usp_Invoice_SetStatus", ("@InvoiceNo", no), ("@Status", "Void"));
+            var second = Sweep();
+            var again = Rates(second);
+            db.Proc("dbo.usp_Client_SetRates", ("@Client", name), ("@Clear", true));
+
+            if (billed != again) return $"the rate moved: was [{billed}] now [{again}]";
+            if (!billed.Contains("@60.00")) return $"billed at {billed}, not the 60.00 the entry was stamped with";
+            return $"identical: {billed}";
+        }, s2 => ((string)s2!).StartsWith("identical:") ? null : (string)s2!);
 
         Console.WriteLine();
         Console.WriteLine(Detail.AgreementSummary(db, reference, includeInstances: true));
