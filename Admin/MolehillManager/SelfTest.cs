@@ -1644,6 +1644,91 @@ public static partial class SelfTest
                               WHERE e.IsBillable = 1", ("@c", tktRef), ("@t", conTicketRef)),
             n => (int)n! == 1 ? null : $"{n} entries tie that ticket's time to the engagement");
 
+        // ---- 2.8.0: what work is charged at is decided when it is logged and recorded on the
+        // entry, so an invoice can always be re-derived. It stays changeable until the work is
+        // billed, which is what keeps usp_Engagement_Update's promise honest.
+        //
+        // Everything here uses engagements of its own. An earlier version changed conRef's day rate
+        // and quietly moved the billing figures three later assertions check - the same trap twice
+        // in one evening, so: a test that changes a rate gets its own engagement.
+        Step("logged work records the rate it was charged at, and where that came from",
+            () => db.Query(@"SELECT te.BaseRate, te.ChargeRate, te.RateMultiplier, te.RateSource
+                             FROM dbo.TimeEntry te
+                             JOIN dbo.Engagement e ON e.EngagementId = te.EngagementId AND e.EngagementRef = @c
+                             WHERE te.InvoiceId IS NULL", ("@c", conRef)),
+            t => t.Rows.Count > 0 && t.Rows.Cast<DataRow>().All(r =>
+                     r["ChargeRate"] is decimal cr && cr == 600m
+                     && (decimal)r["RateMultiplier"] == 1m && (string)r["RateSource"] == "Engagement")
+                 ? null : $"{t.Rows.Count} entries, first charge rate {(t.Rows.Count > 0 ? t.Rows[0]["ChargeRate"] : "none")}");
+
+        var rateRef = $"CSTR-{stamp}";
+        Step("changing a rate re-prices what is not invoiced, and nothing else", () =>
+        {
+            Submit(AdminForms.NewEngagement(db, name), ("ClientName", name), ("Name", "Rate change test"),
+                   ("BillingMode", "Day rate"), ("DayRate", "500"), ("StartDate", D(lastMonth)), ("EngagementRef", rateRef));
+            // one day billed, then one logged afterwards. Logging both and billing once left them
+            // BOTH invoiced, so there was no un-invoiced row for a rate change to reach and the
+            // assertion below was true for the wrong reason - a mutation pass found that.
+            db.Proc("dbo.usp_Work_Log", ("@Engagement", rateRef), ("@Days", 1m), ("@Description", "Day one"),
+                    ("@WorkDate", lastMonth.AddDays(1)));
+            db.Proc("dbo.usp_Billing_Run", ("@Client", rateRef));
+            db.Proc("dbo.usp_Work_Log", ("@Engagement", rateRef), ("@Days", 1m), ("@Description", "Day two"),
+                    ("@WorkDate", DateTime.Today));
+            Submit(AdminForms.EditEngagement(db, rateRef), ("DayRate", "650"));
+            return db.Query(@"SELECT te.ChargeRate, Invoiced = CASE WHEN te.InvoiceId IS NULL THEN 0 ELSE 1 END
+                              FROM dbo.TimeEntry te
+                              JOIN dbo.Engagement e ON e.EngagementId = te.EngagementId AND e.EngagementRef = @r
+                              ORDER BY te.WorkStart", ("@r", rateRef));
+        }, t => t.Rows.Count == 2
+                && t.Rows.Cast<DataRow>().Count(r => (int)r["Invoiced"] == 1) == 1
+                && t.Rows.Cast<DataRow>().All(r => (decimal)r["ChargeRate"] == ((int)r["Invoiced"] == 1 ? 500m : 650m))
+                ? null : string.Join(", ", t.Rows.Cast<DataRow>().Select(r => $"{r["ChargeRate"]}{((int)r["Invoiced"] == 1 ? " billed" : " waiting")}")));
+
+        // A client rate instead of the house one. CK_Engagement_Rates means a consultancy
+        // engagement always names its own, so the override is reached on SUPPORT hours - which is
+        // the case that matters anyway: a client who gets cheaper support than the price list.
+        Step("a client rate beats the price list for support hours", () =>
+        {
+            var listRate = (decimal)db.Scalar(@"SELECT p.BusinessHoursRate FROM dbo.Agreement a
+                                                JOIN dbo.PriceList p ON p.PriceListId = a.PriceListId
+                                                WHERE a.AgreementRef = @r", ("@r", reference))!;
+            var fromList = (decimal)db.Scalar(@"SELECT TOP (1) r.BaseRate
+                                                FROM dbo.Agreement a
+                                                CROSS APPLY dbo.fn_ChargeRate(a.EngagementId, 'BusinessHours', 'hour', CAST(@d AS date)) r
+                                                WHERE a.AgreementRef = @r", ("@r", reference), ("@d", DateTime.Today))!;
+            db.Proc("dbo.usp_Client_SetRates", ("@Client", name), ("@BusinessHoursRate", 55.00m));
+            var t = db.Query(@"SELECT r.BaseRate, r.RateSource
+                               FROM dbo.Agreement a
+                               CROSS APPLY dbo.fn_ChargeRate(a.EngagementId, 'BusinessHours', 'hour', CAST(@d AS date)) r
+                               WHERE a.AgreementRef = @r", ("@r", reference), ("@d", DateTime.Today));
+            db.Proc("dbo.usp_Client_SetRates", ("@Client", name), ("@Clear", true));
+            var afterClear = (decimal)db.Scalar(@"SELECT TOP (1) r.BaseRate
+                                                  FROM dbo.Agreement a
+                                                  CROSS APPLY dbo.fn_ChargeRate(a.EngagementId, 'BusinessHours', 'hour', CAST(@d AS date)) r
+                                                  WHERE a.AgreementRef = @r", ("@r", reference), ("@d", DateTime.Today))!;
+            return $"{fromList}/{t.Rows[0]["BaseRate"]}/{t.Rows[0]["RateSource"]}/{afterClear}/{listRate}";
+        }, s2 => ((string)s2!).Split('/') is var p
+                 && p[0] == p[4] && p[1] == "55.00" && p[2] == "ClientOverride" && p[3] == p[4]
+                 ? null : $"list/override/source/cleared/listRate = {s2}");
+
+        // and where both are set, the engagement's own figure is the one that applies: a rate
+        // agreed for this piece of work beats a standing rate for the client
+        Step("an engagement's own rate beats the client's", () =>
+        {
+            db.Proc("dbo.usp_Client_SetRates", ("@Client", name), ("@DayRate", 111.00m), ("@HourlyRate", 11.00m));
+            var t = db.Query(@"SELECT r.BaseRate, r.RateSource
+                               FROM dbo.Engagement e
+                               CROSS APPLY dbo.fn_ChargeRate(e.EngagementId, 'BusinessHours', 'day', CAST(@d AS date)) r
+                               WHERE e.EngagementRef = @c", ("@c", conRef), ("@d", DateTime.Today));
+            db.Proc("dbo.usp_Client_SetRates", ("@Client", name), ("@Clear", true));
+            return $"{t.Rows[0]["BaseRate"]}/{t.Rows[0]["RateSource"]}";
+        }, s2 => (string)s2! == "600.00/Engagement" ? null : $"got {s2}, wanted the engagement's 600.00");
+
+        Step("and clearing it leaves nothing behind on the client",
+            () => db.Query("SELECT DayRate, HourlyRate, BusinessHoursRate, OutOfHoursRate FROM dbo.Client WHERE ClientName = @n",
+                           ("@n", name)),
+            t => t.Rows[0].ItemArray.All(v => v is DBNull) ? null : "a client rate is still set");
+
         Step("three hours bills as half a day; two plus three on one day bills as a whole one", () => Queries.ConsultancyWork(db, conRef),
             t => t.Rows.Count == 3 && t.Rows.Cast<DataRow>().Sum(r => (decimal)r["Days"]) == 2.5m ? null
                  : string.Join(", ", t.Rows.Cast<DataRow>().Select(r => $"{Output.Format(r["Date"])} {r["Days"]}")));

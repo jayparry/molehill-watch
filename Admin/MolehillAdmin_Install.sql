@@ -922,6 +922,7 @@ GO
 UPDATE dbo.Setting SET Value = N'8' WHERE Name = 'DayHours' AND Value IN (N'7.5', N'7.50');
 GO
 
+
 /*--- tighten. Each guarded the way 2.0.0 guards its own: only when the column is still
       nullable AND nothing is left unfilled, so a database the pre-flight stopped is left
       working rather than half-changed. ---*/
@@ -1284,6 +1285,76 @@ GO
 
 -- consultancy work, a line per day worked (out-of-hours work on its own line when
 -- the engagement has an out-of-hours rate). Quantity is days, or hours when billed hourly.
+-- What an hour or a day of work is charged at, and where that figure came from.
+--
+-- Resolved in one place, in one order: the engagement's own figure, then this client's rate, then
+-- the agreement's price list, then the house setting. Before 2.8.0 a consultancy rate existed only
+-- on the engagement and the last resort was ISNULL(DayRate, 0) - so a missing rate priced the work
+-- at nothing and said so to no one.
+--
+-- The answer is stamped onto the time entry when it is logged, not worked out again at invoicing,
+-- so an invoice already sent cannot move when a rate changes.
+CREATE OR ALTER FUNCTION dbo.fn_ChargeRate
+(
+    @EngagementId int,
+    @RateType     varchar(20),      -- BusinessHours | OutOfHours
+    @Unit         varchar(10),      -- 'day' | 'hour'
+    @AsOf         date
+)
+RETURNS TABLE
+AS
+RETURN
+    WITH src AS (
+        SELECT e.EngagementId, e.BillingMode, e.DayRate, e.HourlyRate, e.OutOfHoursRate,
+               c.ClientId,
+               ClientDay   = c.DayRate,
+               ClientHour  = c.HourlyRate,
+               ClientBh    = c.BusinessHoursRate,
+               ClientOoh   = c.OutOfHoursRate,
+               a.AgreementId,
+               ListBh      = p.BusinessHoursRate,
+               ListOoh     = p.OutOfHoursRate
+        FROM dbo.Engagement e
+        JOIN dbo.Client c ON c.ClientId = e.ClientId
+        LEFT JOIN dbo.Agreement a ON a.EngagementId = e.EngagementId
+        LEFT JOIN dbo.PriceList p ON p.PriceListId = dbo.fn_PriceListIdOn(a.AgreementId, @AsOf)
+        WHERE e.EngagementId = @EngagementId),
+    picked AS (
+        SELECT *,
+               -- the engagement's own figure for the unit being charged
+               EngRate = CASE WHEN @RateType = 'OutOfHours' AND OutOfHoursRate IS NOT NULL THEN OutOfHoursRate
+                              WHEN @Unit = 'hour' THEN HourlyRate
+                              ELSE DayRate END,
+               -- then this client's standing rate
+               CliRate = CASE WHEN @RateType = 'OutOfHours' THEN COALESCE(ClientOoh, CASE WHEN @Unit = 'hour' THEN ClientHour END)
+                              WHEN @Unit = 'hour' THEN COALESCE(ClientHour, ClientBh)
+                              ELSE ClientDay END,
+               -- then the agreement's price list, which only prices support hours
+               ListRate = CASE WHEN @Unit = 'hour' THEN CASE WHEN @RateType = 'OutOfHours' THEN ListOoh ELSE ListBh END END
+        FROM src)
+    SELECT EngagementId, ClientId, AgreementId,
+           BaseRate = COALESCE(EngRate, CliRate, ListRate),
+           RateSource = CASE WHEN EngRate IS NOT NULL THEN 'Engagement'
+                             WHEN CliRate IS NOT NULL THEN 'ClientOverride'
+                             WHEN ListRate IS NOT NULL THEN 'PriceList'
+                             ELSE 'None' END
+    FROM picked;
+GO
+
+-- Whether a rate type counts as out of hours. One definition, because the alternative is the same
+-- literal comparison written out in six places and only five of them remembered when a band is
+-- added.
+CREATE OR ALTER FUNCTION dbo.fn_IsOutOfHoursRate (@RateType varchar(20))
+RETURNS bit
+AS
+BEGIN
+    RETURN CASE WHEN @RateType IS NULL THEN 0
+                WHEN EXISTS (SELECT 1 FROM dbo.RateBand WHERE Band = @RateType AND CountsAsOutOfHours = 1) THEN 1
+                WHEN @RateType = 'OutOfHours' THEN 1
+                ELSE 0 END;
+END
+GO
+
 CREATE OR ALTER FUNCTION dbo.fn_ConsultancyWork (@EngagementId int, @UnbilledOnly bit)
 RETURNS TABLE
 AS
@@ -1923,6 +1994,78 @@ GO
 -- Cover a server this client already has under an agreement. Used when a server moves between a
 -- client's agreements, or comes back into scope after cover was ended. usp_Instance_Add is for a
 -- server the client has never had.
+-- What this client is charged instead of the house rates. NULL leaves a rate as it is; pass
+-- @Clear = 1 to put one back to the standard. Changing a rate re-stamps the client's work that
+-- has not been invoiced yet, and leaves everything already invoiced exactly as it was.
+CREATE OR ALTER PROCEDURE dbo.usp_Client_SetRates
+    @Client            nvarchar(200),
+    @DayRate           decimal(9,2) = NULL,
+    @HourlyRate        decimal(9,2) = NULL,
+    @BusinessHoursRate decimal(9,2) = NULL,
+    @OutOfHoursRate    decimal(9,2) = NULL,
+    @Clear             bit          = 0        -- 1 = back to the house rates for every figure given as NULL
+AS
+BEGIN
+    SET NOCOUNT, XACT_ABORT ON;
+    DECLARE @ClientId int = dbo.fn_ClientId(@Client);
+    IF @ClientId IS NULL BEGIN RAISERROR(N'Client "%s" not found.', 16, 1, @Client); RETURN; END
+
+    UPDATE dbo.Client
+    SET DayRate           = CASE WHEN @Clear = 1 THEN @DayRate           ELSE ISNULL(@DayRate, DayRate) END,
+        HourlyRate        = CASE WHEN @Clear = 1 THEN @HourlyRate        ELSE ISNULL(@HourlyRate, HourlyRate) END,
+        BusinessHoursRate = CASE WHEN @Clear = 1 THEN @BusinessHoursRate ELSE ISNULL(@BusinessHoursRate, BusinessHoursRate) END,
+        OutOfHoursRate    = CASE WHEN @Clear = 1 THEN @OutOfHoursRate    ELSE ISNULL(@OutOfHoursRate, OutOfHoursRate) END
+    WHERE ClientId = @ClientId;
+
+    EXEC dbo.usp_Time_Restamp @ClientId = @ClientId;
+
+    SELECT ClientName, DayRate, HourlyRate, BusinessHoursRate, OutOfHoursRate
+    FROM dbo.Client WHERE ClientId = @ClientId;
+    PRINT N'Rates set. Work already invoiced keeps what it was charged at; anything not yet invoiced has been re-priced.';
+END
+GO
+
+-- Put the charge rate back on time that has not been invoiced yet.
+--
+-- The rate is stamped when work is logged, but it has to stay changeable until the work is billed:
+-- usp_Engagement_Update has always promised that a new rate applies to everything not yet
+-- invoiced, and the write suite holds it to that. So the invariant is not "stamped and frozen", it
+-- is "stamped, changeable while InvoiceId IS NULL, frozen the moment billing sets it". Voiding an
+-- invoice clears InvoiceId, which correctly makes that work re-stampable again.
+CREATE OR ALTER PROCEDURE dbo.usp_Time_Restamp
+    @EngagementId int = NULL,
+    @ClientId     int = NULL,
+    @TimeEntryId  int = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    IF @EngagementId IS NULL AND @ClientId IS NULL AND @TimeEntryId IS NULL
+    BEGIN RAISERROR(N'Say which work to re-price: @TimeEntryId, @EngagementId or @ClientId.', 16, 1); RETURN; END
+
+    UPDATE te
+    SET te.BaseRate   = r.BaseRate,
+        te.RateSource = r.RateSource,
+        te.RateMultiplier = ISNULL(b.Multiplier, 1),
+        te.ChargeRate = CAST(ROUND(r.BaseRate * ISNULL(b.Multiplier, 1), 2) AS decimal(9,2)),
+        te.RateBand   = ISNULL(te.RateBand, te.RateType)
+    FROM dbo.TimeEntry te
+    JOIN dbo.Engagement e ON e.EngagementId = te.EngagementId
+    CROSS APPLY dbo.fn_ChargeRate(te.EngagementId, te.RateType,
+                                  -- the same rule fn_ConsultancyWork uses, plus: support time is
+                                  -- always billed by the hour, through usp_Invoice_AddArrears
+                                  CASE WHEN EXISTS (SELECT 1 FROM dbo.Agreement a WHERE a.EngagementId = te.EngagementId)
+                                            OR e.BillingMode = 'Hourly'
+                                            OR (dbo.fn_IsOutOfHoursRate(te.RateType) = 1 AND e.OutOfHoursRate IS NOT NULL)
+                                       THEN 'hour' ELSE 'day' END,
+                                  CAST(te.WorkStart AS date)) r
+    LEFT JOIN dbo.RateBand b ON b.Band = te.RateBand
+    WHERE te.InvoiceId IS NULL
+      AND (@TimeEntryId IS NULL OR te.TimeEntryId = @TimeEntryId)
+      AND (@EngagementId IS NULL OR te.EngagementId = @EngagementId)
+      AND (@ClientId IS NULL OR e.ClientId = @ClientId);
+END
+GO
+
 CREATE OR ALTER PROCEDURE dbo.usp_Agreement_CoverInstance
     @Agreement    nvarchar(200),
     @InstanceName nvarchar(128),
@@ -2183,9 +2326,15 @@ BEGIN
         Notes = ISNULL(@Notes, Notes), Status = ISNULL(@Status, Status)
     WHERE EngagementId = @Id;
 
-    IF (@DayRate IS NOT NULL OR @HourlyRate IS NOT NULL OR @OutOfHoursRate IS NOT NULL)
-       AND EXISTS (SELECT 1 FROM dbo.TimeEntry WHERE EngagementId = @Id AND InvoiceId IS NULL AND IsBillable = 1)
-        PRINT N'Note: the new rate applies to all time that has not been invoiced yet, including work already logged.';
+    -- the promise in that message is now kept by re-stamping rather than by looking the rate up
+    -- again at invoicing: work already invoiced keeps what it was charged, and everything else
+    -- takes the new figure
+    IF @DayRate IS NOT NULL OR @HourlyRate IS NOT NULL OR @OutOfHoursRate IS NOT NULL
+    BEGIN
+        EXEC dbo.usp_Time_Restamp @EngagementId = @Id;
+        IF EXISTS (SELECT 1 FROM dbo.TimeEntry WHERE EngagementId = @Id AND InvoiceId IS NULL AND IsBillable = 1)
+            PRINT N'Note: the new rate applies to all time that has not been invoiced yet, including work already logged.';
+    END
 
     IF (@UnitCount IS NOT NULL OR @FirstUnitPrice IS NOT NULL OR @ExtraUnitPrice IS NOT NULL OR @PriceCap IS NOT NULL)
        AND (SELECT BillingMode FROM dbo.Engagement WHERE EngagementId = @Id) = 'PerInstance'
@@ -2584,6 +2733,9 @@ BEGIN
 
     INSERT dbo.TimeEntry (EngagementId, TicketId, WorkStart, Minutes, RateType, Description, IsBillable)
     VALUES (@TicketEngagementId, @TicketId, @WorkStart, @Minutes, @RateType, @Description, @IsBillable);
+    -- what this is charged at is decided now, not at invoicing
+    DECLARE @NewEntryId int = CONVERT(int, SCOPE_IDENTITY());
+    EXEC dbo.usp_Time_Restamp @TimeEntryId = @NewEntryId;
 
     UPDATE dbo.Ticket SET Status = 'InProgress', FirstResponseAt = ISNULL(FirstResponseAt, @WorkStart)
     WHERE TicketId = @TicketId AND Status = 'Open';
@@ -2823,6 +2975,8 @@ BEGIN
 
     INSERT dbo.TimeEntry (EngagementId, TicketId, WorkStart, Minutes, RateType, Description, IsBillable)
     VALUES (@Id, NULL, DATEADD(hour, 9, CAST(@WorkDate AS datetime2(0))), @Mins, @RateType, @Description, @IsBillable);
+    DECLARE @LoggedEntryId int = CONVERT(int, SCOPE_IDENTITY());
+    EXEC dbo.usp_Time_Restamp @TimeEntryId = @LoggedEntryId;
 
     IF @Status = 'Completed' PRINT N'Note: this engagement is marked complete. The next billing run will invoice this time too.';
     IF @Status <> 'Completed' AND @Mode IN ('DayRate', 'Hourly')
@@ -4513,6 +4667,36 @@ DECLARE @Logo nvarchar(max) = CONVERT(nvarchar(max), N'data:image/png;base64,') 
 ;
 
 UPDATE dbo.Setting SET Value = @Logo WHERE Name = 'LogoDataUri' AND ISNULL(Value, N'') = N'';
+GO
+
+-- Moved here from the upgrade region on purpose: it calls fn_ChargeRate, which is not created
+-- until the object region further up. In the upgrade region it worked on an empty database - the
+-- guard meant the body never ran, so the missing function was never resolved - and failed the
+-- moment it met a database with time entries in it. A data backfill that needs the new functions
+-- belongs after they exist.
+-- Every time entry gets the rate it was charged at, including the ones already invoiced: voiding
+-- an invoice puts its time back in play, and an entry with no rate would then bill at nothing.
+-- Guarded on ChargeRate IS NULL, so re-running never re-prices anything.
+IF COL_LENGTH(N'dbo.TimeEntry', N'ChargeRate') IS NOT NULL
+   AND EXISTS (SELECT 1 FROM dbo.TimeEntry WHERE ChargeRate IS NULL)
+BEGIN
+    UPDATE te
+    SET te.RateBand       = ISNULL(te.RateBand, te.RateType),
+        te.BaseRate       = r.BaseRate,
+        te.RateMultiplier = 1,
+        te.ChargeRate     = r.BaseRate,
+        te.RateSource     = 'Backfill'
+    FROM dbo.TimeEntry te
+    JOIN dbo.Engagement e ON e.EngagementId = te.EngagementId
+    CROSS APPLY dbo.fn_ChargeRate(te.EngagementId, te.RateType,
+                                  CASE WHEN EXISTS (SELECT 1 FROM dbo.Agreement a WHERE a.EngagementId = te.EngagementId)
+                                            OR e.BillingMode = 'Hourly'
+                                            OR (te.RateType = 'OutOfHours' AND e.OutOfHoursRate IS NOT NULL)
+                                       THEN 'hour' ELSE 'day' END,
+                                  CAST(te.WorkStart AS date)) r
+    WHERE te.ChargeRate IS NULL;
+    PRINT N'Logged time now records what it was charged at (' + CONVERT(nvarchar(10), @@ROWCOUNT) + N' entries).';
+END
 GO
 
 INSERT dbo.InstallHistory (Version) VALUES ('2.8.0');   -- bump with every schema change: Molehill Manager offers the upgrade
