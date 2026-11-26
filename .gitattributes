@@ -10,3 +10,8 @@
 *.zip binary
 *.exe binary
 *.dll binary
+
+# The published patch reference is written by PowerShell on Windows when it is refreshed by hand and
+# on Linux when the workflow does it. Storing it as LF whichever wrote it keeps the weekly diff down
+# to what Microsoft actually changed, instead of every line of a 500-build file.
+Client/patch-reference.json text eol=lf

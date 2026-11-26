@@ -1,0 +1,75 @@
+# Keeps Client/patch-reference.json current, so a site that cannot reach Microsoft can still get
+# Microsoft's build data: download the one file from this repository instead and load it with
+# Update-PatchReference.ps1 -InFile (or drop it beside Get-PatchStatus.ps1).
+#
+# Both readers judge the file's age. Get-MhPatchStatus warns once Downloaded is more than 40 days
+# old, and mw.usp_PatchStatus warns once mw.PatchReference.LoadedAt is (PatchReferenceMaxAgeDays).
+# So this runs weekly and commits every time: the date is part of what is being published, not
+# noise around it.
+#
+# GitHub disables a scheduled workflow after 60 days with no pushes to the repository. If the file
+# stops being refreshed, that is the first thing to check - the Actions tab offers a button to
+# re-enable it, and "Run workflow" refreshes it on the spot.
+name: Refresh patch reference
+
+on:
+  schedule:
+    - cron: '0 6 * * 3'   # Wednesday mornings: the day after Patch Tuesday, whenever it falls
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-patch-reference
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The script only downloads when it is given -OutFile and no instances to load, so nothing
+      # here needs a SQL Server or any credential.
+      - name: Download Microsoft's build data
+        shell: pwsh
+        run: ./Client/Update-PatchReference.ps1 -OutFile ./Client/patch-reference.json -Months 3
+
+      # The script already refuses a page it could not read. This is the second question: is what
+      # it did read still a whole estate's worth of data, and what is the newest thing in it?
+      - name: Read back what was saved
+        shell: pwsh
+        run: |
+          $data = Get-Content -Raw ./Client/patch-reference.json | ConvertFrom-Json
+          $sql = @($data.Rows | Where-Object { $_.Product -eq 'SQL Server' })
+          $win = @($data.Rows | Where-Object { $_.Product -eq 'Windows Server' })
+          if ($sql.Count -lt 400) { throw "Only $($sql.Count) SQL Server builds were saved." }
+          if ($win.Count -lt 4) { throw "Only $($win.Count) Windows Server builds were saved." }
+          $newestSql = $sql | Sort-Object ReleaseDate -Descending | Select-Object -First 1
+          $latest = foreach ($g in ($win | Group-Object ProductName | Sort-Object Name)) {
+              $b = $g.Group | Sort-Object ReleaseDate, Revision -Descending | Select-Object -First 1
+              "$($g.Name) $($b.BuildNumber).$($b.Revision)"
+          }
+          $body = @(
+              "$($data.Rows.Count) builds: $($sql.Count) SQL Server, $($win.Count) Windows Server.",
+              "Newest SQL Server: $($newestSql.ProductName) $($newestSql.UpdateName) ($($newestSql.Major).$($newestSql.Minor).$($newestSql.BuildNumber).$($newestSql.Revision), KB$($newestSql.KB), $($newestSql.ReleaseDate)).",
+              "Newest Windows security builds: $($latest -join ', ')."
+          )
+          Set-Content -Path message.txt -Encoding utf8 -Value (@('Refresh the patch reference data', '') + $body)
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ($body -join "`n`n")
+
+      # This commits every week, because Downloaded moves every week and that date is half of what
+      # is being published: a reader has to be able to tell current data from data that merely has
+      # not changed. The guard is only so that a run with nothing to say fails nothing.
+      - name: Commit it
+        run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Client/patch-reference.json
+          if git diff --cached --quiet; then
+            echo 'Nothing to commit.'
+            exit 0
+          fi
+          git commit -F message.txt
+          git push

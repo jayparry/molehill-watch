@@ -152,7 +152,7 @@ The client's **Molehill Watch - Weekly Report** job builds the report at 06:30 e
    ```powershell
    .\Export-WeeklyReports.ps1 -ServerList .\servers.txt -UpdatePatchReference
    ```
-   `-UpdatePatchReference` refreshes Microsoft's latest SQL Server CU and Windows security update data (needs internet). With no internet on the jump box, create the file on your PC with `.\Update-PatchReference.ps1 -OutFile patch-reference.json`, then load it with `-InFile`.
+   `-UpdatePatchReference` refreshes Microsoft's latest SQL Server CU and Windows security update data (needs internet). With no internet on the jump box, create the file on your PC with `.\Update-PatchReference.ps1 -OutFile patch-reference.json`, then load it with `-InFile`. With no internet anywhere on site, download the weekly copy from `https://raw.githubusercontent.com/jayparry/molehill-watch/main/Client/patch-reference.json` and load that with `-InFile` instead: it is the same file, and the `Downloaded` date at the top of it says how current it is.
    For **Azure SQL Database**, run the report per logical server, signed in with `az login` or with `-SqlCredential`:
    ```powershell
    .\Get-AzureSqlDatabaseReport.ps1 -Server contoso-sql,contoso-sql-dr -ClientName 'Contoso Ltd' -AzurePlatformChecks

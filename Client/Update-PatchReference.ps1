@@ -16,6 +16,15 @@
       2. Copy the file to the jump box
       3. On the jump box:            .\Update-PatchReference.ps1 -InFile patch-reference.json -ServerList .\servers.txt
 
+    If nothing to hand can reach Microsoft, step 1 is already done for you: a copy of that file
+    is published in this repository at Client\patch-reference.json and refreshed every Wednesday,
+    so it can be downloaded from
+
+      https://raw.githubusercontent.com/jayparry/molehill-watch/main/Client/patch-reference.json
+
+    and used with -InFile exactly as above. Check the Downloaded date at the top of it first:
+    this and mw.usp_PatchStatus both warn once the data is more than 40 days old.
+
     Needs only the Molehill Data Services read-only login (it can refresh this reference table and nothing else).
     Install-MolehillWatch.ps1 and Export-WeeklyReports.ps1 -UpdatePatchReference call this for you.
 
@@ -152,7 +161,10 @@ function Get-WindowsSecurityBuilds([int]$MonthCount) {
                 }
             }
         }
-        foreach ($k in $best.Keys) { $rows.Add($best[$k]) }
+        # by build number, so the saved file is the same file when the data is the same data:
+        # a hashtable hands back its keys in whatever order it likes, and the copy published for
+        # sites that cannot reach Microsoft is read as a diff
+        foreach ($k in ($best.Keys | Sort-Object)) { $rows.Add($best[$k]) }
         $doc = $null
     }
     if ($rows.Count -eq 0) { throw 'No Windows Server security builds were read from MSRC - the API format may have changed.' }

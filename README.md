@@ -95,6 +95,8 @@ This writes an `index.html` with the RAG status and live patch status of every s
 
 **If the jump box has no internet access:** on your own PC run `.\Update-PatchReference.ps1 -OutFile patch-reference.json`, copy the file across, then on the jump box run `.\Update-PatchReference.ps1 -InFile patch-reference.json -ServerList .\servers.txt`.
 
+**If nothing to hand can reach Microsoft:** that file is published here too, at [`Client/patch-reference.json`](Client/patch-reference.json), refreshed every Wednesday morning by a scheduled workflow. Download it from `https://raw.githubusercontent.com/jayparry/molehill-watch/main/Client/patch-reference.json` and load it with `-InFile` as above. Check the `Downloaded` date at the top of the file first: everything that reads it warns once the data is more than 40 days old.
+
 **Azure SQL Database** (per logical server; elastic pools are reported within their server):
 
 ```powershell
@@ -135,6 +137,7 @@ MolehillWatch\
 │  ├─ MolehillWatch_Uninstall.sql           removes jobs + database
 │  ├─ Export-WeeklyReports.ps1              saves reports as HTML + AG parity check + patch status
 │  ├─ Update-PatchReference.ps1             loads Microsoft's latest SQL/Windows build data
+│  ├─ patch-reference.json                  that data, published and refreshed weekly, for sites with no internet
 │  ├─ Get-AzureSqlDatabaseReport.ps1        weekly report for Azure SQL Database (read-only, run from the jump box)
 │  ├─ Invoke-MolehillCollect.ps1            collector for Express edition (Task Scheduler)
 │  └─ servers.example.txt
@@ -194,7 +197,7 @@ A single script, separate from Molehill Watch, for a quick "how out of date is t
 * **Reads Windows' security update level** through SQL Server (`xp_regread`, needs sysadmin), otherwise Remote Registry, otherwise the local registry when run on the server itself.
 * **Compares** against the same Microsoft data as Molehill Watch, using the same rules, and writes an HTML report (`-CsvPath` for CSV too).
 * **Exit code** is 0 (OK), 1 (warnings) or 2 (critical).
-* **No internet on the server?** Run `.\Get-PatchStatus.ps1 -SaveReference patch-reference.json` somewhere with internet, and copy that file next to the script. It's picked up automatically.
+* **No internet on the server?** Run `.\Get-PatchStatus.ps1 -SaveReference patch-reference.json` somewhere with internet, and copy that file next to the script. It's picked up automatically. Or download the weekly copy published at [`Client/patch-reference.json`](Client/patch-reference.json), which is the same file: nothing but Microsoft's build data, read the same way.
 
 * **It can email itself.** `-EmailTo`, `-EmailFrom` and `-SmtpServer` send the report as well as
   saving it: the HTML file rides along as an attachment, and the body lists whatever is behind so
