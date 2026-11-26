@@ -2416,6 +2416,163 @@ public static partial class SelfTest
             t => (decimal)t.Rows[0]["Clawback"] == 0m && (int)t.Rows[0]["MonthsUnserved"] == 0
                  ? null : $"clawback {t.Rows[0]["Clawback"]} with {t.Rows[0]["MonthsUnserved"]} month(s) unserved");
 
+        // ---- 2.8.0 G5: the out-of-hours bands the price sheet sells. Time and a half on weekday
+        // evenings and Saturdays, double time overnight, Sundays and bank holidays.
+        Step("a moment falls in the band the price sheet would put it in", () =>
+        {
+            // a Wednesday, a Saturday, a Sunday and a bank holiday
+            var wed = new DateTime(2026, 11, 4);
+            var sat = new DateTime(2026, 11, 7);
+            var sun = new DateTime(2026, 11, 8);
+            var bank = (DateTime)db.Scalar("SELECT MIN(HolidayDate) FROM dbo.BankHoliday WHERE HolidayDate >= @d", ("@d", wed))!;
+            string Band(DateTime at) => (string)db.Scalar("SELECT dbo.fn_RateBand(@at)", ("@at", at))!;
+            return string.Join("/", new[]
+            {
+                Band(wed.AddHours(11)),       // Wednesday morning
+                Band(wed.AddHours(19)),       // Wednesday evening
+                Band(wed.AddHours(23)),       // Wednesday night
+                Band(wed.AddHours(3)),        // small hours
+                Band(sat.AddHours(11)),       // Saturday
+                Band(sun.AddHours(11)),       // Sunday
+                Band(bank.AddHours(11)),      // bank holiday
+            });
+        }, s2 => (string)s2! == "BusinessHours/Evening/Overnight/Overnight/Saturday/Sunday/BankHoliday"
+                 ? null : $"got {s2}");
+
+        // The trap: an out-of-hours rate somebody has set is ALREADY a premium figure. Multiplying
+        // it by the band as well would charge 82.50 x 1.5. The multiplier only applies where there
+        // is no explicit out-of-hours rate to use.
+        Step("an explicit out-of-hours rate is used as it stands, not multiplied again", () =>
+        {
+            var ref1 = $"CSTO-{stamp}";
+            Submit(AdminForms.NewEngagement(db, name), ("ClientName", name), ("Name", "Evening work, rate given"),
+                   ("BillingMode", "Hourly"), ("HourlyRate", "55"), ("OutOfHoursRate", "82.50"),
+                   ("StartDate", D(lastMonth)), ("EngagementRef", ref1));
+            db.Proc("dbo.usp_Work_Log", ("@Engagement", ref1), ("@Hours", 1m), ("@RateType", "Saturday"),
+                    ("@Description", "Saturday work"), ("@WorkDate", DateTime.Today));
+            return db.Query(@"SELECT te.BaseRate, te.RateMultiplier, te.ChargeRate, te.RateSource
+                              FROM dbo.TimeEntry te
+                              JOIN dbo.Engagement e ON e.EngagementId = te.EngagementId AND e.EngagementRef = @r",
+                            ("@r", ref1));
+        }, t => t.Rows.Count == 1 && (decimal)t.Rows[0]["ChargeRate"] == 82.50m
+                && (decimal)t.Rows[0]["RateMultiplier"] == 1m
+                ? null : $"charged {t.Rows[0]["ChargeRate"]} with multiplier {t.Rows[0]["RateMultiplier"]}");
+
+        Step("and where none is given, the band multiplies the ordinary rate", () =>
+        {
+            var ref2 = $"CSTM-{stamp}";
+            Submit(AdminForms.NewEngagement(db, name), ("ClientName", name), ("Name", "Evening work, no rate given"),
+                   ("BillingMode", "Hourly"), ("HourlyRate", "55"),
+                   ("StartDate", D(lastMonth)), ("EngagementRef", ref2));
+            db.Proc("dbo.usp_Work_Log", ("@Engagement", ref2), ("@Hours", 1m), ("@RateType", "Saturday"),
+                    ("@Description", "Saturday work"), ("@WorkDate", DateTime.Today));
+            db.Proc("dbo.usp_Work_Log", ("@Engagement", ref2), ("@Hours", 1m), ("@RateType", "Sunday"),
+                    ("@Description", "Sunday work"), ("@WorkDate", DateTime.Today.AddDays(1)));
+            return db.Query(@"SELECT te.RateBand, te.RateMultiplier, te.ChargeRate
+                              FROM dbo.TimeEntry te
+                              JOIN dbo.Engagement e ON e.EngagementId = te.EngagementId AND e.EngagementRef = @r
+                              ORDER BY te.RateBand", ("@r", ref2));
+        }, t => t.Rows.Count == 2
+                && (decimal)t.Rows[0]["ChargeRate"] == 82.50m && (decimal)t.Rows[0]["RateMultiplier"] == 1.5m
+                && (decimal)t.Rows[1]["ChargeRate"] == 110.00m && (decimal)t.Rows[1]["RateMultiplier"] == 2.0m
+                ? null : string.Join(", ", t.Rows.Cast<DataRow>().Select(r => $"{r["RateBand"]} {r["ChargeRate"]}")));
+
+        // The minimum charge is one per TICKET, not one per band: ten minutes on a Saturday and ten
+        // on a Sunday is one chargeable hour, not two. It is charged at the higher band, because
+        // that is the band the top-up is owed at.
+        Step("a ticket under the minimum is one out-of-hours line at the higher band", () =>
+        {
+            var t1 = db.Proc("dbo.usp_Ticket_Open", ("@Client", reference), ("@Title", "Weekend call"),
+                             ("@RateType", "OutOfHours"));
+            var tr = (string)t1.First!.Rows[0]["TicketRef"];
+            db.Proc("dbo.usp_Time_Log", ("@TicketRef", tr), ("@Minutes", 10), ("@RateType", "Saturday"),
+                    ("@WorkStart", start.AddDays(4).AddHours(11)), ("@Description", "Saturday"));
+            db.Proc("dbo.usp_Time_Log", ("@TicketRef", tr), ("@Minutes", 10), ("@RateType", "Sunday"),
+                    ("@WorkStart", start.AddDays(5).AddHours(11)), ("@Description", "Sunday"));
+
+            var cycle = (int)db.Scalar(@"SELECT bc.BillingCycleId FROM dbo.BillingCycle bc
+                                         JOIN dbo.Agreement a ON a.AgreementId = bc.AgreementId AND a.AgreementRef = @r
+                                         WHERE bc.CycleNumber = 1", ("@r", reference))!;
+            var eng = (int)db.Scalar("SELECT EngagementId FROM dbo.Agreement WHERE AgreementRef = @r", ("@r", reference))!;
+            var id = (int)db.Scalar(@"DECLARE @id int;
+                                      EXEC dbo.usp_Invoice_New @EngagementId = @e, @InvoiceDate = @d, @InvoiceId = @id OUTPUT;
+                                      SELECT @id;", ("@e", eng), ("@d", DateTime.Today))!;
+            db.Proc("dbo.usp_Invoice_AddArrears", ("@InvoiceId", id), ("@BillingCycleId", cycle));
+            var t = db.Query(@"SELECT l.RateType, l.Quantity, l.UnitPrice FROM dbo.InvoiceLine l
+                               WHERE l.InvoiceId = @i AND l.LineType = 'OutOfHours'
+                                 AND l.TicketId = (SELECT TicketId FROM dbo.Ticket WHERE TicketRef = @t)",
+                             ("@i", id), ("@t", tr));
+            var no = (string)db.Scalar("SELECT InvoiceNo FROM dbo.Invoice WHERE InvoiceId = @i", ("@i", id))!;
+            db.Proc("dbo.usp_Invoice_SetStatus", ("@InvoiceNo", no), ("@Status", "Void"));
+            return t.Rows.Count == 1
+                   ? $"{t.Rows[0]["RateType"]}/{t.Rows[0]["Quantity"]}/{t.Rows[0]["UnitPrice"]}"
+                   : $"{t.Rows.Count} out-of-hours lines";
+        }, s2 => ((string)s2!).StartsWith("Sunday/1.00/")
+                 ? null : $"got {s2}; wanted one Sunday line of 1.00 h");
+
+        // Over the minimum there is no top-up to place, so the hours stay with the band they were
+        // worked in: one line each. Under support pricing both bands charge the same flat figure -
+        // the sheet sells one out-of-hours rate for support, not time-and-a-half and double time -
+        // so what this protects is the attribution, not the total. An invoice saying 3 h of Sunday
+        // work when two of them were a Saturday is wrong on its face.
+        Step("over the minimum, each band keeps its own hours on its own line", () =>
+        {
+            var t2 = db.Proc("dbo.usp_Ticket_Open", ("@Client", reference), ("@Title", "Long weekend call"),
+                             ("@RateType", "OutOfHours"));
+            var tr = (string)t2.First!.Rows[0]["TicketRef"];
+            db.Proc("dbo.usp_Time_Log", ("@TicketRef", tr), ("@Minutes", 120), ("@RateType", "Saturday"),
+                    ("@WorkStart", start.AddDays(4).AddHours(13)), ("@Description", "Saturday"));
+            db.Proc("dbo.usp_Time_Log", ("@TicketRef", tr), ("@Minutes", 60), ("@RateType", "Sunday"),
+                    ("@WorkStart", start.AddDays(5).AddHours(13)), ("@Description", "Sunday"));
+
+            var cycle = (int)db.Scalar(@"SELECT bc.BillingCycleId FROM dbo.BillingCycle bc
+                                         JOIN dbo.Agreement a ON a.AgreementId = bc.AgreementId AND a.AgreementRef = @r
+                                         WHERE bc.CycleNumber = 1", ("@r", reference))!;
+            var eng = (int)db.Scalar("SELECT EngagementId FROM dbo.Agreement WHERE AgreementRef = @r", ("@r", reference))!;
+            var listOoh = (decimal)db.Scalar(@"SELECT TOP (1) p.OutOfHoursRate FROM dbo.PriceList p
+                                               JOIN dbo.Agreement a ON a.AgreementRef = @r
+                                               ORDER BY p.EffectiveFrom DESC", ("@r", reference))!;
+            var id = (int)db.Scalar(@"DECLARE @id int;
+                                      EXEC dbo.usp_Invoice_New @EngagementId = @e, @InvoiceDate = @d, @InvoiceId = @id OUTPUT;
+                                      SELECT @id;", ("@e", eng), ("@d", DateTime.Today))!;
+            db.Proc("dbo.usp_Invoice_AddArrears", ("@InvoiceId", id), ("@BillingCycleId", cycle));
+            var t = db.Query(@"SELECT l.RateType, l.Quantity, l.UnitPrice FROM dbo.InvoiceLine l
+                               WHERE l.InvoiceId = @i AND l.LineType = 'OutOfHours'
+                                 AND l.TicketId = (SELECT TicketId FROM dbo.Ticket WHERE TicketRef = @t)
+                               ORDER BY l.RateType", ("@i", id), ("@t", tr));
+            var no = (string)db.Scalar("SELECT InvoiceNo FROM dbo.Invoice WHERE InvoiceId = @i", ("@i", id))!;
+            db.Proc("dbo.usp_Invoice_SetStatus", ("@InvoiceNo", no), ("@Status", "Void"));
+            return (t, listOoh);
+        }, r =>
+        {
+            var (t, listOoh) = r;
+            var got = string.Join(", ", t.Rows.Cast<DataRow>().Select(x => $"{x["RateType"]} {x["Quantity"]} h at {x["UnitPrice"]}"));
+            if (t.Rows.Count != 2) return $"got {t.Rows.Count} out-of-hours lines ({got}); wanted one per band";
+            return (string)t.Rows[0]["RateType"] == "Saturday" && (decimal)t.Rows[0]["Quantity"] == 2.00m
+                && (string)t.Rows[1]["RateType"] == "Sunday" && (decimal)t.Rows[1]["Quantity"] == 1.00m
+                && (decimal)t.Rows[0]["UnitPrice"] == listOoh && (decimal)t.Rows[1]["UnitPrice"] == listOoh
+                ? null : $"got {got}; wanted Saturday 2 h and Sunday 1 h, both at {listOoh}";
+        });
+
+        // Three screens used to spell out the two old values in a CASE, so a Saturday entry read as
+        // "Business hours" on every one of them. They all ask this now.
+        Step("a band is named from the one place the names live", () =>
+            string.Join("/", new[] { "Saturday", "BankHoliday", "OutOfHours", "ByTimeOfWork", "Nonsense" }
+                .Select(b => (string)db.Scalar("SELECT dbo.fn_RateBandName(@b)", ("@b", b))!)),
+            s2 => (string)s2! == "Saturday/Bank holiday/Out of hours/By time/Nonsense"
+                  ? null : $"got {s2}");
+
+        // usp_Ticket_Open validates @RateType against dbo.RateBand, so the table has to allow what
+        // it accepts. This is the assertion that would have caught CK_Ticket_RateType being left at
+        // its three old values while the procedure moved on.
+        Step("a ticket can be opened as work in a named band", () =>
+        {
+            var t3 = db.Proc("dbo.usp_Ticket_Open", ("@Client", reference), ("@Title", "Sunday maintenance"),
+                             ("@RateType", "Sunday"));
+            var tr = (string)t3.First!.Rows[0]["TicketRef"];
+            return (string)db.Scalar("SELECT RateType FROM dbo.Ticket WHERE TicketRef = @t", ("@t", tr))!;
+        }, s2 => (string)s2! == "Sunday" ? null : $"ticket rate type came back as {s2}");
+
         Console.WriteLine();
         Console.WriteLine(Detail.AgreementSummary(db, reference, includeInstances: true));
         return Finish();

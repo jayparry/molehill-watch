@@ -354,7 +354,7 @@ CREATE TABLE dbo.InvoiceLine (
     LineType       varchar(20)   NOT NULL CONSTRAINT CK_InvoiceLine_Type CHECK (LineType IN ('MonthlyFee', 'BusinessHours', 'OutOfHours', 'Project', 'Adjustment', 'Info', 'PrepaidPurchase', 'PrepaidDrawn', 'Consultancy', 'FixedFee', 'Other')),
     BillingCycleId int           NULL,
     WorkDate       date          NULL,          -- consultancy lines: the day the work was done
-    RateType       varchar(20)   NULL,          -- consultancy lines: BusinessHours | OutOfHours
+    RateType       varchar(20)   NULL,          -- which rate band the line was charged at
     InstanceId     int           NULL,
     TicketId       int           NULL,
     Description    nvarchar(500) NOT NULL,
@@ -839,6 +839,24 @@ GO
 
 /*--- add, all nullable first, exactly as Invoice.ClientId was in 2.0.0 ---*/
 
+-- 2.8.0: RateType now names a band, so the check that only allowed two values has to widen.
+IF EXISTS (SELECT 1 FROM sys.check_constraints WHERE name = N'CK_TimeEntry_Rate' AND definition NOT LIKE N'%Saturday%')
+BEGIN
+    ALTER TABLE dbo.TimeEntry DROP CONSTRAINT CK_TimeEntry_Rate;
+    ALTER TABLE dbo.TimeEntry ADD CONSTRAINT CK_TimeEntry_Rate
+        CHECK (RateType IN ('BusinessHours', 'OutOfHours', 'Evening', 'Saturday', 'Overnight', 'Sunday', 'BankHoliday'));
+END
+
+-- and the same for a ticket's own rate type, which is the default band for time logged on it.
+-- usp_Ticket_Open validates it against dbo.RateBand, so without this a ticket opened as
+-- Saturday work passes the procedure's check and is then refused by the table.
+IF EXISTS (SELECT 1 FROM sys.check_constraints WHERE name = N'CK_Ticket_RateType' AND definition NOT LIKE N'%Saturday%')
+BEGIN
+    ALTER TABLE dbo.Ticket DROP CONSTRAINT CK_Ticket_RateType;
+    ALTER TABLE dbo.Ticket ADD CONSTRAINT CK_Ticket_RateType
+        CHECK (RateType IN ('BusinessHours', 'OutOfHours', 'Evening', 'Saturday', 'Overnight', 'Sunday', 'BankHoliday', 'ByTimeOfWork'));
+END
+
 IF COL_LENGTH(N'dbo.Instance', N'ClientId') IS NULL
     ALTER TABLE dbo.Instance ADD ClientId int NULL CONSTRAINT FK_Instance_Client REFERENCES dbo.Client (ClientId);
 
@@ -1029,6 +1047,7 @@ FROM (VALUES
     ('CombineInvoicesPerClient', N'0',                         N'0 = one invoice per engagement (recommended). 1 = one invoice per client per run.'),
     ('MinimumChargeMode',   N'Fair',                           N'Fair = included hours are used at actual time, and a ticket is charged so its total is at least the minimum. Strict = the 1 hour minimum per ticket also applies before included hours are deducted.'),
     ('EstimateThresholdMinutes', N'60',                        N'Flag tickets for an estimate once logged time passes this.'),
+    ('OvernightFrom',       N'22:00',                          N'When the evening band becomes the overnight one. UK local time.'),
     ('HealthCheckCreditDays', N'60',                      N'A health check done within this many days before an agreement starts earns its fee back as credit.'),
     ('HealthCheckCreditTermMonths', N'6',                  N'The minimum term the health-check credit is conditional on. End inside it and the credit falls due again.'),
     ('ReportGraceDays',     N'2',                              N'Days after the week ends (Sunday) before a missing weekly report is flagged.'),
@@ -1042,6 +1061,29 @@ IF NOT EXISTS (SELECT 1 FROM dbo.PriceList)
     INSERT dbo.PriceList (Name, EffectiveFrom, IsStandard, ServerFee, ServerFeeTiered, TierFromServerNumber, SecondaryReplicaFee,
                           IncludedHoursPerCycle, BusinessHoursRate, OutOfHoursRate, MinimumChargeHours, InitialTermMonths)
     VALUES (N'Standard 2026', '2026-01-01', 1, 450, 375, 3, 225, 3, 75, 115, 1, 3);
+
+-- When work is done, and what that multiplies the rate by. These are the price sheet's own bands:
+-- time and a half on weekday evenings and Saturdays, double time overnight, Sundays and bank
+-- holidays. An explicit out-of-hours rate on an engagement or a price list still wins over the
+-- multiplier, so nothing already set up is re-priced by this.
+MERGE dbo.RateBand AS t
+USING (VALUES
+    ('BusinessHours', N'Business hours',                1.00, 0, 1),
+    ('Evening',       N'Weekday evening',               1.50, 1, 2),
+    ('Saturday',      N'Saturday',                      1.50, 1, 3),
+    ('Overnight',     N'Overnight',                     2.00, 1, 4),
+    ('Sunday',        N'Sunday',                        2.00, 1, 5),
+    ('BankHoliday',   N'Bank holiday',                  2.00, 1, 6),
+    ('OutOfHours',    N'Out of hours',                  1.00, 1, 7)
+) AS v (Band, Description, Multiplier, CountsAsOutOfHours, SortOrder)
+ON t.Band = v.Band
+WHEN NOT MATCHED THEN INSERT (Band, Description, Multiplier, CountsAsOutOfHours, SortOrder)
+     VALUES (v.Band, v.Description, v.Multiplier, v.CountsAsOutOfHours, v.SortOrder);
+
+-- corrects only the wording first seeded, never a description someone has since written themselves
+UPDATE dbo.RateBand SET Description = N'Out of hours'
+WHERE Band = 'OutOfHours' AND Description = N'Out of hours (not banded)';
+GO
 
 -- England & Wales bank holidays (source: gov.uk/bank-holidays). Add future years as they are published.
 MERGE dbo.BankHoliday AS t
@@ -1308,6 +1350,54 @@ GO
 -- Whether a rate type counts as out of hours. One definition, because the alternative is the same
 -- literal comparison written out in six places and only five of them remembered when a band is
 -- added.
+-- Which band a moment falls in. The multipliers live in dbo.RateBand and the boundaries in
+-- dbo.Setting, so both are changeable without a schema change.
+--
+-- The price sheet sells two out-of-hours bands: time and a half on weekday evenings and
+-- Saturdays, double time overnight, on Sundays and on bank holidays. 55 x 1.5 = 82.50 and
+-- 55 x 2 = 110, which are the published hourly figures, and 400 x 1.5 = 600 and 400 x 2 = 800 the
+-- published daily ones - so a multiplier is the honest way to hold them rather than six more
+-- columns that could disagree with each other.
+CREATE OR ALTER FUNCTION dbo.fn_RateBand (@At datetime2(0))
+RETURNS varchar(20)
+AS
+BEGIN
+    IF @At IS NULL RETURN 'BusinessHours';
+    DECLARE @d date = CAST(@At AS date);
+    DECLARE @t time(0) = CAST(@At AS time(0));
+    DECLARE @dow int = ((DATEPART(weekday, @d) + @@DATEFIRST - 2) % 7) + 1;   -- 1 = Monday, 7 = Sunday
+    DECLARE @bh bit = CASE WHEN EXISTS (SELECT 1 FROM dbo.BankHoliday WHERE HolidayDate = @d) THEN 1 ELSE 0 END;
+
+    DECLARE @start time(0) = TRY_CONVERT(time(0), dbo.fn_Setting('BusinessHoursStart'));
+    DECLARE @end   time(0) = TRY_CONVERT(time(0), dbo.fn_Setting('BusinessHoursEnd'));
+    DECLARE @night time(0) = TRY_CONVERT(time(0), dbo.fn_Setting('OvernightFrom'));
+    SET @start = ISNULL(@start, '09:00');
+    SET @end   = ISNULL(@end,   '17:30');
+    SET @night = ISNULL(@night, '22:00');
+
+    IF @bh = 1 RETURN 'BankHoliday';
+    IF @dow = 7 RETURN 'Sunday';
+    -- overnight runs from the evening boundary round to the start of business, on any day
+    IF @t >= @night OR @t < @start RETURN 'Overnight';
+    IF @dow = 6 RETURN 'Saturday';
+    IF @t >= @end RETURN 'Evening';
+    RETURN 'BusinessHours';
+END
+GO
+
+-- What to call a band on screen and on paper. ByTimeOfWork is not a band - it is a ticket saying
+-- "work it out from when the work was done" - so it gets its own wording, and an unrecognised
+-- value shows itself rather than being quietly relabelled as business hours.
+CREATE OR ALTER FUNCTION dbo.fn_RateBandName (@Band varchar(20))
+RETURNS nvarchar(40)
+AS
+BEGIN
+    IF @Band IS NULL RETURN NULL;
+    IF @Band = 'ByTimeOfWork' RETURN N'By time';
+    RETURN ISNULL((SELECT Description FROM dbo.RateBand WHERE Band = @Band), CAST(@Band AS nvarchar(40)));
+END
+GO
+
 CREATE OR ALTER FUNCTION dbo.fn_IsOutOfHoursRate (@RateType varchar(20))
 RETURNS bit
 AS
@@ -1355,24 +1445,37 @@ RETURN
         WHERE e.EngagementId = @EngagementId),
     picked AS (
         SELECT *,
-               -- the engagement's own figure for the unit being charged
-               EngRate = CASE WHEN dbo.fn_IsOutOfHoursRate(@RateType) = 1 AND OutOfHoursRate IS NOT NULL THEN OutOfHoursRate
-                              WHEN @Unit = 'hour' THEN HourlyRate
-                              ELSE DayRate END,
-               -- then this client's standing rate
-               CliRate = CASE WHEN dbo.fn_IsOutOfHoursRate(@RateType) = 1 THEN COALESCE(ClientOoh, CASE WHEN @Unit = 'hour' THEN ClientHour END)
-                              WHEN @Unit = 'hour' THEN COALESCE(ClientHour, ClientBh)
-                              ELSE ClientDay END,
-               -- then the agreement's price list, which only prices support hours
-               ListRate = CASE WHEN @Unit = 'hour' THEN CASE WHEN dbo.fn_IsOutOfHoursRate(@RateType) = 1 THEN ListOoh ELSE ListBh END END
-        FROM src)
+               Ooh = dbo.fn_IsOutOfHoursRate(@RateType),
+               -- an out-of-hours rate somebody has actually set. It is already a premium figure, so
+               -- the band's multiplier must NOT be applied on top of it: 82.50 is what an evening
+               -- hour costs, not 82.50 times one and a half.
+               EngOoh  = OutOfHoursRate,
+               CliOoh  = ClientOoh,
+               ListOohRate = CASE WHEN @Unit = 'hour' THEN ListOoh END,
+               -- and the ordinary rate for the unit, which the multiplier DOES apply to
+               EngPlain  = CASE WHEN @Unit = 'hour' THEN HourlyRate ELSE DayRate END,
+               CliPlain  = CASE WHEN @Unit = 'hour' THEN COALESCE(ClientHour, ClientBh) ELSE ClientDay END,
+               ListPlain = CASE WHEN @Unit = 'hour' THEN ListBh END
+        FROM src),
+    answered AS (
+        SELECT *,
+               Explicit = CASE WHEN Ooh = 1 THEN COALESCE(EngOoh, CliOoh, ListOohRate) END,
+               Plain    = COALESCE(EngPlain, CliPlain, ListPlain),
+               ExplicitSource = CASE WHEN Ooh = 1 THEN CASE WHEN EngOoh IS NOT NULL THEN 'Engagement'
+                                                            WHEN CliOoh IS NOT NULL THEN 'ClientOverride'
+                                                            WHEN ListOohRate IS NOT NULL THEN 'PriceList' END END,
+               PlainSource = CASE WHEN EngPlain IS NOT NULL THEN 'Engagement'
+                                  WHEN CliPlain IS NOT NULL THEN 'ClientOverride'
+                                  WHEN ListPlain IS NOT NULL THEN 'PriceList' END
+        FROM picked)
     SELECT EngagementId, ClientId, AgreementId,
-           BaseRate = COALESCE(EngRate, CliRate, ListRate),
-           RateSource = CASE WHEN EngRate IS NOT NULL THEN 'Engagement'
-                             WHEN CliRate IS NOT NULL THEN 'ClientOverride'
-                             WHEN ListRate IS NOT NULL THEN 'PriceList'
+           BaseRate = COALESCE(Explicit, Plain),
+           -- 0 where the figure is already an out-of-hours rate, 1 where the band has to make it one
+           AppliesMultiplier = CASE WHEN Explicit IS NOT NULL THEN 0 ELSE 1 END,
+           RateSource = CASE WHEN Explicit IS NOT NULL THEN ExplicitSource
+                             WHEN Plain IS NOT NULL THEN PlainSource
                              ELSE 'None' END
-    FROM picked;
+    FROM answered;
 GO
 
 
@@ -2067,8 +2170,9 @@ BEGIN
     UPDATE te
     SET te.BaseRate   = r.BaseRate,
         te.RateSource = r.RateSource,
-        te.RateMultiplier = ISNULL(b.Multiplier, 1),
-        te.ChargeRate = CAST(ROUND(r.BaseRate * ISNULL(b.Multiplier, 1), 2) AS decimal(9,2)),
+        -- the band only multiplies a rate that is not already an out-of-hours one
+        te.RateMultiplier = CASE WHEN r.AppliesMultiplier = 1 THEN ISNULL(b.Multiplier, 1) ELSE 1 END,
+        te.ChargeRate = CAST(ROUND(r.BaseRate * CASE WHEN r.AppliesMultiplier = 1 THEN ISNULL(b.Multiplier, 1) ELSE 1 END, 2) AS decimal(9,2)),
         te.RateBand   = ISNULL(te.RateBand, te.RateType)
     FROM dbo.TimeEntry te
     JOIN dbo.Engagement e ON e.EngagementId = te.EngagementId
@@ -2080,7 +2184,9 @@ BEGIN
                                             OR (dbo.fn_IsOutOfHoursRate(te.RateType) = 1 AND e.OutOfHoursRate IS NOT NULL)
                                        THEN 'hour' ELSE 'day' END,
                                   CAST(te.WorkStart AS date)) r
-    LEFT JOIN dbo.RateBand b ON b.Band = te.RateBand
+    -- on the band as it will be, not as it is: this same UPDATE is what sets RateBand, so joining
+    -- on the column read it as NULL for a new entry and every multiplier came out as 1
+    LEFT JOIN dbo.RateBand b ON b.Band = ISNULL(te.RateBand, te.RateType)
     WHERE te.InvoiceId IS NULL
       AND (@TimeEntryId IS NULL OR te.TimeEntryId = @TimeEntryId)
       AND (@EngagementId IS NULL OR te.EngagementId = @EngagementId)
@@ -2670,8 +2776,9 @@ BEGIN
     END
 
     SET @RateType = ISNULL(@RateType, CASE WHEN @WorkType = 'PlannedOutOfHours' THEN 'OutOfHours' ELSE 'BusinessHours' END);
-    IF @RateType NOT IN ('BusinessHours', 'OutOfHours', 'ByTimeOfWork')
-    BEGIN RAISERROR(N'@RateType must be BusinessHours, OutOfHours or ByTimeOfWork.', 16, 1); RETURN; END
+    -- any band dbo.RateBand knows, so adding one does not mean finding six validations
+    IF @RateType <> 'ByTimeOfWork' AND NOT EXISTS (SELECT 1 FROM dbo.RateBand WHERE Band = @RateType)
+    BEGIN RAISERROR(N'@RateType must be ByTimeOfWork or one of the bands in dbo.RateBand.', 16, 1); RETURN; END
 
     INSERT dbo.Ticket (ClientId, EngagementId, InstanceId, ContactId, Severity, WorkType, Title, Description, Channel, RaisedAt, ResponseDueAt, Status, RateType)
     VALUES (@ClientId, @TicketEngagementId, @InstanceId, @ContactId, @Severity, @WorkType, @Title, @Description, @Channel, @RaisedAt,
@@ -2748,10 +2855,12 @@ BEGIN
 
     SET @WorkStart = ISNULL(@WorkStart, DATEADD(minute, -@Minutes, dbo.fn_UkNow()));
     -- the entry's own rate if given, else the ticket's; "by time of work" decides from when the work was done
+    -- "by time of work" now picks the actual band, so an evening and a Sunday are told apart
     SET @RateType = ISNULL(@RateType, CASE WHEN @TicketRate <> 'ByTimeOfWork' THEN @TicketRate
-                                           WHEN @WorkType = 'PlannedOutOfHours' OR dbo.fn_IsBusinessHours(@WorkStart) = 0 THEN 'OutOfHours'
-                                           ELSE 'BusinessHours' END);
-    IF @RateType NOT IN ('BusinessHours', 'OutOfHours') BEGIN RAISERROR(N'@RateType must be BusinessHours or OutOfHours.', 16, 1); RETURN; END
+                                           WHEN @WorkType = 'PlannedOutOfHours' AND dbo.fn_RateBand(@WorkStart) = 'BusinessHours' THEN 'OutOfHours'
+                                           ELSE dbo.fn_RateBand(@WorkStart) END);
+    IF NOT EXISTS (SELECT 1 FROM dbo.RateBand WHERE Band = @RateType)
+    BEGIN RAISERROR(N'@RateType must be one of the bands in dbo.RateBand.', 16, 1); RETURN; END
 
     INSERT dbo.TimeEntry (EngagementId, TicketId, WorkStart, Minutes, RateType, Description, IsBillable)
     VALUES (@TicketEngagementId, @TicketId, @WorkStart, @Minutes, @RateType, @Description, @IsBillable);
@@ -2819,7 +2928,8 @@ BEGIN
         RETURN;
     END
     IF @Minutes IS NOT NULL AND @Minutes <= 0 BEGIN RAISERROR(N'@Minutes must be more than 0 (use usp_Time_Delete to remove the entry).', 16, 1); RETURN; END
-    IF @RateType IS NOT NULL AND @RateType NOT IN ('BusinessHours', 'OutOfHours') BEGIN RAISERROR(N'@RateType must be BusinessHours or OutOfHours.', 16, 1); RETURN; END
+    IF @RateType IS NOT NULL AND NOT EXISTS (SELECT 1 FROM dbo.RateBand WHERE Band = @RateType)
+    BEGIN RAISERROR(N'@RateType must be one of the bands in dbo.RateBand.', 16, 1); RETURN; END
 
     UPDATE dbo.TimeEntry
     SET WorkStart = ISNULL(@WorkStart, WorkStart), Minutes = ISNULL(@Minutes, Minutes),
@@ -2870,8 +2980,9 @@ BEGIN
     DECLARE @TicketId int, @WorkType varchar(20);
     SELECT @TicketId = TicketId, @WorkType = WorkType FROM dbo.Ticket WHERE TicketRef = @TicketRef;
     IF @TicketId IS NULL BEGIN RAISERROR(N'Ticket %s not found.', 16, 1, @TicketRef); RETURN; END
-    IF @RateType NOT IN ('BusinessHours', 'OutOfHours', 'ByTimeOfWork')
-    BEGIN RAISERROR(N'@RateType must be BusinessHours, OutOfHours or ByTimeOfWork.', 16, 1); RETURN; END
+    -- any band dbo.RateBand knows, so adding one does not mean finding six validations
+    IF @RateType <> 'ByTimeOfWork' AND NOT EXISTS (SELECT 1 FROM dbo.RateBand WHERE Band = @RateType)
+    BEGIN RAISERROR(N'@RateType must be ByTimeOfWork or one of the bands in dbo.RateBand.', 16, 1); RETURN; END
 
     UPDATE dbo.Ticket SET RateType = @RateType WHERE TicketId = @TicketId;
     DECLARE @Changed int = 0, @Invoiced int;
@@ -3345,7 +3456,8 @@ BEGIN
     IF @Type = 'Monitoring'
     BEGIN RAISERROR(N'That is a Molehill Watch agreement: support time belongs to a ticket (usp_Ticket_Open, then usp_Time_Log).', 16, 1); RETURN; END
     IF @Status = 'Cancelled' BEGIN RAISERROR(N'Engagement %s is cancelled.', 16, 1, @Ref); RETURN; END
-    IF @RateType NOT IN ('BusinessHours', 'OutOfHours') BEGIN RAISERROR(N'@RateType must be BusinessHours or OutOfHours.', 16, 1); RETURN; END
+    IF NOT EXISTS (SELECT 1 FROM dbo.RateBand WHERE Band = @RateType)
+    BEGIN RAISERROR(N'@RateType must be one of the bands in dbo.RateBand.', 16, 1); RETURN; END
 
     DECLARE @Mins int = COALESCE(@Minutes, CONVERT(int, ROUND(@Hours * 60, 0)), CONVERT(int, ROUND(@Days * dbo.fn_DayHours() * 60, 0)));
     IF ISNULL(@Mins, 0) <= 0 BEGIN RAISERROR(N'Give @Days, @Hours or @Minutes.', 16, 1); RETURN; END
@@ -3757,6 +3869,8 @@ BEGIN
     DECLARE @Period nvarchar(40) = CONVERT(nvarchar(11), @Start, 106) + N' - ' + CONVERT(nvarchar(11), @End, 106);
 
     SELECT e.TimeEntryId, e.TicketId, e.Minutes, e.RateType, e.WorkStart, e.ChargeRate,
+           -- entries logged before 2.8.0 have no band recorded, so the rate type stands in for one
+           RateBand = ISNULL(e.RateBand, e.RateType),
            IsOoh = dbo.fn_IsOutOfHoursRate(e.RateType)
     INTO #entries
     FROM dbo.TimeEntry e
@@ -3780,6 +3894,23 @@ BEGIN
     FROM #entries x JOIN dbo.Ticket t ON t.TicketId = x.TicketId LEFT JOIN dbo.Instance i ON i.InstanceId = t.InstanceId
     GROUP BY t.TicketId, t.TicketRef, t.Title, i.InstanceName;
 
+    -- The out-of-hours side, one row per ticket and band. It needs none of the cursor's state -
+    -- no included hours, no pre-paid - so it is done set-based below rather than inside the loop,
+    -- which is also what makes a per-band split readable at all.
+    SELECT t.TicketId,
+           Label = t.TicketRef + N' ' + LEFT(t.Title, 120) + ISNULL(N' (' + t.Instance + N')', N''),
+           x.RateBand, x.ChargeRate, b.Description AS BandName, b.Multiplier,
+           Hours = CAST(SUM(x.Minutes) / 60.0 AS decimal(9,4)),
+           TicketHours = CAST(SUM(SUM(x.Minutes)) OVER (PARTITION BY t.TicketId) / 60.0 AS decimal(9,4)),
+           TopBand = ROW_NUMBER() OVER (PARTITION BY t.TicketId ORDER BY b.Multiplier DESC, x.ChargeRate DESC, x.RateBand),
+           FirstWork = MIN(x.WorkStart)
+    INTO #ooh
+    FROM #entries x
+    JOIN #tickets t ON t.TicketId = x.TicketId
+    LEFT JOIN dbo.RateBand b ON b.Band = x.RateBand
+    WHERE x.IsOoh = 1
+    GROUP BY t.TicketId, t.TicketRef, t.Title, t.Instance, x.RateBand, x.ChargeRate, b.Description, b.Multiplier;
+
     DECLARE @Remaining decimal(9,4) = CASE WHEN @Included - @Used > 0 THEN @Included - @Used ELSE 0 END;
     DECLARE @UsedNow decimal(9,4) = 0;
     DECLARE @TicketId int, @Ref varchar(20), @Title nvarchar(200), @Inst nvarchar(128), @Bh decimal(9,4), @Ooh decimal(9,4);
@@ -3788,10 +3919,10 @@ BEGIN
     DECLARE @FirstWork datetime2(0), @FromPack decimal(9,4), @PackRefs nvarchar(400), @Billed decimal(9,4);
 
     DECLARE c CURSOR LOCAL FAST_FORWARD FOR
-        SELECT TicketId, TicketRef, Title, Instance, BhHours, OohHours, BhRate, OohRate, FirstWork
+        SELECT TicketId, TicketRef, Title, Instance, BhHours, BhRate, FirstWork
         FROM #tickets ORDER BY FirstWork, TicketId;
     OPEN c;
-    FETCH NEXT FROM c INTO @TicketId, @Ref, @Title, @Inst, @Bh, @Ooh, @BhRate, @OohRate, @FirstWork;
+    FETCH NEXT FROM c INTO @TicketId, @Ref, @Title, @Inst, @Bh, @BhRate, @FirstWork;
     WHILE @@FETCH_STATUS = 0
     BEGIN
         SET @Label = @Ref + N' ' + LEFT(@Title, 120) + ISNULL(N' (' + @Inst + N')', N'');
@@ -3833,19 +3964,33 @@ BEGIN
                         + CASE WHEN ROUND(@Charged, 2) > ROUND(@Bh - @Covered, 2) THEN N', 1 h minimum charge applied' ELSE N'' END,
                         ROUND(@Billed, 2), @BhRate, ROUND(ROUND(@Billed, 2) * @BhRate, 2));
         END
-        IF @Ooh > 0
-        BEGIN
-            -- out-of-hours work is always billed at the out-of-hours rate (never from pre-paid hours)
-            SET @Charged = CASE WHEN @Ooh < @Min THEN @Min ELSE @Ooh END;
-            INSERT dbo.InvoiceLine (InvoiceId, LineType, BillingCycleId, TicketId, Description, Quantity, UnitPrice, Amount)
-            VALUES (@InvoiceId, 'OutOfHours', @BillingCycleId, @TicketId,
-                    N'Out-of-hours support: ' + @Label + N' - ' + FORMAT(@Ooh, 'N2') + N' h worked'
-                    + CASE WHEN @Ooh < @Min THEN N', 1 h minimum charge applied' ELSE N'' END,
-                    ROUND(@Charged, 2), @OohRate, ROUND(ROUND(@Charged, 2) * @OohRate, 2));
-        END
-        FETCH NEXT FROM c INTO @TicketId, @Ref, @Title, @Inst, @Bh, @Ooh, @BhRate, @OohRate, @FirstWork;
+        FETCH NEXT FROM c INTO @TicketId, @Ref, @Title, @Inst, @Bh, @BhRate, @FirstWork;
     END
     CLOSE c; DEALLOCATE c;
+
+    /* Out-of-hours support: never from included or pre-paid hours, and one line per band so an
+       evening hour is not billed at the Sunday rate.
+
+       The minimum charge is one per ticket, not one per band - ten minutes on a Saturday and ten
+       on a Sunday is one chargeable hour, not two. Where a ticket is under the minimum it becomes
+       a single line at the highest band it touched, which is the band the top-up is owed at. */
+    INSERT dbo.InvoiceLine (InvoiceId, LineType, BillingCycleId, TicketId, RateType, Description, Quantity, UnitPrice, Amount)
+    SELECT @InvoiceId, 'OutOfHours', @BillingCycleId, o.TicketId, o.RateBand,
+           N'Out-of-hours support (' + ISNULL(o.BandName, N'out of hours') + N'): ' + o.Label
+           + N' - ' + FORMAT(o.TicketHours, 'N2') + N' h worked'
+           + CASE WHEN o.TicketHours < @Min THEN N', ' + FORMAT(@Min, 'N2') + N' h minimum charge applied' ELSE N'' END,
+           ROUND(@Min, 2), o.ChargeRate, ROUND(ROUND(@Min, 2) * o.ChargeRate, 2)
+    FROM #ooh o
+    WHERE o.TicketHours < @Min AND o.TopBand = 1;
+
+    INSERT dbo.InvoiceLine (InvoiceId, LineType, BillingCycleId, TicketId, RateType, Description, Quantity, UnitPrice, Amount)
+    SELECT @InvoiceId, 'OutOfHours', @BillingCycleId, o.TicketId, o.RateBand,
+           N'Out-of-hours support (' + ISNULL(o.BandName, N'out of hours') + N'): ' + o.Label
+           + N' - ' + FORMAT(o.Hours, 'N2') + N' h',
+           ROUND(o.Hours, 2), o.ChargeRate, ROUND(ROUND(o.Hours, 2) * o.ChargeRate, 2)
+    FROM #ooh o
+    WHERE o.TicketHours >= @Min
+    ORDER BY o.FirstWork, o.TicketId, o.Multiplier, o.RateBand;
 
     IF EXISTS (SELECT 1 FROM #tickets)
         INSERT dbo.InvoiceLine (InvoiceId, LineType, BillingCycleId, Description, Quantity, UnitPrice, Amount)

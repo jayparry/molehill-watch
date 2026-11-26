@@ -234,7 +234,7 @@ public static class Queries
 
     public static DataTable Tickets(AdminDb db, bool openOnly, string? agreementRef = null) => db.Query("""
         SELECT TOP (500) t.TicketRef AS Ticket, c.ClientName AS Client, t.Severity, t.Status, t.WorkType AS Type,
-               CASE t.RateType WHEN 'BusinessHours' THEN 'Business' WHEN 'OutOfHours' THEN 'Out of hours' ELSE 'By time' END AS Rate, t.Title,
+               dbo.fn_RateBandName(t.RateType) AS Rate, t.Title,
                i.InstanceName AS Instance, t.RaisedAt AS Raised, t.ResponseDueAt AS ResponseDue, t.FirstResponseAt AS Responded,
                CAST(ISNULL((SELECT SUM(Minutes) FROM dbo.TimeEntry e WHERE e.TicketId = t.TicketId), 0) / 60.0 AS decimal(6,2)) AS Hours,
                t.EstimateHours AS Estimate, CASE WHEN t.EstimateApprovedAt IS NOT NULL THEN 'Yes' END AS Approved
@@ -364,7 +364,7 @@ public static class Queries
     /// <summary>The days worked on a consultancy engagement, newest first.</summary>
     public static DataTable ConsultancyWork(AdminDb db, string engagementRef) => db.Query("""
         DECLARE @Id int = dbo.fn_EngagementId(@Ref);
-        SELECT w.WorkDate AS [Date], CASE w.RateType WHEN 'OutOfHours' THEN 'Out of hours' ELSE 'Business hours' END AS Rate,
+        SELECT w.WorkDate AS [Date], dbo.fn_RateBandName(w.RateType) AS Rate,
                w.Hours, w.Days, FORMAT(w.Quantity, 'N2') + ' ' + w.Unit + '(s)' AS Billed,
                -- what it was invoiced at, or what it would be charged at today
                ISNULL((SELECT SUM(l.Amount) FROM dbo.InvoiceLine l JOIN dbo.Invoice iv ON iv.InvoiceId = l.InvoiceId
@@ -383,7 +383,7 @@ public static class Queries
     public static DataTable WorkEntries(AdminDb db, string engagementRef) => db.Query("""
         SELECT e.TimeEntryId AS Id, CAST(e.WorkStart AS date) AS [Date], e.Minutes,
                CAST(e.Minutes / 60.0 / dbo.fn_DayHours() AS decimal(6,2)) AS Days,
-               CASE e.RateType WHEN 'OutOfHours' THEN 'Out of hours' ELSE 'Business hours' END AS Rate,
+               dbo.fn_RateBandName(e.RateType) AS Rate,
                CASE WHEN e.IsBillable = 1 THEN 'Yes' ELSE 'No' END AS Billable,
                ISNULL(i.InvoiceNo, CASE WHEN e.IsBillable = 1 THEN 'at the next billing run' ELSE 'not billable' END) AS Invoiced,
                e.Description, e.InvoiceId AS _InvoiceId
