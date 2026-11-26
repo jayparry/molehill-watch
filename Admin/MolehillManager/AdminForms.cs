@@ -1025,6 +1025,18 @@ public static class AdminForms
         return path;
     }
 
+    /// <summary>Writes the quote HTML to a file and returns the path. The same shape as an invoice.</summary>
+    public static string SaveQuoteHtml(AdminDb db, string quoteRef, string folder)
+    {
+        var r = db.Proc("dbo.usp_Quote_Html", ("@Quote", quoteRef), ("@Select", true));
+        var html = r.First is { Rows.Count: > 0 } t && t.Rows[0]["Html"] is string s ? s
+            : throw new InvalidOperationException($"No HTML came back for {quoteRef}.");
+        Directory.CreateDirectory(folder);
+        var path = Path.Combine(folder, $"{quoteRef}.html");
+        File.WriteAllText(path, html);
+        return path;
+    }
+
     public static string SaveDashboardHtml(AdminDb db, string folder)
     {
         var r = db.Proc("dbo.usp_DashboardHtml", ("@Select", true));

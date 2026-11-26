@@ -2908,6 +2908,143 @@ BEGIN
 END
 GO
 
+/*=============================================================================
+  QUOTES
+
+  A quote used to be a row nothing read: Status, SentDate and DecisionDate existed and
+  nothing ever wrote them, no query returned a quote, and there was no document to send.
+  So the only way to give a client a price was to write it by hand and keep the figure
+  somewhere else.
+=============================================================================*/
+
+-- One line of a quote. usp_Quote_Add still takes a single title and price for the simple case;
+-- lines are for a quote that itemises, and the total then comes from them.
+CREATE OR ALTER PROCEDURE dbo.usp_Quote_AddLine
+    @Quote       varchar(20),
+    @Description nvarchar(400),
+    @Quantity    decimal(9,2)  = NULL,
+    @UnitPrice   decimal(10,2) = NULL,
+    @Amount      decimal(10,2) = NULL,      -- blank = Quantity * UnitPrice
+    @SortOrder   int           = NULL       -- blank = after what is already there
+AS
+BEGIN
+    SET NOCOUNT, XACT_ABORT ON;
+    DECLARE @QuoteId int = (SELECT QuoteId FROM dbo.Quote WHERE QuoteRef = @Quote);
+    IF @QuoteId IS NULL BEGIN RAISERROR(N'Quote %s not found.', 16, 1, @Quote); RETURN; END
+    DECLARE @Status varchar(10) = (SELECT Status FROM dbo.Quote WHERE QuoteId = @QuoteId);
+    IF @Status <> 'Draft'
+    BEGIN RAISERROR(N'%s has already been sent, so its lines cannot be changed. Raise a new quote.', 16, 1, @Quote); RETURN; END
+
+    SET @Amount = ISNULL(@Amount, @Quantity * @UnitPrice);
+    INSERT dbo.QuoteLine (QuoteId, SortOrder, Description, Quantity, UnitPrice, Amount)
+    VALUES (@QuoteId, ISNULL(@SortOrder, ISNULL((SELECT MAX(SortOrder) FROM dbo.QuoteLine WHERE QuoteId = @QuoteId), 0) + 10),
+            @Description, @Quantity, @UnitPrice, @Amount);
+
+    -- the quote's price is the lines added up once there are any
+    UPDATE dbo.Quote SET Price = (SELECT SUM(Amount) FROM dbo.QuoteLine WHERE QuoteId = @QuoteId)
+    WHERE QuoteId = @QuoteId AND EXISTS (SELECT 1 FROM dbo.QuoteLine WHERE QuoteId = @QuoteId AND Amount IS NOT NULL);
+    SELECT QuoteRef, Title, Price, Status FROM dbo.Quote WHERE QuoteId = @QuoteId;
+END
+GO
+
+-- Record that a quote went out.
+CREATE OR ALTER PROCEDURE dbo.usp_Quote_Send
+    @Quote     varchar(20),
+    @SentDate  date = NULL,                 -- blank = today
+    @ExpiresOn date = NULL                  -- blank = 90 days, which is what the price sheet says
+AS
+BEGIN
+    SET NOCOUNT, XACT_ABORT ON;
+    DECLARE @QuoteId int, @Status varchar(10);
+    SELECT @QuoteId = QuoteId, @Status = Status FROM dbo.Quote WHERE QuoteRef = @Quote;
+    IF @QuoteId IS NULL BEGIN RAISERROR(N'Quote %s not found.', 16, 1, @Quote); RETURN; END
+    IF @Status <> 'Draft' BEGIN RAISERROR(N'%s is already %s.', 16, 1, @Quote, @Status); RETURN; END
+    IF NOT EXISTS (SELECT 1 FROM dbo.Quote WHERE QuoteId = @QuoteId AND Price IS NOT NULL)
+    BEGIN RAISERROR(N'%s has no price. Give one, or add lines with usp_Quote_AddLine.', 16, 1, @Quote); RETURN; END
+
+    SET @SentDate = ISNULL(@SentDate, CAST(dbo.fn_UkNow() AS date));
+    UPDATE dbo.Quote SET Status = 'Sent', SentDate = @SentDate, ExpiresOn = ISNULL(@ExpiresOn, DATEADD(day, 90, @SentDate))
+    WHERE QuoteId = @QuoteId;
+    SELECT QuoteRef, Title, Price, Status, SentDate, ExpiresOn FROM dbo.Quote WHERE QuoteId = @QuoteId;
+    PRINT N'Marked as sent. Record the answer with usp_Quote_Decide when it comes.';
+END
+GO
+
+-- What the client said. Accepting one starts the work, so the engagement it becomes is created
+-- here and the quote keeps a link to it - which is the thing that lets a health check that was
+-- quoted be found again from the work that came out of it.
+CREATE OR ALTER PROCEDURE dbo.usp_Quote_Decide
+    @Quote        varchar(20),
+    @Accepted     bit,
+    @DecisionDate date          = NULL,     -- blank = today
+    @Reason       nvarchar(400) = NULL,     -- why, when it was declined
+    @BillingMode  varchar(20)   = 'FixedPrice',
+    @StartDate    date          = NULL,
+    @EngagementRef varchar(30)  = NULL      -- blank = the next CON-0000
+AS
+BEGIN
+    SET NOCOUNT, XACT_ABORT ON;
+    DECLARE @QuoteId int, @Status varchar(10), @ClientId int, @Title nvarchar(200), @Price decimal(10,2);
+    SELECT @QuoteId = QuoteId, @Status = Status, @ClientId = ClientId, @Title = Title, @Price = Price
+    FROM dbo.Quote WHERE QuoteRef = @Quote;
+    IF @QuoteId IS NULL BEGIN RAISERROR(N'Quote %s not found.', 16, 1, @Quote); RETURN; END
+    IF @Status NOT IN ('Draft', 'Sent')
+    BEGIN RAISERROR(N'%s is already %s.', 16, 1, @Quote, @Status); RETURN; END
+
+    SET @DecisionDate = ISNULL(@DecisionDate, CAST(dbo.fn_UkNow() AS date));
+    IF @Accepted = 0
+    BEGIN
+        UPDATE dbo.Quote SET Status = 'Declined', DecisionDate = @DecisionDate, DeclineReason = @Reason
+        WHERE QuoteId = @QuoteId;
+        SELECT QuoteRef, Status, DecisionDate, DeclineReason FROM dbo.Quote WHERE QuoteId = @QuoteId;
+        RETURN;
+    END
+
+    DECLARE @ClientName nvarchar(200) = (SELECT ClientName FROM dbo.Client WHERE ClientId = @ClientId);
+    -- usp_Engagement_Add returns its reference in a result set, which a procedure calling it
+    -- cannot read, so the new row is found by identity instead of by matching on its notes
+    DECLARE @HighWater int = ISNULL((SELECT MAX(EngagementId) FROM dbo.Engagement), 0);
+    EXEC dbo.usp_Engagement_Add @Client = @ClientName, @Name = @Title, @BillingMode = @BillingMode,
+         @FixedPrice = @Price, @StartDate = @StartDate, @EngagementRef = @EngagementRef,
+         @Notes = @Quote;
+    DECLARE @EngId int = (SELECT MAX(EngagementId) FROM dbo.Engagement
+                          WHERE EngagementId > @HighWater AND ClientId = @ClientId);
+    IF @EngId IS NULL
+    BEGIN RAISERROR(N'The work was not created, so %s has been left as it was.', 16, 1, @Quote); RETURN; END
+    UPDATE dbo.Quote SET Status = 'Accepted', DecisionDate = @DecisionDate, EngagementId = @EngId
+    WHERE QuoteId = @QuoteId;
+    SELECT q.QuoteRef, q.Status, q.DecisionDate, Became = e.EngagementRef
+    FROM dbo.Quote q JOIN dbo.Engagement e ON e.EngagementId = q.EngagementId
+    WHERE q.QuoteId = @QuoteId;
+END
+GO
+
+-- Quotes, and where each one got to. There was no way to see a quote at all before this.
+CREATE OR ALTER PROCEDURE dbo.usp_Quote_List
+    @Client     nvarchar(200) = NULL,       -- blank = every client
+    @OpenOnly   bit           = 0           -- 1 = only the ones still waiting on an answer
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @ClientId int = CASE WHEN @Client IS NULL THEN NULL ELSE dbo.fn_ClientId(@Client) END;
+    IF @Client IS NOT NULL AND @ClientId IS NULL
+    BEGIN RAISERROR(N'Client "%s" not found.', 16, 1, @Client); RETURN; END
+    DECLARE @Today date = CAST(dbo.fn_UkNow() AS date);
+
+    SELECT q.QuoteRef, c.ClientName, q.Title, q.Price, q.EstimatedHours,
+           Status = CASE WHEN q.Status = 'Sent' AND q.ExpiresOn < @Today THEN 'EXPIRED' ELSE q.Status END,
+           q.SentDate, q.ExpiresOn, q.DecisionDate,
+           Became = e.EngagementRef, Ticket = t.TicketRef, q.CreatedAt
+    FROM dbo.Quote q
+    JOIN dbo.Client c ON c.ClientId = q.ClientId
+    LEFT JOIN dbo.Engagement e ON e.EngagementId = q.EngagementId
+    LEFT JOIN dbo.Ticket t ON t.TicketId = q.TicketId
+    WHERE (@ClientId IS NULL OR q.ClientId = @ClientId)
+      AND (@OpenOnly = 0 OR q.Status IN ('Draft', 'Sent'))
+    ORDER BY q.CreatedAt DESC;
+END
+GO
+
 CREATE OR ALTER PROCEDURE dbo.usp_WeeklyReport_Log
     @Client        nvarchar(200),
     @InstanceName  nvarchar(128),
@@ -4043,6 +4180,220 @@ BEGIN
 END
 GO
 
+-- The document you actually send. Same letterhead as an invoice, through fn_DocumentCss, because
+-- a quote and an invoice go out on the same paper.
+CREATE OR ALTER PROCEDURE dbo.usp_Quote_Html
+    @Quote  varchar(20),
+    @Html   nvarchar(max) = NULL OUTPUT,
+    @Select bit = 1
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @QuoteId int;
+    SELECT @QuoteId = QuoteId FROM dbo.Quote WHERE QuoteRef = @Quote;
+    IF @QuoteId IS NULL BEGIN RAISERROR(N'Quote %s not found.', 16, 1, @Quote); RETURN; END
+
+    DECLARE @Name nvarchar(200) = dbo.fn_Html(dbo.fn_Setting('BusinessName'));
+    DECLARE @Logo nvarchar(max) = NULLIF(dbo.fn_Setting('LogoDataUri'), N'');
+
+    /*---------------------------------------------------------------- the lines */
+    -- A quote with lines shows them; one with only a title and a price shows that as the single
+    -- line, so the simple case still produces a document worth sending.
+    DECLARE @Rows nvarchar(max) = (
+        SELECT STRING_AGG(CONVERT(nvarchar(max),
+                   N'<tr><td>' + dbo.fn_Html(l.Description) + N'</td>'
+                 + N'<td class="num">' + ISNULL(FORMAT(l.Quantity, 'N2'), N'') + N'</td>'
+                 + N'<td class="num">' + ISNULL(N'&#163;' + FORMAT(l.UnitPrice, 'N2'), N'') + N'</td>'
+                 + N'<td class="num">' + ISNULL(N'&#163;' + FORMAT(l.Amount, 'N2'), N'') + N'</td></tr>'), N'')
+               WITHIN GROUP (ORDER BY l.SortOrder, l.QuoteLineId)
+        FROM dbo.QuoteLine l WHERE l.QuoteId = @QuoteId);
+
+    IF @Rows IS NULL
+        SELECT @Rows = N'<tr><td>' + dbo.fn_Html(q.Title) + N'</td><td class="num"></td><td class="num"></td>'
+                     + N'<td class="num">' + ISNULL(N'&#163;' + FORMAT(q.Price, 'N2'), N'') + N'</td></tr>'
+        FROM dbo.Quote q WHERE q.QuoteId = @QuoteId;
+
+    -- the same statutory footer an invoice carries. A quote shows no VAT number, because it
+    -- quotes a price excluding VAT rather than charging any.
+    DECLARE @LegalHtml nvarchar(max) = dbo.fn_DocumentLegal(0);
+
+    SELECT @Html = N'<!doctype html><html lang="en-GB"><head><meta charset="utf-8" /><title>Quote ' + q.QuoteRef
+        + N'</title><style>' + dbo.fn_DocumentCss() + N'</style></head><body><div class="sheet">
+
+<div class="top">
+  <div>' + ISNULL(N'<img class="logo" alt="' + @Name + N'" src="' + @Logo + N'" />',
+                  N'<div class="brandfont logo-text">' + @Name + N'<span style="color:var(--ink)">.</span></div>') + N'</div>
+  <div class="biz">
+    <div class="nm">' + @Name + N'</div>'
+    + ISNULL(N'<div class="trading">' + NULLIF(dbo.fn_Html(dbo.fn_Setting('BusinessTradingName')), N'') + N'</div>', N'')
+    + ISNULL(N'<div>' + NULLIF(dbo.fn_Html(dbo.fn_Setting('BusinessContact')), N'') + N'</div>', N'')
+    + ISNULL(N'<div>' + NULLIF(dbo.fn_Html(dbo.fn_Setting('BusinessEmail')), N'') + N'</div>', N'')
+    + ISNULL(N'<div>' + NULLIF(dbo.fn_Html(dbo.fn_Setting('BusinessPhone')), N'') + N'</div>', N'')
+    + ISNULL(N'<div>' + NULLIF(dbo.fn_Html(dbo.fn_Setting('BusinessWebsite')), N'') + N'</div>', N'') + N'
+  </div>
+</div>
+<div class="rule"></div>
+
+<div class="head">
+  <h1' + CASE WHEN q.Status = 'Declined' THEN N' class="void">NOT PROCEEDING' ELSE N'>Quote' END + N'</h1>
+  <div class="meta">
+    <div class="k">Quote no</div><div class="v">' + q.QuoteRef + N'</div>
+    <div class="k">Date</div><div class="v">' + CONVERT(nvarchar(11), ISNULL(q.SentDate, CAST(q.CreatedAt AS date)), 106) + N'</div>'
+    + ISNULL(N'<div class="k">Valid until</div><div class="due">' + CONVERT(nvarchar(11), q.ExpiresOn, 106) + N'</div>', N'') + N'
+  </div>
+</div>
+
+<div class="parties">
+  <div class="party">
+    <div class="label">For</div>
+    <div class="nm">' + dbo.fn_Html(c.ClientName) + N'</div>'
+    + ISNULL(N'<div class="sub">For the attention of ' + (SELECT STRING_AGG(dbo.fn_Html(ct.FullName), N', ') WITHIN GROUP (ORDER BY ct.FullName)
+                                                          FROM dbo.Contact ct WHERE ct.ClientId = c.ClientId AND ct.IsNamedContact = 1 AND ct.IsActive = 1) + N'</div>', N'')
+    + ISNULL(N'<div class="sub">' + REPLACE(NULLIF(dbo.fn_Html(c.Address), N''), CHAR(10), N'<br />') + N'</div>', N'') + N'
+  </div>
+  <div class="party">
+    <div class="label">From</div>
+    <div class="nm">' + @Name + N'</div>'
+    + ISNULL(N'<div class="sub">' + REPLACE(NULLIF(dbo.fn_Html(dbo.fn_Setting('BusinessAddress')), N''), CHAR(10), N'<br />') + N'</div>', N'') + N'
+  </div>
+  <div class="party forwhat">
+    <div class="label">What for</div>
+    <div class="v">' + dbo.fn_Html(q.Title) + N'</div>'
+    + ISNULL(N'<div class="k">Estimated</div><div class="v">' + FORMAT(q.EstimatedHours, 'N2') + N' hours</div>', N'') + N'
+  </div>
+</div>'
+    + ISNULL(N'
+<h2>Scope<span class="dot">.</span></h2>
+<p>' + REPLACE(dbo.fn_Html(NULLIF(q.Scope, N'')), CHAR(10), N'</p><p>') + N'</p>', N'') + N'
+
+<table class="lines">
+  <tr><th>Description</th><th class="num">Qty</th><th class="num">Rate</th><th class="num">Amount</th></tr>
+  ' + ISNULL(@Rows, N'') + N'
+</table>
+
+<table class="totals">
+  <tr class="grand"><td class="lbl">Total</td><td class="amt">' + ISNULL(N'&#163;' + FORMAT(q.Price, 'N2'), N'on application') + N'</td></tr>
+  <tr class="vatnote"><td colspan="2">' + CASE WHEN dbo.fn_Setting('VatRegistered') = N'1'
+        THEN N'Excludes VAT at ' + ISNULL(dbo.fn_Setting('VatRatePct'), N'20') + N'%'
+        ELSE N'Not VAT registered, so no VAT is charged' END + N'</td></tr>
+</table>
+
+<div class="terms">
+  <p><b>Fixed before the work starts.</b> This is what the work costs, not an estimate to be revised
+  afterwards. If what you need turns out to be different, we will say so and re-quote rather than
+  carry on and invoice you for more.</p>'
+  + ISNULL(N'<p>Valid until <b>' + CONVERT(nvarchar(11), q.ExpiresOn, 106) + N'</b>.</p>', N'')
+  + N'<p>Payment terms ' + ISNULL(dbo.fn_Setting('PaymentTermsDays'), N'14') + N' days from invoice.</p>
+</div>
+
+<div class="thanks">To accept, reply to this e-mail and we will agree a start date.</div>
+
+<div class="foot">
+  <div>' + @Name + N' &#183; Quote ' + q.QuoteRef + N'</div>
+  <div>' + CONVERT(nvarchar(11), ISNULL(q.SentDate, CAST(q.CreatedAt AS date)), 106) + N'</div>
+</div>'
++ @LegalHtml
++ N'
+</div></body></html>'
+    FROM dbo.Quote q JOIN dbo.Client c ON c.ClientId = q.ClientId
+    WHERE q.QuoteId = @QuoteId;
+
+    IF @Select = 1 SELECT QuoteRef = @Quote, Html = @Html;
+END
+GO
+
+-- What a limited company has to say on the documents it sends: registered name, where it is
+-- registered, its number, and the registered office. Each part prints only when it is set, and
+-- the registered office is never guessed from the postal address, so a home address cannot end up
+-- on an invoice or a quote by accident.
+CREATE OR ALTER FUNCTION dbo.fn_DocumentLegal (@ShowVat bit)
+RETURNS nvarchar(max)
+AS
+BEGIN
+    DECLARE @CoNo nvarchar(60) = NULLIF(LTRIM(RTRIM(dbo.fn_Setting('BusinessCompanyNumber'))), N'');
+    DECLARE @RegOffice nvarchar(500) = NULLIF(LTRIM(RTRIM(dbo.fn_Setting('BusinessRegisteredOffice'))), N'');
+    DECLARE @VatNo nvarchar(60) = NULLIF(LTRIM(RTRIM(dbo.fn_Setting('BusinessVatNumber'))), N'');
+    DECLARE @RegIn nvarchar(100) = ISNULL(NULLIF(dbo.fn_Setting('BusinessRegisteredIn'), N''), N'England and Wales');
+    DECLARE @RegName nvarchar(200) = dbo.fn_Html(ISNULL(NULLIF(LTRIM(RTRIM(dbo.fn_Setting('BusinessRegisteredName'))), N''),
+                                                        dbo.fn_Setting('BusinessName')));
+    -- fn_Html returns '' rather than NULL, so each part is guarded on the setting itself
+    DECLARE @Legal nvarchar(max) =
+          CASE WHEN @CoNo IS NULL THEN N''
+               ELSE @RegName + N' is a company registered in ' + dbo.fn_Html(@RegIn) + N', number ' + dbo.fn_Html(@CoNo) + N'.' END
+        + CASE WHEN @RegOffice IS NULL THEN N''
+               ELSE N' Registered office: ' + dbo.fn_Html(REPLACE(@RegOffice, CHAR(10), N', ')) + N'.' END
+        + CASE WHEN @ShowVat = 1 AND @VatNo IS NOT NULL THEN N' VAT registration number ' + dbo.fn_Html(@VatNo) + N'.' ELSE N'' END;
+    RETURN CASE WHEN @Legal = N'' THEN N'' ELSE N'<div class="legal">' + LTRIM(@Legal) + N'</div>' END;
+END
+GO
+
+-- The letterhead both documents share. An invoice and a quote go out on the same paper, so the
+-- brand lives in one place rather than being copied and then changed in only one of them.
+CREATE OR ALTER FUNCTION dbo.fn_DocumentCss ()
+RETURNS nvarchar(max)
+AS
+BEGIN
+    RETURN N'
+/* Molehill. dataServices - brand colours: #231F20, #44C8F5, white; titles in Krungthep where it is installed */
+:root{--ink:#231F20;--cyan:#44C8F5;--muted:#6F6A69;--line:#E2DEDD;--tint:#F2FBFE}
+*{box-sizing:border-box}
+body{margin:0;background:#F4F2F1;color:var(--ink);font-family:"Segoe UI",Arial,Helvetica,sans-serif;font-size:13.5px;line-height:1.5}
+.sheet{max-width:820px;margin:24px auto;background:#fff;padding:34px 40px 40px}
+h1,h2,.brandfont{font-family:Krungthep,Bahnschrift,"Trebuchet MS","Segoe UI",Arial,sans-serif;font-weight:700;letter-spacing:.01em}
+.top{display:flex;justify-content:space-between;align-items:flex-start;gap:24px}
+.logo{max-width:230px;height:auto}
+.logo-text{font-size:26px;color:var(--cyan)}
+.biz{text-align:right;font-size:12.5px;color:var(--muted)}
+.biz .nm{font-size:15px;color:var(--ink);font-weight:700}
+.biz .trading{font-style:italic}
+.rule{height:3px;background:var(--cyan);margin:18px 0 22px}
+.head{display:flex;justify-content:space-between;align-items:flex-start;gap:24px;margin-bottom:26px}
+h1{font-size:40px;line-height:1;margin:0;text-transform:uppercase}
+h1.void{color:#B3302E}
+.meta{display:grid;grid-template-columns:auto auto;gap:2px 14px;font-size:12.5px;text-align:right;justify-content:end}
+.meta .k{color:var(--muted)}
+.meta .v{font-weight:600}
+.meta .due{color:var(--ink);font-weight:700}
+.parties{display:flex;gap:40px;margin-bottom:22px}
+.parties>div{flex:1}
+.label{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:5px}
+.party .nm{font-weight:700;font-size:15px}
+.party .sub{color:var(--muted)}
+.forwhat .k{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-top:6px}
+.forwhat .v{font-weight:600}
+table.lines{width:100%;border-collapse:collapse;margin-top:6px}
+table.lines th{background:var(--ink);color:#fff;text-align:left;padding:9px 11px;font-size:12px;letter-spacing:.06em;text-transform:uppercase}
+table.lines td{padding:9px 11px;border-bottom:1px solid var(--line);vertical-align:top}
+td.num,th.num{text-align:right;white-space:nowrap}
+tr.note td{color:var(--muted);font-style:italic;background:var(--tint)}
+.totals{margin-left:auto;margin-top:16px;width:330px;border-collapse:collapse}
+.totals td{padding:6px 11px}
+.totals .lbl{text-align:right;color:var(--muted)}
+.totals .amt{text-align:right;font-weight:700;white-space:nowrap}
+.totals .vatnote td{text-align:right;color:var(--muted);font-style:italic;font-size:12px;padding-top:0}
+.grand td{background:var(--ink);color:#fff;font-size:17px;padding:12px 11px}
+.grand .lbl{color:#fff;text-align:right}
+h2{font-size:17px;color:var(--ink);margin:30px 0 10px}
+h2 .dot{color:var(--cyan)}
+.pay{background:var(--tint);border-left:4px solid var(--cyan);padding:14px 18px}
+.pay p{margin:0 0 8px}
+.pay table{border-collapse:collapse}
+.pay td{padding:3px 0;vertical-align:top}
+.pay .pk{color:var(--muted);padding-right:22px;white-space:nowrap}
+.pay .pv{font-weight:700}
+.pay .pfull{font-weight:600}
+.terms{margin-top:18px;font-size:12.5px;color:var(--muted)}
+.terms b{color:var(--ink)}
+.thanks{margin-top:16px;font-weight:700;color:var(--ink)}
+.thanks:after{content:"";display:block;width:54px;height:3px;background:var(--cyan);margin-top:6px}
+.foot{margin-top:26px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted);font-size:11.5px;display:flex;justify-content:space-between;gap:16px}
+.legal{color:var(--muted);font-size:10.5px;margin-top:8px;line-height:1.45;max-width:78ch}
+@page{size:A4;margin:14mm}
+@media print{body{background:#fff}.sheet{margin:0;padding:0;max-width:none}.pay{break-inside:avoid}table.lines{break-inside:auto}tr{break-inside:avoid}}
+';
+END
+GO
+
 CREATE OR ALTER PROCEDURE dbo.usp_Invoice_Html
     @InvoiceNo varchar(30),
     @Html      nvarchar(max) = NULL OUTPUT,
@@ -4109,82 +4460,9 @@ BEGIN
     DECLARE @Logo nvarchar(max) = NULLIF(dbo.fn_Setting('LogoDataUri'), N'');
     DECLARE @Name nvarchar(200) = dbo.fn_Html(dbo.fn_Setting('BusinessName'));
 
-    /* What a limited company has to say on its invoices: registered name, where it is
-       registered, its number, and the registered office. Each part prints only when it is
-       set - the registered office is never guessed from the postal address, so a home
-       address cannot end up on an invoice by accident. */
-    DECLARE @CoNo nvarchar(60) = NULLIF(LTRIM(RTRIM(dbo.fn_Setting('BusinessCompanyNumber'))), N'');
-    DECLARE @RegOffice nvarchar(500) = NULLIF(LTRIM(RTRIM(dbo.fn_Setting('BusinessRegisteredOffice'))), N'');
-    DECLARE @VatNo nvarchar(60) = NULLIF(LTRIM(RTRIM(dbo.fn_Setting('BusinessVatNumber'))), N'');
-    DECLARE @RegIn nvarchar(100) = ISNULL(NULLIF(dbo.fn_Setting('BusinessRegisteredIn'), N''), N'England and Wales');
-    DECLARE @RegName nvarchar(200) = dbo.fn_Html(ISNULL(NULLIF(LTRIM(RTRIM(dbo.fn_Setting('BusinessRegisteredName'))), N''),
-                                                        dbo.fn_Setting('BusinessName')));
-    -- fn_Html returns '' rather than NULL, so each part is guarded on the setting itself
-    DECLARE @Legal nvarchar(max) =
-          CASE WHEN @CoNo IS NULL THEN N''
-               ELSE @RegName + N' is a company registered in ' + dbo.fn_Html(@RegIn) + N', number ' + dbo.fn_Html(@CoNo) + N'.' END
-        + CASE WHEN @RegOffice IS NULL THEN N''
-               ELSE N' Registered office: ' + dbo.fn_Html(REPLACE(@RegOffice, CHAR(10), N', ')) + N'.' END
-        + CASE WHEN @Vat = 1 AND @VatNo IS NOT NULL THEN N' VAT registration number ' + dbo.fn_Html(@VatNo) + N'.' ELSE N'' END;
-    DECLARE @LegalHtml nvarchar(max) = CASE WHEN @Legal = N'' THEN N'' ELSE N'<div class="legal">' + LTRIM(@Legal) + N'</div>' END;
+    DECLARE @LegalHtml nvarchar(max) = dbo.fn_DocumentLegal(@Vat);
 
-    SELECT @Html = N'<!doctype html><html lang="en-GB"><head><meta charset="utf-8" /><title>Invoice ' + i.InvoiceNo + N'</title><style>
-/* Molehill. dataServices - brand colours: #231F20, #44C8F5, white; titles in Krungthep where it is installed */
-:root{--ink:#231F20;--cyan:#44C8F5;--muted:#6F6A69;--line:#E2DEDD;--tint:#F2FBFE}
-*{box-sizing:border-box}
-body{margin:0;background:#F4F2F1;color:var(--ink);font-family:"Segoe UI",Arial,Helvetica,sans-serif;font-size:13.5px;line-height:1.5}
-.sheet{max-width:820px;margin:24px auto;background:#fff;padding:34px 40px 40px}
-h1,h2,.brandfont{font-family:Krungthep,Bahnschrift,"Trebuchet MS","Segoe UI",Arial,sans-serif;font-weight:700;letter-spacing:.01em}
-.top{display:flex;justify-content:space-between;align-items:flex-start;gap:24px}
-.logo{max-width:230px;height:auto}
-.logo-text{font-size:26px;color:var(--cyan)}
-.biz{text-align:right;font-size:12.5px;color:var(--muted)}
-.biz .nm{font-size:15px;color:var(--ink);font-weight:700}
-.biz .trading{font-style:italic}
-.rule{height:3px;background:var(--cyan);margin:18px 0 22px}
-.head{display:flex;justify-content:space-between;align-items:flex-start;gap:24px;margin-bottom:26px}
-h1{font-size:40px;line-height:1;margin:0;text-transform:uppercase}
-h1.void{color:#B3302E}
-.meta{display:grid;grid-template-columns:auto auto;gap:2px 14px;font-size:12.5px;text-align:right;justify-content:end}
-.meta .k{color:var(--muted)}
-.meta .v{font-weight:600}
-.meta .due{color:var(--ink);font-weight:700}
-.parties{display:flex;gap:40px;margin-bottom:22px}
-.parties>div{flex:1}
-.label{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:5px}
-.party .nm{font-weight:700;font-size:15px}
-.party .sub{color:var(--muted)}
-.forwhat .k{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-top:6px}
-.forwhat .v{font-weight:600}
-table.lines{width:100%;border-collapse:collapse;margin-top:6px}
-table.lines th{background:var(--ink);color:#fff;text-align:left;padding:9px 11px;font-size:12px;letter-spacing:.06em;text-transform:uppercase}
-table.lines td{padding:9px 11px;border-bottom:1px solid var(--line);vertical-align:top}
-td.num,th.num{text-align:right;white-space:nowrap}
-tr.note td{color:var(--muted);font-style:italic;background:var(--tint)}
-.totals{margin-left:auto;margin-top:16px;width:330px;border-collapse:collapse}
-.totals td{padding:6px 11px}
-.totals .lbl{text-align:right;color:var(--muted)}
-.totals .amt{text-align:right;font-weight:700;white-space:nowrap}
-.totals .vatnote td{text-align:right;color:var(--muted);font-style:italic;font-size:12px;padding-top:0}
-.grand td{background:var(--ink);color:#fff;font-size:17px;padding:12px 11px}
-.grand .lbl{color:#fff;text-align:right}
-h2{font-size:17px;color:var(--ink);margin:30px 0 10px}
-h2 .dot{color:var(--cyan)}
-.pay{background:var(--tint);border-left:4px solid var(--cyan);padding:14px 18px}
-.pay p{margin:0 0 8px}
-.pay table{border-collapse:collapse}
-.pay td{padding:3px 0;vertical-align:top}
-.pay .pk{color:var(--muted);padding-right:22px;white-space:nowrap}
-.pay .pv{font-weight:700}
-.pay .pfull{font-weight:600}
-.terms{margin-top:18px;font-size:12.5px;color:var(--muted)}
-.terms b{color:var(--ink)}
-.thanks{margin-top:16px;font-weight:700;color:var(--ink)}
-.thanks:after{content:"";display:block;width:54px;height:3px;background:var(--cyan);margin-top:6px}
-.foot{margin-top:26px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted);font-size:11.5px;display:flex;justify-content:space-between;gap:16px}
-.legal{color:var(--muted);font-size:10.5px;margin-top:8px;line-height:1.45;max-width:78ch}
-@page{size:A4;margin:14mm}
-@media print{body{background:#fff}.sheet{margin:0;padding:0;max-width:none}.pay{break-inside:avoid}table.lines{break-inside:auto}tr{break-inside:avoid}}
+    SELECT @Html = N'<!doctype html><html lang="en-GB"><head><meta charset="utf-8" /><title>Invoice ' + i.InvoiceNo + N'</title><style>' + dbo.fn_DocumentCss() + N'
 </style></head><body><div class="sheet">
 
 <div class="top">

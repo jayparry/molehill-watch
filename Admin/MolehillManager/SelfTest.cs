@@ -1408,6 +1408,99 @@ public static partial class SelfTest
         Step("close", () => Submit(AdminForms.CloseTicket(db, ticket), ("Resolution", "Added two indexes")));
         Step("ticket detail", () => Detail.TicketSummary(db, ticket), s => s.Contains("Added two indexes") && s.Contains("Index review") ? null : "detail incomplete");
         Step("project quote", () => Submit(AdminForms.AddQuote(db, reference), ("Title", "Upgrade to 2022"), ("EstimatedHours", "12"), ("TicketRef", ticket)));
+
+        // ---- 2.8.0: a quote has a life. Before this, Status, SentDate and DecisionDate existed
+        // and nothing ever wrote them, no query returned a quote, and there was no document - so
+        // the figure you gave a client lived in your e-mail and nowhere else.
+        var quoteRef = Step("a quote can be itemised", () =>
+        {
+            var made = db.Proc("dbo.usp_Quote_Add", ("@Client", name), ("@Title", "Estate health check"),
+                               ("@Scope", "Four instances, read-only access"));
+            var q = (string)made.First!.Rows[0]["QuoteRef"];
+            db.Proc("dbo.usp_Quote_AddLine", ("@Quote", q), ("@Description", "First instance"),
+                    ("@Quantity", 1m), ("@UnitPrice", 1450m));
+            db.Proc("dbo.usp_Quote_AddLine", ("@Quote", q), ("@Description", "Each additional instance"),
+                    ("@Quantity", 3m), ("@UnitPrice", 350m));
+            return q;
+        }, q => q is string s && s.StartsWith("MQ-") ? null : "no quote reference came back")!;
+
+        Step("and its price is the lines added up",
+            () => db.Query("SELECT Price, Lines = (SELECT COUNT(*) FROM dbo.QuoteLine l WHERE l.QuoteId = q.QuoteId) FROM dbo.Quote q WHERE q.QuoteRef = @q",
+                           ("@q", quoteRef)),
+            t => (decimal)t.Rows[0]["Price"] == 2500m && (int)t.Rows[0]["Lines"] == 2
+                 ? null : $"{t.Rows[0]["Price"]} over {t.Rows[0]["Lines"]} line(s)");
+
+        Step("sending it records when, and when it runs out",
+            () => db.Proc("dbo.usp_Quote_Send", ("@Quote", quoteRef)),
+            r => r.First is { Rows.Count: 1 } t && (string)t.Rows[0]["Status"] == "Sent"
+                 && t.Rows[0]["SentDate"] is DateTime && t.Rows[0]["ExpiresOn"] is DateTime
+                 ? null : "sending did not record a date");
+        ExpectError("and a sent quote cannot have its lines changed",
+            () => db.Proc("dbo.usp_Quote_AddLine", ("@Quote", quoteRef), ("@Description", "Sneaky extra"), ("@Amount", 1m)),
+            "already been sent");
+        ExpectError("a quote with no price cannot be sent",
+            () =>
+            {
+                var bare = db.Proc("dbo.usp_Quote_Add", ("@Client", name), ("@Title", "No figure yet"));
+                db.Proc("dbo.usp_Quote_Send", ("@Quote", (string)bare.First!.Rows[0]["QuoteRef"]));
+            }, "no price");
+
+        Step("the document is written, and says what it is",
+            () => AdminForms.SaveQuoteHtml(db, quoteRef, Path.Combine(Path.GetTempPath(), "MolehillManager-selftest")),
+            p => File.ReadAllText(p) is var h
+                 && h.Contains(quoteRef) && h.Contains("Estate health check") && h.Contains("1,450.00")
+                 && h.Contains("Four instances, read-only access") && h.Contains("Fixed before the work starts")
+                 ? null : "the quote HTML is missing its reference, title, price or scope");
+        // both documents take their letterhead from fn_DocumentCss, so a brand change is made once
+        // rather than made in one of the two. The invoice half is covered by its own step below.
+        Step("and it is on the shared letterhead, not a copy of one",
+            () =>
+            {
+                var q = File.ReadAllText(AdminForms.SaveQuoteHtml(db, quoteRef,
+                            Path.Combine(Path.GetTempPath(), "MolehillManager-selftest")));
+                return q.Contains((string)db.Scalar("SELECT dbo.fn_DocumentCss()")!);
+            }, same => (bool)same! ? null : "the quote does not use fn_DocumentCss");
+
+        // accepting runs usp_Engagement_Add, whose own result set comes back FIRST - so the answer
+        // is the table that has the columns, not the first one
+        Step("accepting it starts the work and keeps the link",
+            () => db.Proc("dbo.usp_Quote_Decide", ("@Quote", quoteRef), ("@Accepted", true),
+                          ("@BillingMode", "FixedPrice"), ("@StartDate", DateTime.Today)),
+            r => r.Tables.FirstOrDefault(t => t.Columns.Contains("Became")) is { Rows.Count: 1 } t
+                 && (string)t.Rows[0]["Status"] == "Accepted"
+                 && t.Rows[0]["Became"] is string cr && cr.Length > 0
+                 ? null : $"accepting did not produce the work it became ({r.Tables.Count} result set(s))");
+        Step("the work it became is priced at what was quoted",
+            () => db.Query(@"SELECT e.EngagementRef, e.FixedPrice, e.BillingMode
+                             FROM dbo.Quote q JOIN dbo.Engagement e ON e.EngagementId = q.EngagementId
+                             WHERE q.QuoteRef = @q", ("@q", quoteRef)),
+            t => t.Rows.Count == 1 && (decimal)t.Rows[0]["FixedPrice"] == 2500m
+                 && (string)t.Rows[0]["BillingMode"] == "FixedPrice"
+                 ? null : $"{(t.Rows.Count == 0 ? "no engagement" : t.Rows[0]["FixedPrice"].ToString())}");
+        ExpectError("and it cannot be answered twice",
+            () => db.Proc("dbo.usp_Quote_Decide", ("@Quote", quoteRef), ("@Accepted", false)), "already Accepted");
+
+        Step("a declined quote records why",
+            () =>
+            {
+                var d = db.Proc("dbo.usp_Quote_Add", ("@Client", name), ("@Title", "Migration"), ("@Price", 9000m));
+                var dr = (string)d.First!.Rows[0]["QuoteRef"];
+                db.Proc("dbo.usp_Quote_Send", ("@Quote", dr));
+                db.Proc("dbo.usp_Quote_Decide", ("@Quote", dr), ("@Accepted", false), ("@Reason", "Budget moved to next year"));
+                return db.Query("SELECT Status, DeclineReason, EngagementId FROM dbo.Quote WHERE QuoteRef = @q", ("@q", dr));
+            },
+            t => (string)t.Rows[0]["Status"] == "Declined"
+                 && (string)t.Rows[0]["DeclineReason"] == "Budget moved to next year"
+                 && t.Rows[0]["EngagementId"] is DBNull
+                 ? null : "a declined quote did not record the reason, or created work anyway");
+
+        Step("and quotes can be listed at last, which nothing could do before",
+            () => Queries.Quotes(db, name),
+            t => t.Rows.Count >= 3
+                 && t.Columns.Contains("Status") && t.Columns.Contains("Became")
+                 && t.Rows.Cast<DataRow>().Any(r => (string)r["Status"] == "Accepted")
+                 && t.Rows.Cast<DataRow>().Any(r => (string)r["Status"] == "Declined")
+                 ? null : $"{t.Rows.Count} quote(s) listed");
         // the engagement page has no agreement reference to pass and hands over the client's name
         // instead. usp_Quote_Add resolves either; what it cannot resolve is a CON-0000 reference
         Step("and one quoted by client name, as the engagement page quotes it",

@@ -81,6 +81,10 @@ public static class Queries
     public static List<string> ClientNames(AdminDb db) =>
         db.Query("SELECT ClientName FROM dbo.Client ORDER BY ClientName;").Rows.Cast<DataRow>().Select(r => (string)r[0]).ToList();
 
+    /// <summary>Quotes and where each one got to. Nothing read dbo.Quote at all before 2.8.0.</summary>
+    public static DataTable Quotes(AdminDb db, string? clientName = null, bool openOnly = false) =>
+        db.Proc("dbo.usp_Quote_List", ("@Client", clientName), ("@OpenOnly", openOnly)).First ?? new DataTable();
+
     public static List<string> PriceLists(AdminDb db) =>
         db.Query("SELECT Name FROM dbo.PriceList ORDER BY EffectiveFrom DESC, Name;").Rows.Cast<DataRow>().Select(r => (string)r[0]).ToList();
 

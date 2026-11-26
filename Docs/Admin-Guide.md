@@ -204,7 +204,22 @@ In Molehill Manager that is three steps on Clients, in the order they actually h
 | Finish it (invoices what's left) | `EXEC dbo.usp_Engagement_Complete @Engagement = 'CON-0001';` - with no date it finishes on the engagement's end date, or today if it hasn't got one |
 | Cancel one that never happened | `EXEC dbo.usp_Engagement_Cancel @Engagement = 'CON-0002', @Reason = N'Client pulled the project';` |
 
-**Quotes are a record, not a document.** `usp_Quote_Add` files what you quoted so the figure isn't lost, and **Project quote** on the agreement or engagement page does the same. Nothing reads `dbo.Quote` back out yet and nothing renders it, so the quote you send the client is still written by hand - unlike an invoice, which `usp_Invoice_Html` produces. `Quote.Status`, `SentDate` and `DecisionDate` exist but nothing writes them, so every quote stays `Draft`.
+**Quotes.** A quote is a document you send and an answer you record, not just a filed figure.
+
+| Step | Command |
+|---|---|
+| Raise one | `EXEC dbo.usp_Quote_Add @Client = N'Contoso Ltd', @Title = N'SQL Server health check', @Scope = N'Four instances, read-only access';` |
+| Itemise it | `EXEC dbo.usp_Quote_AddLine @Quote = 'MQ-0001', @Description = N'First instance', @Quantity = 1, @UnitPrice = 1450;` then `... @Description = N'Each additional instance', @Quantity = 3, @UnitPrice = 350;` |
+| The document | `EXEC dbo.usp_Quote_Html @Quote = 'MQ-0001';` - same letterhead as an invoice. In Molehill Manager, **Save as HTML** |
+| Send it | `EXEC dbo.usp_Quote_Send @Quote = 'MQ-0001';` - records the date and sets it to expire in 90 days |
+| They said yes | `EXEC dbo.usp_Quote_Decide @Quote = 'MQ-0001', @Accepted = 1, @BillingMode = 'FixedPrice';` - creates the engagement and links the quote to it |
+| They said no | `EXEC dbo.usp_Quote_Decide @Quote = 'MQ-0001', @Accepted = 0, @Reason = N'Budget moved to next year';` |
+| What is outstanding | `EXEC dbo.usp_Quote_List @OpenOnly = 1;` |
+
+The price is the lines added up once there are any, so itemise it and the total looks after itself.
+Lines cannot be changed once a quote has been sent - raise a new one instead. Accepting a quote is
+what starts the work: it creates the engagement at the quoted price and records which quote it came
+from, so a health check can be traced back to the figure it was sold at.
 
 **How days are worked out.** A day is 7.5 hours (`DayHours`) and each day worked rounds up to the nearest half day (`DayRateRounding`: `HalfDay`, `WholeDay` or `Exact`; an engagement can override it). Everything logged on the same date counts together, so 2 hours in the morning and 3 in the afternoon is one day, not two half days. Each day worked becomes one invoice line, with what you did on it.
 
