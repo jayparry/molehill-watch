@@ -225,6 +225,30 @@ from, so a health check can be traced back to the figure it was sold at.
 
 **Rates.** `@DayRate` is the usual arrangement. `@BillingMode = 'Hourly'` with `@HourlyRate` bills by the hour instead. `@BillingMode = 'FixedPrice'` with `@FixedPrice` invoices the agreed price when you mark the work finished - log the days anyway, so you can see what it really cost. `@OutOfHoursRate` is optional: without it, evening and weekend work is billed at the day rate like anything else.
 
+**The health-check credit.** Page 1 of the price sheet promises the fee back: take out an agreement
+within 60 days of a health check, covering the same instances, on a six-month minimum term, and the
+whole fee is credited against the Molehill Watch invoices; cover only some of them and it is reduced
+in proportion. For that to be computable the health check has to record **which** instances it
+looked at, not just how many:
+
+```sql
+EXEC dbo.usp_Engagement_CoverInstance @Engagement = 'CON-0003', @InstanceName = N'SQL01';
+EXEC dbo.usp_Engagement_CoverInstance @Engagement = 'CON-0003', @All = 1;   -- or every server they have
+```
+
+That also prices it: a per-instance engagement takes its `UnitCount` from the instances recorded
+rather than from a number typed in.
+
+| Step | Command |
+|---|---|
+| What is earned, and why | `EXEC dbo.usp_Agreement_HealthCheckCredit @Client = N'Contoso Ltd';` - shows the fee, how many instances were checked, how many the agreement covers, the credit, and whether it qualifies |
+| Allow it | `EXEC dbo.usp_Agreement_ApplyHealthCheckCredit @Client = N'Contoso Ltd', @InvoiceNo = 'MDS-2026-0007';` - never more than the invoice is for, so it spreads across invoices |
+| If they leave early | `SELECT * FROM dbo.fn_HealthCheckClawback(<agreementid>, '2027-01-31');` - the credit given plus the months of the minimum term not served |
+
+`HealthCheckCreditDays` (60) and `HealthCheckCreditTermMonths` (6) in `dbo.Setting` are the window
+and the term, and both are yours to change. A check that does not qualify says why rather than
+silently earning nothing.
+
 **Priced per instance.** `@BillingMode = 'PerInstance'` is for work sold by the server rather than by the day - a health check across an estate. It takes `@FirstUnitPrice` for the first instance, `@ExtraUnitPrice` for each one after it (leave it out and the rest are included), `@UnitCount` for how many there are, and an optional `@PriceCap` the total never passes. The price is worked out in the database, so `Engagement.UnitTotal` is the one figure the invoice, the dashboard and the app all read:
 
 | First | Each extra | Count | Cap | Comes to |

@@ -1332,6 +1332,106 @@ public static partial class SelfTest
             () => db.Proc("dbo.usp_Agreement_CoverInstance", ("@Agreement", reference), ("@InstanceName", "ST-NOSUCH")),
             "no server called");
 
+        // ---- 2.8.0 G7: the health-check credit the price sheet promises on page 1. The whole fee
+        // back if the agreement covers the same instances, reduced in proportion if it covers only
+        // some, and only the instances the check looked at earn anything. None of this could be
+        // worked out before a health check recorded WHICH instances it examined.
+        var hcRef = $"CSTH-{stamp}";
+        Step("a health check records the instances it looked at, and is priced on them", () =>
+        {
+            Submit(AdminForms.NewEngagement(db, name), ("ClientName", name), ("Name", "SQL Server health check"),
+                   ("BillingMode", "Per instance"), ("FirstUnitPrice", "1450"), ("ExtraUnitPrice", "350"),
+                   ("PriceCap", "3500"), ("StartDate", D(start.AddDays(-20))), ("EngagementRef", hcRef));
+            // three of the agreement's servers, not all seven
+            foreach (var inst in new[] { "ST-SQL01", "ST-SQL02", "ST-SQL03" })
+                db.Proc("dbo.usp_Engagement_CoverInstance", ("@Engagement", hcRef), ("@InstanceName", inst));
+            db.Execute("UPDATE dbo.Engagement SET CompletedOn = @d WHERE EngagementRef = @r",
+                       ("@r", hcRef), ("@d", start.AddDays(-10)));
+            return db.Query("SELECT UnitCount, UnitTotal FROM dbo.Engagement WHERE EngagementRef = @r", ("@r", hcRef));
+        }, t => (int)t.Rows[0]["UnitCount"] == 3 && (decimal)t.Rows[0]["UnitTotal"] == 2150m
+                ? null : $"priced on {t.Rows[0]["UnitCount"]} instance(s) at {t.Rows[0]["UnitTotal"]}");
+
+        Step("the credit is the whole fee where the agreement covers every instance checked",
+            () => db.Query(@"SELECT c.Fee, c.Checked, c.Covered, c.Credit, c.Qualifies, c.Why
+                             FROM dbo.Agreement a CROSS APPLY dbo.fn_HealthCheckCredit(a.AgreementId) c
+                             WHERE a.AgreementRef = @r AND c.EngagementRef = @h",
+                           ("@r", reference), ("@h", hcRef)),
+            t => t.Rows.Count == 1 && (int)t.Rows[0]["Checked"] == 3 && (int)t.Rows[0]["Covered"] == 3
+                 && (decimal)t.Rows[0]["Credit"] == 2150m && (int)t.Rows[0]["Qualifies"] == 1
+                 ? null : $"checked {t.Rows[0]["Checked"]}, covered {t.Rows[0]["Covered"]}, credit {t.Rows[0]["Credit"]}: {t.Rows[0]["Why"]}");
+
+        // "cover only some of them and the credit is reduced in proportion"
+        Step("and reduced in proportion where it covers only some", () =>
+        {
+            Submit(AdminForms.RemoveInstance(db, reference, "ST-SQL03"));
+            var t = db.Query(@"SELECT c.Checked, c.Covered, c.Credit
+                               FROM dbo.Agreement a CROSS APPLY dbo.fn_HealthCheckCredit(a.AgreementId) c
+                               WHERE a.AgreementRef = @r AND c.EngagementRef = @h",
+                             ("@r", reference), ("@h", hcRef));
+            return $"{t.Rows[0]["Checked"]}/{t.Rows[0]["Covered"]}/{t.Rows[0]["Credit"]}";
+        }, s2 => (string)s2! == "3/3/2150.00"
+                 ? null : $"got {s2}; cover ended today, so at the agreement's start all three were still covered");
+
+        Step("a check the agreement covers none of earns nothing, and says why", () =>
+        {
+            var lone = $"CSTX-{stamp}";
+            Submit(AdminForms.NewEngagement(db, name), ("ClientName", name), ("Name", "Health check, other estate"),
+                   ("BillingMode", "Per instance"), ("FirstUnitPrice", "1450"), ("StartDate", D(start.AddDays(-20))),
+                   ("EngagementRef", lone));
+            // covered only from today, so at the agreement's start it was not covered - which is
+            // the question the credit asks: did the agreement cover these instances when it began
+            Submit(AdminForms.AddInstance(db, reference), ("InstanceName", "ST-ELSEWHERE"), ("SqlVersion", "2022"),
+                   ("CoveredFrom", D(DateTime.Today)));
+            db.Proc("dbo.usp_Engagement_CoverInstance", ("@Engagement", lone), ("@InstanceName", "ST-ELSEWHERE"));
+            var t = db.Query(@"SELECT c.Covered, c.Credit, c.Qualifies, c.Why
+                               FROM dbo.Agreement a CROSS APPLY dbo.fn_HealthCheckCredit(a.AgreementId) c
+                               WHERE a.AgreementRef = @r AND c.EngagementRef = @l",
+                             ("@r", reference), ("@l", lone));
+            return t.Rows.Count == 1 && (int)t.Rows[0]["Covered"] == 0 && (decimal)t.Rows[0]["Credit"] == 0m
+                   && (int)t.Rows[0]["Qualifies"] == 0 && ((string)t.Rows[0]["Why"]).Contains("covers none")
+                   ? "right" : $"covered {t.Rows[0]["Covered"]}, credit {t.Rows[0]["Credit"]}: {t.Rows[0]["Why"]}";
+        }, s2 => (string)s2! == "right" ? null : (string)s2!);
+
+        Step("a check done too long before the agreement does not qualify, and says so", () =>
+        {
+            db.Execute("UPDATE dbo.Engagement SET CompletedOn = @d WHERE EngagementRef = @r",
+                       ("@r", hcRef), ("@d", start.AddDays(-200)));
+            var t = db.Query(@"SELECT c.Qualifies, c.WithinDays, c.Why
+                               FROM dbo.Agreement a CROSS APPLY dbo.fn_HealthCheckCredit(a.AgreementId) c
+                               WHERE a.AgreementRef = @r AND c.EngagementRef = @h",
+                             ("@r", reference), ("@h", hcRef));
+            db.Execute("UPDATE dbo.Engagement SET CompletedOn = @d WHERE EngagementRef = @r",
+                       ("@r", hcRef), ("@d", start.AddDays(-10)));
+            return (int)t.Rows[0]["Qualifies"] == 0 && ((string)t.Rows[0]["Why"]).Contains("day window")
+                   ? "right" : $"qualifies {t.Rows[0]["Qualifies"]} at {t.Rows[0]["WithinDays"]} days: {t.Rows[0]["Why"]}";
+        }, s2 => (string)s2! == "right" ? null : (string)s2!);
+
+        Step("a check done after the agreement started does not qualify either", () =>
+        {
+            db.Execute("UPDATE dbo.Engagement SET CompletedOn = @d WHERE EngagementRef = @r",
+                       ("@r", hcRef), ("@d", start.AddDays(5)));
+            var t = db.Query(@"SELECT c.Qualifies, c.WithinDays, c.Why FROM dbo.Agreement a
+                               CROSS APPLY dbo.fn_HealthCheckCredit(a.AgreementId) c
+                               WHERE a.AgreementRef = @r AND c.EngagementRef = @h", ("@r", reference), ("@h", hcRef));
+            db.Execute("UPDATE dbo.Engagement SET CompletedOn = @d WHERE EngagementRef = @r",
+                       ("@r", hcRef), ("@d", start.AddDays(-10)));
+            return (int)t.Rows[0]["Qualifies"] == 0 && ((string)t.Rows[0]["Why"]).Contains("after the agreement started")
+                   ? "right" : $"qualifies {t.Rows[0]["Qualifies"]} at {t.Rows[0]["WithinDays"]} days: {t.Rows[0]["Why"]}";
+        }, s2 => (string)s2! == "right" ? null : (string)s2!);
+
+        Step("and one on a term shorter than the credit needs does not either", () =>
+        {
+            var wasTerm = db.Scalar("SELECT InitialTermMonths FROM dbo.Agreement WHERE AgreementRef = @r", ("@r", reference));
+            db.Execute("UPDATE dbo.Agreement SET InitialTermMonths = 3 WHERE AgreementRef = @r", ("@r", reference));
+            var t = db.Query(@"SELECT c.Qualifies, c.Why FROM dbo.Agreement a
+                               CROSS APPLY dbo.fn_HealthCheckCredit(a.AgreementId) c
+                               WHERE a.AgreementRef = @r AND c.EngagementRef = @h", ("@r", reference), ("@h", hcRef));
+            db.Execute("UPDATE dbo.Agreement SET InitialTermMonths = @t WHERE AgreementRef = @r",
+                       ("@r", reference), ("@t", wasTerm));
+            return (int)t.Rows[0]["Qualifies"] == 0 && ((string)t.Rows[0]["Why"]).Contains("minimum term")
+                   ? "right" : $"qualifies {t.Rows[0]["Qualifies"]}: {t.Rows[0]["Why"]}";
+        }, s2 => (string)s2! == "right" ? null : (string)s2!);
+
         Step("onboarding item done", () => Submit(AdminForms.CompleteOnboarding(db, reference, "REMOTE_ACCESS", ""), ("Notes", "VPN")));
         Step("onboarding recorded", () => Queries.Onboarding(db, reference),
             t => t.Rows.Cast<DataRow>().Any(r => (string)r["Code"] == "REMOTE_ACCESS" && r["Done"] is DateTime) ? null : "not marked done");
@@ -2249,6 +2349,72 @@ public static partial class SelfTest
             if (!billed.Contains("@60.00")) return $"billed at {billed}, not the 60.00 the entry was stamped with";
             return $"identical: {billed}";
         }, s2 => ((string)s2!).StartsWith("identical:") ? null : (string)s2!);
+
+        // ---- and the credit being allowed. Last in the suite, because it changes invoice totals.
+        Step("the credit goes on a draft invoice, capped at what the invoice is for", () =>
+        {
+            var eng = (int)db.Scalar("SELECT EngagementId FROM dbo.Agreement WHERE AgreementRef = @r", ("@r", reference))!;
+            var id = (int)db.Scalar(@"DECLARE @id int;
+                                      EXEC dbo.usp_Invoice_New @EngagementId = @e, @InvoiceDate = @d, @InvoiceId = @id OUTPUT;
+                                      SELECT @id;", ("@e", eng), ("@d", DateTime.Today))!;
+            var no = (string)db.Scalar("SELECT InvoiceNo FROM dbo.Invoice WHERE InvoiceId = @i", ("@i", id))!;
+            // something to credit against: less than the 2,150 the check earned, so the credit is
+            // capped and the rest has to be carried
+            db.Proc("dbo.usp_Invoice_AddLine", ("@InvoiceNo", no), ("@Description", "Monthly fee"),
+                    ("@Quantity", 1m), ("@UnitPrice", 900m));
+            db.Proc("dbo.usp_Agreement_ApplyHealthCheckCredit", ("@Client", reference), ("@InvoiceNo", no));
+            var t = db.Query(@"SELECT l.Description, l.Amount FROM dbo.InvoiceLine l
+                               WHERE l.InvoiceId = @i AND l.LineType = 'Adjustment' AND l.Amount < 0", ("@i", id));
+            var total = (decimal)db.Scalar("SELECT Total FROM dbo.Invoice WHERE InvoiceId = @i", ("@i", id))!;
+            return $"{t.Rows.Count}|{(t.Rows.Count > 0 ? t.Rows[0]["Amount"].ToString() : "none")}|{total}|"
+                 + (t.Rows.Count > 0 && ((string)t.Rows[0]["Description"]).Contains("carried") ? "carried" : "not carried");
+        }, s2 => ((string)s2!).Split('|') is var p && p[0] == "1" && p[1] == "-900.00" && p[2] == "0.00" && p[3] == "carried"
+                 ? null : $"got {s2}; wanted one line of -900.00 taking the invoice to nil, with the rest carried");
+
+        Step("what is left of the credit is still owed to the client",
+            () => db.Query(@"SELECT c.Credit, Allowed = ISNULL((SELECT -SUM(l.Amount) FROM dbo.InvoiceLine l
+                                                                JOIN dbo.Invoice i ON i.InvoiceId = l.InvoiceId AND i.Status <> 'Void'
+                                                                WHERE l.EngagementId = c.EngagementId AND l.LineType = 'Adjustment' AND l.Amount < 0), 0)
+                             FROM dbo.Agreement a CROSS APPLY dbo.fn_HealthCheckCredit(a.AgreementId) c
+                             WHERE a.AgreementRef = @r AND c.Qualifies = 1", ("@r", reference)),
+            t => t.Rows.Count == 1 && (decimal)t.Rows[0]["Credit"] == 2150m && (decimal)t.Rows[0]["Allowed"] == 900m
+                 ? null : $"earned {t.Rows[0]["Credit"]}, allowed {t.Rows[0]["Allowed"]}");
+
+        // the rest of the credit carries to the next invoice, and only the rest - what was already
+        // allowed is not handed out a second time
+        Step("the rest carries to the next invoice, and only the rest", () =>
+        {
+            var eng = (int)db.Scalar("SELECT EngagementId FROM dbo.Agreement WHERE AgreementRef = @r", ("@r", reference))!;
+            var id = (int)db.Scalar(@"DECLARE @id int;
+                                      EXEC dbo.usp_Invoice_New @EngagementId = @e, @InvoiceDate = @d, @InvoiceId = @id OUTPUT;
+                                      SELECT @id;", ("@e", eng), ("@d", DateTime.Today))!;
+            var no = (string)db.Scalar("SELECT InvoiceNo FROM dbo.Invoice WHERE InvoiceId = @i", ("@i", id))!;
+            // 2,000 is more than the 1,250 still owed, so a second full 2,150 would be visible
+            db.Proc("dbo.usp_Invoice_AddLine", ("@InvoiceNo", no), ("@Description", "Monthly fee"),
+                    ("@Quantity", 1m), ("@UnitPrice", 2000m));
+            db.Proc("dbo.usp_Agreement_ApplyHealthCheckCredit", ("@Client", reference), ("@InvoiceNo", no));
+            return db.Scalar(@"SELECT ISNULL(-SUM(l.Amount), 0) FROM dbo.InvoiceLine l
+                               WHERE l.InvoiceId = @i AND l.LineType = 'Adjustment' AND l.Amount < 0", ("@i", id));
+        }, v => (decimal)v! == 1250.00m ? null : $"allowed {v} the second time, not the 1,250.00 still owed");
+
+        // "End the agreement inside the six months and the credit, together with the remaining
+        // months of the term, falls due on the final invoice."
+        Step("ending inside the term owes back the credit given plus the months not served",
+            () => db.Query(@"SELECT k.CreditGiven, k.MonthsUnserved, k.RemainingTerm, k.Clawback
+                             FROM dbo.Agreement a
+                             CROSS APPLY dbo.fn_HealthCheckClawback(a.AgreementId, CAST(@when AS date)) k
+                             WHERE a.AgreementRef = @r", ("@r", reference), ("@when", DateTime.Today)),
+            t => t.Rows.Count == 1 && (decimal)t.Rows[0]["CreditGiven"] == 2150m
+                 && (int)t.Rows[0]["MonthsUnserved"] > 0
+                 && (decimal)t.Rows[0]["Clawback"] == 2150m + (decimal)t.Rows[0]["RemainingTerm"]
+                 ? null : $"given {t.Rows[0]["CreditGiven"]}, {t.Rows[0]["MonthsUnserved"]} month(s) unserved, clawback {t.Rows[0]["Clawback"]}");
+
+        Step("and nothing is owed back once the term has been served",
+            () => db.Query(@"SELECT k.Clawback, k.MonthsUnserved FROM dbo.Agreement a
+                             CROSS APPLY dbo.fn_HealthCheckClawback(a.AgreementId, DATEADD(month, 24, a.StartDate)) k
+                             WHERE a.AgreementRef = @r", ("@r", reference)),
+            t => (decimal)t.Rows[0]["Clawback"] == 0m && (int)t.Rows[0]["MonthsUnserved"] == 0
+                 ? null : $"clawback {t.Rows[0]["Clawback"]} with {t.Rows[0]["MonthsUnserved"]} month(s) unserved");
 
         Console.WriteLine();
         Console.WriteLine(Detail.AgreementSummary(db, reference, includeInstances: true));

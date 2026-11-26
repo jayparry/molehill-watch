@@ -1029,6 +1029,8 @@ FROM (VALUES
     ('CombineInvoicesPerClient', N'0',                         N'0 = one invoice per engagement (recommended). 1 = one invoice per client per run.'),
     ('MinimumChargeMode',   N'Fair',                           N'Fair = included hours are used at actual time, and a ticket is charged so its total is at least the minimum. Strict = the 1 hour minimum per ticket also applies before included hours are deducted.'),
     ('EstimateThresholdMinutes', N'60',                        N'Flag tickets for an estimate once logged time passes this.'),
+    ('HealthCheckCreditDays', N'60',                      N'A health check done within this many days before an agreement starts earns its fee back as credit.'),
+    ('HealthCheckCreditTermMonths', N'6',                  N'The minimum term the health-check credit is conditional on. End inside it and the credit falls due again.'),
     ('ReportGraceDays',     N'2',                              N'Days after the week ends (Sunday) before a missing weekly report is flagged.'),
     ('ReviewReminderDays',  N'21',                             N'Days before the end of the initial term to flag the review.'),
     ('AlertEmailProfile',   N'',                               N'Database Mail profile for the daily dashboard e-mail (not available on Express).'),
@@ -1249,6 +1251,24 @@ GO
 
 -- consultancy billing periods: fixed-length runs of days from the engagement's start
 -- date (a fortnight by default). Work dated before the start belongs to the first one.
+-- The window a health check has to be inside, and the term the credit is conditional on. Both are
+-- the house's to change, like every other figure, so they are settings rather than constants.
+CREATE OR ALTER FUNCTION dbo.fn_HealthCheckCreditDays ()
+RETURNS int
+AS
+BEGIN
+    RETURN ISNULL(NULLIF(TRY_CONVERT(int, dbo.fn_Setting('HealthCheckCreditDays')), 0), 60);
+END
+GO
+
+CREATE OR ALTER FUNCTION dbo.fn_HealthCheckCreditTerm ()
+RETURNS int
+AS
+BEGIN
+    RETURN ISNULL(NULLIF(TRY_CONVERT(int, dbo.fn_Setting('HealthCheckCreditTermMonths')), 0), 6);
+END
+GO
+
 CREATE OR ALTER FUNCTION dbo.fn_ConsultancyBillingDays ()
 RETURNS int
 AS
@@ -3042,6 +3062,225 @@ BEGIN
     WHERE (@ClientId IS NULL OR q.ClientId = @ClientId)
       AND (@OpenOnly = 0 OR q.Status IN ('Draft', 'Sent'))
     ORDER BY q.CreatedAt DESC;
+END
+GO
+
+/*=============================================================================
+  THE HEALTH-CHECK CREDIT
+
+  Page 1 of the price sheet promises: take out an agreement within 60 days of a health
+  check, covering the same instances, on a six-month minimum term, and the whole fee is
+  credited against the Molehill Watch invoices. Cover only some of them and the credit is
+  reduced in proportion. Only instances the health check covered earn credit. End the
+  agreement inside the six months and the credit, with the remaining months of the term,
+  falls due on the final invoice.
+
+  None of that could be worked out before 2.8.0, and not for want of a procedure: a health
+  check recorded how MANY instances it priced and never which ones, so "covering the same
+  instances" compared an integer with a set of rows and could not be answered. Now that a
+  piece of work records the instances it looked at, the whole rule falls out.
+=============================================================================*/
+
+-- Which instances a piece of work examined. For a health check this is what earns the credit.
+CREATE OR ALTER PROCEDURE dbo.usp_Engagement_CoverInstance
+    @Engagement   nvarchar(200),
+    @InstanceName nvarchar(128) = NULL,     -- one server
+    @All          bit           = 0         -- or every server the client currently has
+AS
+BEGIN
+    SET NOCOUNT, XACT_ABORT ON;
+    DECLARE @EngId int = dbo.fn_EngagementId(@Engagement);
+    IF @EngId IS NULL BEGIN RAISERROR(N'Engagement "%s" not found.', 16, 1, @Engagement); RETURN; END
+    DECLARE @ClientId int = (SELECT ClientId FROM dbo.Engagement WHERE EngagementId = @EngId);
+
+    IF @All = 0 AND @InstanceName IS NULL
+    BEGIN RAISERROR(N'Give @InstanceName, or @All = 1 for every server this client has.', 16, 1); RETURN; END
+
+    INSERT dbo.EngagementInstance (EngagementId, InstanceId)
+    SELECT @EngId, i.InstanceId
+    FROM dbo.Instance i
+    WHERE i.ClientId = @ClientId
+      AND (@All = 1 OR i.InstanceName = @InstanceName)
+      AND NOT EXISTS (SELECT 1 FROM dbo.EngagementInstance ei
+                      WHERE ei.EngagementId = @EngId AND ei.InstanceId = i.InstanceId);
+    IF @@ROWCOUNT = 0 AND @All = 0
+    BEGIN RAISERROR(N'This client has no server called "%s" (or it is already on this work).', 16, 1, @InstanceName); RETURN; END
+
+    -- a health check is sold by the server, so the count it is priced on comes from this
+    DECLARE @n int = (SELECT COUNT(*) FROM dbo.EngagementInstance WHERE EngagementId = @EngId);
+    IF (SELECT BillingMode FROM dbo.Engagement WHERE EngagementId = @EngId) = 'PerInstance'
+    BEGIN
+        UPDATE dbo.Engagement SET UnitCount = @n WHERE EngagementId = @EngId;
+        PRINT N'Priced on ' + CONVERT(nvarchar(10), @n) + N' instance(s), taken from the ones recorded here rather than typed in.';
+    END
+
+    SELECT e.EngagementRef, i.InstanceName
+    FROM dbo.EngagementInstance ei
+    JOIN dbo.Engagement e ON e.EngagementId = ei.EngagementId
+    JOIN dbo.Instance i ON i.InstanceId = ei.InstanceId
+    WHERE ei.EngagementId = @EngId ORDER BY i.InstanceName;
+END
+GO
+
+-- What a health check earns against an agreement, and why.
+--
+-- A health check here means per-instance consultancy work that recorded which instances it
+-- looked at - which is how the price sheet sells one, and the only shape the credit can be
+-- computed for. The proportion is by instance, not by money: only the servers the check
+-- covered AND the agreement covers earn anything.
+CREATE OR ALTER FUNCTION dbo.fn_HealthCheckCredit (@AgreementId int)
+RETURNS TABLE
+AS
+RETURN
+    WITH ag AS (
+        SELECT a.AgreementId, a.ClientId, a.StartDate, a.EndDate, a.InitialTermMonths
+        FROM dbo.Agreement a WHERE a.AgreementId = @AgreementId),
+    checks AS (
+        SELECT e.EngagementId, e.EngagementRef, e.Name, e.UnitTotal,
+               DoneOn = ISNULL(e.CompletedOn, ISNULL(e.EndDate, e.StartDate)),
+               ag.AgreementId, ag.StartDate AS AgreementStart, ag.InitialTermMonths
+        FROM ag
+        JOIN dbo.Engagement e ON e.ClientId = ag.ClientId
+        WHERE e.EngagementType = 'Consultancy' AND e.BillingMode = 'PerInstance'
+          AND e.Status <> 'Cancelled' AND e.UnitTotal > 0
+          AND EXISTS (SELECT 1 FROM dbo.EngagementInstance ei WHERE ei.EngagementId = e.EngagementId)),
+    counted AS (
+        SELECT c.*,
+               Checked = (SELECT COUNT(*) FROM dbo.EngagementInstance ei WHERE ei.EngagementId = c.EngagementId),
+               -- the agreement has to cover it AT ITS START: cover added later was not what was quoted
+               Covered = (SELECT COUNT(*) FROM dbo.EngagementInstance ei
+                          JOIN dbo.AgreementInstance ai ON ai.InstanceId = ei.InstanceId
+                          WHERE ei.EngagementId = c.EngagementId AND ai.AgreementId = c.AgreementId
+                            AND ai.CoveredFrom <= c.AgreementStart
+                            AND (ai.CoveredTo IS NULL OR ai.CoveredTo >= c.AgreementStart)),
+               WithinDays = DATEDIFF(day, ISNULL(c.DoneOn, c.AgreementStart), c.AgreementStart)
+        FROM checks c)
+    SELECT EngagementId, EngagementRef, Name, DoneOn, Fee = UnitTotal, Checked, Covered, WithinDays,
+           TermMonths = InitialTermMonths,
+           Credit = CAST(CASE WHEN Checked = 0 OR Covered = 0 THEN 0
+                              ELSE ROUND(UnitTotal * (Covered * 1.0 / Checked), 2) END AS decimal(10,2)),
+           Qualifies = CASE WHEN Covered = 0 THEN 0
+                            WHEN WithinDays < 0 THEN 0                                    -- the check came after the agreement started
+                            WHEN WithinDays > dbo.fn_HealthCheckCreditDays() THEN 0       -- too long ago
+                            WHEN InitialTermMonths < dbo.fn_HealthCheckCreditTerm() THEN 0 -- the term the credit is conditional on
+                            ELSE 1 END,
+           Why = CASE WHEN Covered = 0 THEN N'The agreement covers none of the instances the check looked at.'
+                      WHEN WithinDays < 0 THEN N'The check was done after the agreement started.'
+                      WHEN WithinDays > dbo.fn_HealthCheckCreditDays()
+                           THEN N'The check was ' + CONVERT(nvarchar(10), WithinDays) + N' days before the agreement started, past the '
+                                + CONVERT(nvarchar(10), dbo.fn_HealthCheckCreditDays()) + N'-day window.'
+                      WHEN InitialTermMonths < dbo.fn_HealthCheckCreditTerm()
+                           THEN N'The credit needs a ' + CONVERT(nvarchar(10), dbo.fn_HealthCheckCreditTerm())
+                                + N'-month minimum term; this agreement is on ' + CONVERT(nvarchar(10), InitialTermMonths) + N'.'
+                      WHEN Covered < Checked
+                           THEN N'Covers ' + CONVERT(nvarchar(10), Covered) + N' of the ' + CONVERT(nvarchar(10), Checked)
+                                + N' instances checked, so the credit is reduced in proportion.'
+                      ELSE N'Covers every instance the check looked at, so the whole fee is credited.' END
+    FROM counted;
+GO
+
+-- What is still owed back if the agreement ends inside the term the credit was conditional on:
+-- the credit already given, plus the months of the minimum term that were not served.
+CREATE OR ALTER FUNCTION dbo.fn_HealthCheckClawback (@AgreementId int, @EndDate date)
+RETURNS TABLE
+AS
+RETURN
+    WITH given AS (
+        -- credit already allowed, found by the lines that allowed it
+        SELECT CreditGiven = ISNULL(-SUM(l.Amount), 0)
+        FROM dbo.InvoiceLine l
+        JOIN dbo.Invoice i ON i.InvoiceId = l.InvoiceId AND i.Status <> 'Void'
+        WHERE l.LineType = 'Adjustment' AND l.Amount < 0
+          AND l.EngagementId IN (SELECT EngagementId FROM dbo.fn_HealthCheckCredit(@AgreementId))),
+    term AS (
+        SELECT a.StartDate, a.InitialTermMonths,
+               TermEnds = DATEADD(month, a.InitialTermMonths, a.StartDate),
+               MonthlyFee = ISNULL((SELECT SUM(f.MonthlyFee) FROM dbo.fn_AgreementFees(a.AgreementId, @EndDate) f), 0)
+        FROM dbo.Agreement a WHERE a.AgreementId = @AgreementId)
+    SELECT g.CreditGiven,
+           t.TermEnds,
+           MonthsUnserved = CASE WHEN @EndDate >= t.TermEnds THEN 0
+                                 ELSE DATEDIFF(month, @EndDate, t.TermEnds) END,
+           RemainingTerm = CAST(CASE WHEN @EndDate >= t.TermEnds THEN 0
+                                     ELSE DATEDIFF(month, @EndDate, t.TermEnds) * t.MonthlyFee END AS decimal(10,2)),
+           Clawback = CAST(CASE WHEN @EndDate >= t.TermEnds THEN 0
+                                ELSE g.CreditGiven + DATEDIFF(month, @EndDate, t.TermEnds) * t.MonthlyFee END AS decimal(10,2))
+    FROM given g CROSS JOIN term t;
+GO
+
+-- Show what a health check earns against an agreement, and whether it has been allowed yet.
+CREATE OR ALTER PROCEDURE dbo.usp_Agreement_HealthCheckCredit
+    @Client nvarchar(200)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @AgreementId int = dbo.fn_AgreementId(@Client);
+    IF @AgreementId IS NULL BEGIN RAISERROR(N'Agreement or client "%s" not found.', 16, 1, @Client); RETURN; END
+
+    SELECT c.EngagementRef, c.Name, HealthCheckDone = c.DoneOn, c.Fee,
+           InstancesChecked = c.Checked, AlsoCovered = c.Covered, c.Credit,
+           Qualifies = CASE WHEN c.Qualifies = 1 THEN 'Yes' ELSE 'No' END,
+           AlreadyAllowed = ISNULL((SELECT -SUM(l.Amount) FROM dbo.InvoiceLine l
+                                    JOIN dbo.Invoice i ON i.InvoiceId = l.InvoiceId AND i.Status <> 'Void'
+                                    WHERE l.EngagementId = c.EngagementId AND l.LineType = 'Adjustment' AND l.Amount < 0), 0),
+           c.Why
+    FROM dbo.fn_HealthCheckCredit(@AgreementId) c
+    ORDER BY c.DoneOn DESC;
+END
+GO
+
+-- Allow the credit against a draft invoice. One line per health check, never more than the credit
+-- earned and never more than the invoice is for, so it can be spread across invoices the way the
+-- price sheet describes.
+CREATE OR ALTER PROCEDURE dbo.usp_Agreement_ApplyHealthCheckCredit
+    @Client    nvarchar(200),
+    @InvoiceNo varchar(30)
+AS
+BEGIN
+    SET NOCOUNT, XACT_ABORT ON;
+    DECLARE @AgreementId int = dbo.fn_AgreementId(@Client);
+    IF @AgreementId IS NULL BEGIN RAISERROR(N'Agreement or client "%s" not found.', 16, 1, @Client); RETURN; END
+    DECLARE @InvoiceId int, @Status varchar(10);
+    SELECT @InvoiceId = InvoiceId, @Status = Status FROM dbo.Invoice WHERE InvoiceNo = @InvoiceNo;
+    IF @InvoiceId IS NULL BEGIN RAISERROR(N'Invoice %s not found.', 16, 1, @InvoiceNo); RETURN; END
+    IF @Status <> 'Draft'
+    BEGIN RAISERROR(N'%s is %s, not a draft. A credit can only be put on a draft invoice.', 16, 1, @InvoiceNo, @Status); RETURN; END
+
+    DECLARE @Left decimal(10,2) = (SELECT ISNULL(SUM(Amount), 0) FROM dbo.InvoiceLine WHERE InvoiceId = @InvoiceId);
+    IF @Left <= 0 BEGIN PRINT N'Nothing on this invoice to credit against.'; RETURN; END
+
+    DECLARE @EngId int, @Ref varchar(30), @Earned decimal(10,2), @Allowed decimal(10,2), @Give decimal(10,2);
+    DECLARE hc CURSOR LOCAL FAST_FORWARD FOR
+        SELECT c.EngagementId, c.EngagementRef, c.Credit,
+               ISNULL((SELECT -SUM(l.Amount) FROM dbo.InvoiceLine l
+                       JOIN dbo.Invoice i ON i.InvoiceId = l.InvoiceId AND i.Status <> 'Void'
+                       WHERE l.EngagementId = c.EngagementId AND l.LineType = 'Adjustment' AND l.Amount < 0), 0)
+        FROM dbo.fn_HealthCheckCredit(@AgreementId) c
+        WHERE c.Qualifies = 1 AND c.Credit > 0
+        ORDER BY c.DoneOn;
+    OPEN hc;
+    FETCH NEXT FROM hc INTO @EngId, @Ref, @Earned, @Allowed;
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        SET @Give = CASE WHEN @Earned - @Allowed < @Left THEN @Earned - @Allowed ELSE @Left END;
+        IF @Give > 0
+        BEGIN
+            INSERT dbo.InvoiceLine (InvoiceId, LineType, EngagementId, Description, Quantity, UnitPrice, Amount)
+            VALUES (@InvoiceId, 'Adjustment', @EngId,
+                    N'Health check credit (' + @Ref + N')'
+                    + CASE WHEN @Earned - @Allowed > @Left THEN N', part - ' + CONVERT(nvarchar(20), CONVERT(money, @Earned - @Allowed - @Give))
+                                                                 + N' carried to the next invoice' ELSE N'' END,
+                    1, -@Give, -@Give);
+            SET @Left = @Left - @Give;
+        END
+        FETCH NEXT FROM hc INTO @EngId, @Ref, @Earned, @Allowed;
+    END
+    CLOSE hc; DEALLOCATE hc;
+
+    EXEC dbo.usp_Invoice_Recalculate @InvoiceId = @InvoiceId;
+    SELECT l.Description, l.Amount FROM dbo.InvoiceLine l
+    WHERE l.InvoiceId = @InvoiceId AND l.LineType = 'Adjustment' AND l.Amount < 0;
+    PRINT N'Credit applied. End the agreement inside the minimum term and it falls due again: see usp_Agreement_HealthCheckCredit and fn_HealthCheckClawback.';
 END
 GO
 
