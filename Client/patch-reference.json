@@ -1,5 +1,5 @@
 {
-  "Downloaded": "2026-11-26T12:51:25",
+  "Downloaded": "2026-11-26T13:16:17",
   "Rows": [
     {
       "Product": "SQL Server",
@@ -6989,29 +6989,15 @@
     },
     {
       "Product": "Windows Server",
-      "ProductName": "Windows Server 2022",
+      "ProductName": "Windows Server 2016",
       "Major": 10,
       "Minor": 0,
-      "BuildNumber": 20348,
-      "Revision": 5870,
+      "BuildNumber": 14393,
+      "Revision": 9688,
       "ServicePack": null,
       "UpdateName": "Security Update",
       "CuNumber": null,
-      "KB": "5131090",
-      "ReleaseDate": "2026-11-10",
-      "Source": "2026-Nov"
-    },
-    {
-      "Product": "Windows Server",
-      "ProductName": "Windows Server 2025",
-      "Major": 10,
-      "Minor": 0,
-      "BuildNumber": 26100,
-      "Revision": 33822,
-      "ServicePack": null,
-      "UpdateName": "Security Update",
-      "CuNumber": null,
-      "KB": "5131080",
+      "KB": "5131291",
       "ReleaseDate": "2026-11-10",
       "Source": "2026-Nov"
     },
@@ -7031,20 +7017,6 @@
     },
     {
       "Product": "Windows Server",
-      "ProductName": "Windows Server 2016",
-      "Major": 10,
-      "Minor": 0,
-      "BuildNumber": 14393,
-      "Revision": 9688,
-      "ServicePack": null,
-      "UpdateName": "Security Update",
-      "CuNumber": null,
-      "KB": "5131291",
-      "ReleaseDate": "2026-11-10",
-      "Source": "2026-Nov"
-    },
-    {
-      "Product": "Windows Server",
       "ProductName": "Windows Server 2022",
       "Major": 10,
       "Minor": 0,
@@ -7054,8 +7026,8 @@
       "UpdateName": "Security Update",
       "CuNumber": null,
       "KB": "5131090",
-      "ReleaseDate": "2026-10-13",
-      "Source": "2026-Oct"
+      "ReleaseDate": "2026-11-10",
+      "Source": "2026-Nov"
     },
     {
       "Product": "Windows Server",
@@ -7068,8 +7040,8 @@
       "UpdateName": "Security Update",
       "CuNumber": null,
       "KB": "5131080",
-      "ReleaseDate": "2026-10-13",
-      "Source": "2026-Oct"
+      "ReleaseDate": "2026-11-10",
+      "Source": "2026-Nov"
     },
     {
       "Product": "Windows Server",
@@ -7105,13 +7077,13 @@
       "Major": 10,
       "Minor": 0,
       "BuildNumber": 20348,
-      "Revision": 5622,
+      "Revision": 5870,
       "ServicePack": null,
       "UpdateName": "Security Update",
       "CuNumber": null,
-      "KB": "5122882",
-      "ReleaseDate": "2026-09-08",
-      "Source": "2026-Sep"
+      "KB": "5131090",
+      "ReleaseDate": "2026-10-13",
+      "Source": "2026-Oct"
     },
     {
       "Product": "Windows Server",
@@ -7119,11 +7091,25 @@
       "Major": 10,
       "Minor": 0,
       "BuildNumber": 26100,
-      "Revision": 33438,
+      "Revision": 33822,
       "ServicePack": null,
       "UpdateName": "Security Update",
       "CuNumber": null,
-      "KB": "5122871",
+      "KB": "5131080",
+      "ReleaseDate": "2026-10-13",
+      "Source": "2026-Oct"
+    },
+    {
+      "Product": "Windows Server",
+      "ProductName": "Windows Server 2016",
+      "Major": 10,
+      "Minor": 0,
+      "BuildNumber": 14393,
+      "Revision": 9512,
+      "ServicePack": null,
+      "UpdateName": "Security Update",
+      "CuNumber": null,
+      "KB": "5123099",
       "ReleaseDate": "2026-09-08",
       "Source": "2026-Sep"
     },
@@ -7143,15 +7129,29 @@
     },
     {
       "Product": "Windows Server",
-      "ProductName": "Windows Server 2016",
+      "ProductName": "Windows Server 2022",
       "Major": 10,
       "Minor": 0,
-      "BuildNumber": 14393,
-      "Revision": 9512,
+      "BuildNumber": 20348,
+      "Revision": 5622,
       "ServicePack": null,
       "UpdateName": "Security Update",
       "CuNumber": null,
-      "KB": "5123099",
+      "KB": "5122882",
+      "ReleaseDate": "2026-09-08",
+      "Source": "2026-Sep"
+    },
+    {
+      "Product": "Windows Server",
+      "ProductName": "Windows Server 2025",
+      "Major": 10,
+      "Minor": 0,
+      "BuildNumber": 26100,
+      "Revision": 33438,
+      "ServicePack": null,
+      "UpdateName": "Security Update",
+      "CuNumber": null,
+      "KB": "5122871",
       "ReleaseDate": "2026-09-08",
       "Source": "2026-Sep"
     }
